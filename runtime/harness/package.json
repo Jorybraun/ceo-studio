@@ -1,0 +1,14 @@
+{
+  "name": "pipe-harness",
+  "private": true,
+  "version": "0.1.0",
+  "description": "PIPE-OS CEO Harness developer tools and prototypes",
+  "scripts": {
+    "room-ui": "node bin/domain-room-ui",
+    "post-to-discord": "node bin/post-to-discord",
+    "reference": "node bin/reference-for-chat"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT"
+}

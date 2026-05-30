@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""
+harem-init — detect-or-scaffold a project's .harem/ workspace.
+
+A project is "managed" when it has a .harem/harem.json marker (like .git/).
+This script is idempotent:
+  - if <project>/.harem/harem.json already exists, it reports and exits 0
+  - otherwise it copies the workspace template (templates/workspace/) into
+    <project>/.harem/ and fills in identity tokens.
+
+The harness ENGINE (this code) is installed once; the WORKSPACE it creates is
+per-project data that lives inside the project.
+
+Usage:
+  bin/harem-init <project-path> [--name "Human Name"] [--slug custom-slug]
+  bin/harem-init <project-path> --json        # machine-readable result
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shutil
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+HARNESS_HOME = Path(__file__).resolve().parent.parent
+TEMPLATE_DIR = HARNESS_HOME / "templates" / "workspace"
+WORKSPACE_DIRNAME = ".harem"
+MARKER = "harem.json"
+
+# Files in the scaffolded workspace that contain identity tokens to replace.
+TOKEN_FILES = [
+    "harem.json",
+    "README.md",
+    "mgmt/stage-map.md",
+    "kanban/all.md",
+    "brain/rooms/main/agenda.md",
+    "brain/rooms/main/chat.log",
+]
+
+
+def slugify(name: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return (s[:64] or "project")
+
+
+def harness_version() -> str:
+    vf = HARNESS_HOME / "VERSION"
+    if vf.exists():
+        return vf.read_text().strip() or "0.0.0"
+    return "0.1.0"
+
+
+def fill_tokens(text: str, mapping: dict) -> str:
+    for token, value in mapping.items():
+        text = text.replace(token, value)
+    return text
+
+
+def scaffold(project: Path, name: str, slug: str) -> dict:
+    workspace = project / WORKSPACE_DIRNAME
+    marker = workspace / MARKER
+
+    if marker.exists():
+        try:
+            cfg = json.loads(marker.read_text())
+        except Exception:
+            cfg = {}
+        return {"status": "exists", "workspace": str(workspace),
+                "slug": cfg.get("project", {}).get("slug", slug), "created": False}
+
+    if not TEMPLATE_DIR.exists():
+        raise SystemExit(f"[harem-init] template not found: {TEMPLATE_DIR}")
+
+    shutil.copytree(TEMPLATE_DIR, workspace)
+
+    mapping = {
+        "__SLUG__": slug,
+        "__NAME__": name,
+        "__CREATED_AT__": datetime.now(timezone.utc).isoformat(),
+        "__HARNESS_VERSION__": harness_version(),
+    }
+    for rel in TOKEN_FILES:
+        f = workspace / rel
+        if f.exists():
+            f.write_text(fill_tokens(f.read_text(encoding="utf-8"), mapping), encoding="utf-8")
+
+    return {"status": "created", "workspace": str(workspace), "slug": slug, "created": True}
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Detect-or-scaffold a project's .harem/ workspace.")
+    ap.add_argument("project", help="Path to the project root")
+    ap.add_argument("--name", help="Human-readable project name (default: folder name)")
+    ap.add_argument("--slug", help="Machine slug (default: slugified name)")
+    ap.add_argument("--json", action="store_true", help="Print machine-readable JSON result")
+    args = ap.parse_args()
+
+    project = Path(args.project).expanduser().resolve()
+    if not project.is_dir():
+        raise SystemExit(f"[harem-init] not a directory: {project}")
+
+    name = args.name or project.name
+    slug = args.slug or slugify(name)
+
+    result = scaffold(project, name, slug)
+
+    if args.json:
+        print(json.dumps(result))
+    else:
+        if result["status"] == "exists":
+            print(f"[harem-init] already managed: {result['workspace']} (slug={result['slug']})")
+        else:
+            print(f"[harem-init] scaffolded {result['workspace']} (slug={result['slug']})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

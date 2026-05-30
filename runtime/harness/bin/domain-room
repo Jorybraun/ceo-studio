@@ -1,0 +1,442 @@
+#!/bin/bash
+#
+# domain-room
+# The simplest possible domain-scoped "chat room" for human + multiple agents.
+#
+# Uses tmux + plain text logs. No new daemons. Works with Hermes agents,
+# this Grok, Claude, or anything that can run shell commands or tmux send-keys.
+#
+# Usage examples:
+#   domain-room create discovery
+#   domain-room attach discovery
+#   domain-room post discovery "Grok (Planner)" "Question on the brief: should the graph be queryable by downstream agents?"
+#   domain-room agenda discovery show
+#   domain-room agenda discovery add "Debrief the micro-app brief and surface top 3 proposals"
+#
+# Every domain gets its own tmux session: pipe-<domain>-room
+# Inside it you get two windows:
+#   - room     → live tail of the shared chat (everyone posts here)
+#   - agenda   → current meeting items (simple markdown)
+#
+# This is deliberately minimal. It is the v0 "team meeting room" for briefs,
+# debriefs, clarification, and collaborative planning scoped to one domain.
+
+set -e
+
+# Rooms are project DATA: prefer HARNESS_WORKSPACE (<project>/.harem), then the
+# legacy HARNESS_ROOT override, then in-place (code dir). Engine helpers below
+# resolve via $0 independently, so code vs data stay separable.
+ROOMS_ROOT="${HARNESS_WORKSPACE:-${HARNESS_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}}/brain/rooms"
+SCRIPT_NAME=$(basename "$0")
+
+usage() {
+    echo "Usage: $SCRIPT_NAME <command> <domain-slug> [args]"
+    echo ""
+    echo "Commands:"
+    echo "  create <domain>           Create the domain room"
+    echo "  attach <domain>           Attach and watch the room"
+    echo "  chat <domain>             Easy chat mode — just type messages (recommended)"
+    echo "  post <domain> <speaker> <message>"
+    echo "  event <domain> ...        Structured control event stream (append/list/validate)"
+    echo "  agenda <domain> ..."
+    echo "  status <domain>"
+    echo "  who    <domain>           Show who is currently active in the room (tmux + recent speakers + web UI)"
+    echo "  watch  <domain> <speaker> Long-running watcher for live agents (polls room at intervals)"
+    echo "                           Supports --persona NAME, --interval, --on-message, --heartbeat"
+    echo "  cleanup <domain>         Kill stray herder-chat / watcher / agent tmux sessions for this domain (use with care)"
+    echo "  compact <domain>         Trim old chat.log history (keeps last N lines + backup)"
+    echo ""
+    echo "Easiest:"
+    echo "  $SCRIPT_NAME chat discovery"
+    echo ""
+    exit 1
+}
+
+if [[ $# -lt 2 ]]; then
+    usage
+fi
+
+CMD="$1"
+DOMAIN="$2"
+shift 2
+
+SESSION_NAME="pipe-${DOMAIN}-room"
+ROOM_DIR="$ROOMS_ROOT/$DOMAIN"
+CHAT_LOG="$ROOM_DIR/chat.log"
+AGENDA_FILE="$ROOM_DIR/agenda.md"
+
+# Portable append-with-lock (macOS has no `flock` CLI). Uses an atomic mkdir
+# mutex so concurrent writers (agents + watchers + humans) don't interleave or
+# corrupt the chat log. Best-effort: proceeds after a short timeout rather than
+# deadlocking.
+append_locked() {
+    local target="$1"; shift
+    local line="$*"
+    local lockdir="${target}.lockd"
+    local waited=0
+    while ! mkdir "$lockdir" 2>/dev/null; do
+        sleep 0.05
+        waited=$((waited + 1))
+        if [[ $waited -ge 100 ]]; then  # ~5s timeout
+            break
+        fi
+    done
+    printf '%s\n' "$line" >> "$target"
+    rmdir "$lockdir" 2>/dev/null || true
+}
+
+ensure_room() {
+    mkdir -p "$ROOM_DIR"
+
+    if [[ ! -f "$CHAT_LOG" ]]; then
+        echo "# ${DOMAIN} Team Room - Chat Log" > "$CHAT_LOG"
+        echo "Room created: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$CHAT_LOG"
+        echo "" >> "$CHAT_LOG"
+    fi
+
+    if [[ ! -f "$AGENDA_FILE" ]]; then
+        echo "# ${DOMAIN} - Current Agenda / Focus" > "$AGENDA_FILE"
+        echo "" >> "$AGENDA_FILE"
+        echo "Last updated: $(date)" >> "$AGENDA_FILE"
+        echo "" >> "$AGENDA_FILE"
+        echo "- [ ] (Add items via: domain-room agenda ${DOMAIN} add \"...\")" >> "$AGENDA_FILE"
+    fi
+}
+
+create_room() {
+    ensure_room
+
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        echo "Room already exists: $SESSION_NAME"
+        return 0
+    fi
+
+    # Create the session with a "room" window that tails the live chat
+    tmux new-session -d -s "$SESSION_NAME" -n room \
+        "tail -f '$CHAT_LOG' | cat -v"
+
+    # Add an agenda window
+    tmux new-window -t "$SESSION_NAME" -n agenda \
+        "nvim '$AGENDA_FILE' || vim '$AGENDA_FILE' || less '$AGENDA_FILE'"
+
+    # Add a notes / scratch window
+    tmux new-window -t "$SESSION_NAME" -n scratch \
+        "echo 'Private scratch space for anyone in the room. This window is not logged.'; exec bash"
+
+    echo "Created domain room: $SESSION_NAME"
+    echo "  - 'room' window: live shared chat (tail of chat.log)"
+    echo "  - 'agenda' window: current focus items"
+    echo "  - 'scratch' window: temporary space"
+    echo ""
+    echo "Humans: tmux attach -t $SESSION_NAME"
+    echo "Agents: use '$SCRIPT_NAME post $DOMAIN \"Your Name\" \"message\"'"
+}
+
+post_message() {
+    if [[ $# -lt 2 ]]; then
+        echo "Usage: $SCRIPT_NAME post <domain> <speaker> <message>"
+        exit 1
+    fi
+
+    SPEAKER="$1"
+    shift
+    MESSAGE="$*"
+
+    ensure_room
+
+    TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    append_locked "$CHAT_LOG" "[$TIMESTAMP] $SPEAKER: $MESSAGE"
+
+    echo "Posted to $DOMAIN room as $SPEAKER"
+}
+
+agenda_cmd() {
+    ensure_room
+
+    SUBCMD="${1:-show}"
+    shift || true
+
+    case "$SUBCMD" in
+        show)
+            cat "$AGENDA_FILE"
+            ;;
+        add)
+            if [[ -z "$*" ]]; then
+                echo "Usage: domain-room agenda $DOMAIN add \"item text\""
+                exit 1
+            fi
+            echo "- [ ] $*" >> "$AGENDA_FILE"
+            echo "Added to agenda."
+            ;;
+        clear)
+            echo "# ${DOMAIN} - Current Agenda / Focus" > "$AGENDA_FILE"
+            echo "" >> "$AGENDA_FILE"
+            echo "Cleared: $(date)" >> "$AGENDA_FILE"
+            echo "Agenda cleared."
+            ;;
+        edit)
+            ${EDITOR:-nvim} "$AGENDA_FILE" || vim "$AGENDA_FILE" || nano "$AGENDA_FILE"
+            ;;
+        *)
+            echo "Unknown agenda subcommand: $SUBCMD (use: show|add|clear|edit)"
+            exit 1
+            ;;
+    esac
+}
+
+status() {
+    ensure_room
+    echo "Domain: $DOMAIN"
+    echo "Room dir: $ROOM_DIR"
+    echo "Tmux session: $SESSION_NAME"
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        echo "Status: RUNNING"
+        tmux list-windows -t "$SESSION_NAME"
+    else
+        echo "Status: NOT RUNNING (use 'create' to start)"
+    fi
+}
+
+who() {
+    ensure_room
+    echo "=== Who is in the $DOMAIN room ==="
+    echo "Room dir: $ROOM_DIR"
+    echo ""
+
+    echo "Tmux session: $SESSION_NAME"
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        echo "  Status: RUNNING"
+        echo "  Active attached clients:"
+        clients=$(tmux list-clients -t "$SESSION_NAME" 2>/dev/null || true)
+        if [[ -n "$clients" ]]; then
+            echo "$clients" | sed 's/^/    /'
+        else
+            echo "    (none currently attached via tmux)"
+        fi
+    else
+        echo "  Status: NOT RUNNING"
+    fi
+    echo ""
+
+    echo "Web UI:"
+    if pgrep -f "domain-room-ui $DOMAIN" >/dev/null 2>&1; then
+        echo "  Running (open http://localhost:8765 in a browser)"
+    else
+        echo "  Not detected on this machine"
+    fi
+    echo ""
+
+    echo "Recent activity (unique speakers in last 30 chat lines):"
+    if [[ -f "$CHAT_LOG" ]]; then
+        speakers=$(tail -30 "$CHAT_LOG" | grep -E '^\[' | sed -E 's/.*\] ([^:]+):.*/\1/' | sort | uniq -c | sort -rn | head -12)
+        if [[ -n "$speakers" ]]; then
+            echo "$speakers" | sed 's/^/  /'
+        else
+            echo "  (no recent speakers)"
+        fi
+    else
+        echo "  (no chat log yet)"
+    fi
+    echo ""
+
+    # Show personas from presence files if any
+    presence_dir="$ROOM_DIR/presence"
+    if [[ -d "$presence_dir" ]]; then
+        echo "Active personas (from recent watchers):"
+        while IFS= read -r -d '' f; do
+            speaker=$(basename "$f" .persona)
+            persona=$(cat "$f")
+            echo "  $speaker → $persona"
+        done < <(find "$presence_dir" -maxdepth 1 -type f -name '*.persona' -print0)
+    fi
+
+    echo ""
+    echo "Note: This shows recent speakers + live attachments. Use --persona when starting watchers for better visibility."
+}
+
+cleanup() {
+    echo "=== Cleaning up stray sessions for domain: $DOMAIN ==="
+    echo "This will target tmux sessions and processes related to herder-chat / watchers for this domain."
+    echo "Use with care — it is destructive."
+    echo ""
+
+    echo "Candidate tmux sessions:"
+    tmux list-sessions 2>/dev/null | grep -iE "pipe-.*(${DOMAIN}|herder|chat|watcher)" | sed 's/^/  /' || echo "  (none found)"
+
+    read -r -p "Proceed with killing matching tmux sessions? [y/N] " confirm
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        tmux list-sessions 2>/dev/null | grep -iE "pipe-.*(${DOMAIN}|herder|chat|watcher)" | while read -r line; do
+            session=$(echo "$line" | cut -d: -f1 | xargs)
+            [[ -n "$session" ]] && echo "Killing tmux: $session" && tmux kill-session -t "$session" 2>/dev/null || true
+        done
+    else
+        echo "Skipped tmux session cleanup."
+    fi
+
+    echo ""
+    echo "Stray herder-chat python processes mentioning $DOMAIN:"
+    pids=$(pgrep -f "herder-chat.*${DOMAIN}" || true)
+    if [[ -n "$pids" ]]; then
+        echo "$pids"
+        read -r -p "Kill these processes? [y/N] " confirm2
+        if [[ "$confirm2" == "y" || "$confirm2" == "Y" ]]; then
+            echo "$pids" | xargs kill -9 2>/dev/null || true
+            echo "Killed stray herder-chat processes."
+        fi
+    else
+        echo "  (none found)"
+    fi
+
+    echo ""
+    echo "Cleanup done. Run 'domain-room who $DOMAIN' to check current state."
+}
+
+compact() {
+    ensure_room
+    echo "=== Compacting chat.log for $DOMAIN ==="
+
+    if [[ ! -f "$CHAT_LOG" ]]; then
+        echo "No chat.log yet."
+        return 0
+    fi
+
+    lines=$(wc -l < "$CHAT_LOG")
+    echo "Current lines: $lines"
+
+    read -r -p "Keep last how many lines? (default 5000) " keep
+    keep=${keep:-5000}
+
+    if [[ "$lines" -le "$keep" ]]; then
+        echo "Log is already under $keep lines. Nothing to do."
+        return 0
+    fi
+
+    backup="$CHAT_LOG.$(date +%Y%m%d-%H%M%S).bak"
+    echo "Backing up to $backup ..."
+    cp "$CHAT_LOG" "$backup"
+
+    echo "Trimming to last $keep lines..."
+    tail -n "$keep" "$CHAT_LOG" > "${CHAT_LOG}.tmp" && mv "${CHAT_LOG}.tmp" "$CHAT_LOG"
+
+    new_lines=$(wc -l < "$CHAT_LOG")
+    echo "Done. Now $new_lines lines. Old backup at: $backup"
+}
+
+watch() {
+    if [[ $# -lt 1 ]]; then
+        echo "Usage: $SCRIPT_NAME watch <domain> <speaker> [options]"
+        echo ""
+        echo "Options:"
+        echo "  --interval N           Seconds between room checks (default 10)"
+        echo "  --persona NAME         Load a persona (e.g. DEEP_RESEARCHER, ceo-orchestrator, SYSTEMS_ARCHITECT)"
+        echo "  --on-message SCRIPT    Call this script for every new room message"
+        echo "  --heartbeat            Post periodic heartbeats so 'who' shows you as alive"
+        echo ""
+        echo "This launches a long-running watcher (Python) that polls the room every N seconds."
+        echo "Run this inside the agent's dedicated tmux session (see agent registry tmuxSession)."
+        echo "Example for a live Grok agent running as Deep Researcher:"
+        echo "  ./bin/domain-room watch discovery \"Grok\" --interval 15 --persona DEEP_RESEARCHER --heartbeat"
+        exit 1
+    fi
+
+    ensure_room
+
+    WATCHER="$(cd "$(dirname "$0")" && pwd)/domain-room-watch"
+    if [[ ! -x "$WATCHER" ]]; then
+        echo "Error: $WATCHER not found or not executable."
+        echo "Run the creation step or place domain-room-watch next to this script."
+        exit 1
+    fi
+
+    # Pass remaining args through (speaker + options)
+    exec "$WATCHER" "$DOMAIN" "$@"
+}
+
+event_cmd() {
+    if [[ $# -lt 1 ]]; then
+        echo "Usage: $SCRIPT_NAME event <domain> <append|list|validate> [args]"
+        echo ""
+        echo "Examples:"
+        echo "  $SCRIPT_NAME event $DOMAIN append ACTIVATE_AGENT --actor Hermes --target deep-research --request-id req-123 --payload '{\"intent\":\"start research\"}'"
+        echo "  $SCRIPT_NAME event $DOMAIN list --limit 5"
+        echo "  $SCRIPT_NAME event $DOMAIN validate"
+        exit 1
+    fi
+
+    ensure_room
+    EVENT_HELPER="$(cd "$(dirname "$0")/.." && pwd)/lib/domain_room_events.py"
+    if [[ ! -f "$EVENT_HELPER" ]]; then
+        echo "Error: $EVENT_HELPER not found."
+        exit 1
+    fi
+
+    SUBCMD="$1"
+    shift
+    exec python3 "$EVENT_HELPER" "$SUBCMD" "$DOMAIN" "$@"
+}
+
+interactive_chat() {
+    ensure_room
+
+    echo "=== Chatting in $DOMAIN room as Human ==="
+    echo "Type your message and press Enter."
+    echo "Empty line or /quit to exit."
+    echo ""
+
+    while true; do
+        read -r -p "You: " input || break
+
+        if [[ -z "$input" || "$input" == "/quit" || "$input" == "/exit" ]]; then
+            echo "Exiting chat."
+            break
+        fi
+
+        TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        append_locked "$CHAT_LOG" "[$TIMESTAMP] Human: $input"
+        echo "Posted."
+    done
+}
+
+case "$CMD" in
+    create)
+        create_room
+        ;;
+    attach)
+        ensure_room
+        if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+            echo "Room does not exist yet. Creating..."
+            create_room
+        fi
+        tmux attach -t "$SESSION_NAME"
+        ;;
+    post)
+        post_message "$@"
+        ;;
+    event)
+        event_cmd "$@"
+        ;;
+    chat)
+        interactive_chat
+        ;;
+    agenda)
+        agenda_cmd "$@"
+        ;;
+    status)
+        status
+        ;;
+    who)
+        who
+        ;;
+    watch)
+        watch "$@"
+        ;;
+    cleanup)
+        cleanup
+        ;;
+    compact)
+        compact
+        ;;
+    *)
+        usage
+        ;;
+esac

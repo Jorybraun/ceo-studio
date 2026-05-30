@@ -1,0 +1,574 @@
+#!/usr/bin/env python3
+"""
+harem-orchestrator
+
+Long-running host / body for the autonomous Kanban Finisher agent.
+
+This process keeps a Kanban Finisher agent alive (loading the `kanban-finisher` persona + core skills).
+It does **not** make strategic decisions itself. Its job is to:
+- Feed the persona rich, regular observations (Kanban + stage-map + config + workflows + room activity)
+- Execute [ACTION] commands the persona outputs (delegation, Kanban updates, posts)
+- Provide monitoring and state persistence so the persona can run long-horizon autonomous work
+
+The autonomy and goal pursuit live in the agent (kanban-finisher persona + whatever brain is attached).
+
+Management model:
+- Python host mode (this script): The host manages the "body" (local harem CLI, kanban.md edits, herder rooms).
+  Recommended for overnight runs today because it has direct filesystem + tool access.
+- Hermes daemon/profile mode: Hermes manages the brain (the profile's execution, memory, scheduling, and reasoning loop).
+  The `kanban-finisher` persona + skills would run inside Hermes. Our Python host (or a future thin bridge)
+  acts as the actuator the Hermes brain commands via structured messages. Hermes does not automatically
+  know our local Harem substrate unless bridged.
+
+For true overnight autonomous Kanban driving with full validation and e2e progression, run this host
+in tmux or as a service. The persona drives; this host enables reliable action execution and observation.
+
+Run forever example:
+  tmux new -d -s harem-kanban-finisher 'harem-kanban-finisher'
+"""
+
+import argparse
+import sys
+import time
+import logging
+import json
+import os
+import signal
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from agents.herder_agent import HerderAgent
+from agents import agent_adapter
+from config import cost_limits
+from config import paths
+
+# Setup basic logging for overnight runs
+LOG_DIR = paths.logs_dir()
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_DIR / "kanban-finisher.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("kanban-finisher")
+
+HARNESS_ROOT = Path(__file__).resolve().parent.parent
+
+# Default Kanban/stage-map. Resolved via config/paths.py: legacy in-place
+# (context/discovery-team/mgmt/...) when no workspace, or <workspace>/kanban|mgmt
+# when HARNESS_WORKSPACE is set.
+DEFAULT_KANBAN = paths.kanban_path("discovery")
+DEFAULT_STAGE_MAP = paths.stage_map_path("discovery")
+
+# Simple persistent state for overnight resilience
+STATE_DIR = paths.orchestrator_state_dir()
+STATE_DIR.mkdir(parents=True, exist_ok=True)
+STATE_FILE = STATE_DIR / "focus.json"
+
+
+# Graceful-shutdown flag (set by SIGTERM/SIGINT handler)
+_SHUTDOWN = {"requested": False}
+
+
+def _request_shutdown(signum, frame):
+    _SHUTDOWN["requested"] = True
+    logger.info(f"Received signal {signum}; will shut down after current cycle.")
+
+
+def write_heartbeat():
+    try:
+        (STATE_DIR / "heartbeat").write_text(datetime.now().isoformat())
+    except Exception:
+        pass
+
+
+def tail_lines(path: Path, n: int = 60, block: int = 8192) -> list:
+    """Read the last n lines without loading the whole file (bounds memory)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            data = b""
+            pos = size
+            while pos > 0 and data.count(b"\n") <= n:
+                step = min(block, pos)
+                pos -= step
+                f.seek(pos)
+                data = f.read(step) + data
+            return data.decode("utf-8", errors="replace").splitlines()[-n:]
+    except Exception:
+        return []
+
+
+def _kanban_lock_path(kanban_path: Path) -> Path:
+    return kanban_path.with_suffix(kanban_path.suffix + ".lock")
+
+
+def load_state() -> dict:
+    if STATE_FILE.exists():
+        try:
+            state = json.loads(STATE_FILE.read_text())
+        except Exception:
+            state = {}
+    else:
+        state = {}
+    state.setdefault("current_focus", None)
+    state.setdefault("last_progress", None)
+    state.setdefault("active_delegated_agents", [])
+    state.setdefault("last_context_time", None)
+    # IDs of [ACTION] lines we've already executed — prevents re-spawning the
+    # same delegation every poll cycle (the original credit-burn bug).
+    state.setdefault("processed_actions", [])
+    return state
+
+
+def save_state(state: dict):
+    try:
+        STATE_FILE.write_text(json.dumps(state, indent=2, default=str))
+    except Exception as e:
+        logger.warning(f"Could not save state: {e}")
+
+
+def get_recent_room_activity(room: str, minutes: int = 30) -> str:
+    """Aggressively summarized recent activity to avoid context bloat."""
+    try:
+        chat_log = paths.room_log(room)
+        if not chat_log.exists():
+            return "(no chat.log yet)"
+
+        # Only look at the last N lines, then further truncate
+        lines = chat_log.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-50:]
+
+        recent = []
+        for line in lines:
+            # Skip lines that look like previous giant context dumps
+            if "=== stage-map.md" in line or "=== Active Workflow" in line or len(line) > 300:
+                continue
+            if any(str(m) in line for m in range(10)):
+                recent.append(line[:160])
+
+        # Return at most the last 5 short lines
+        summary = "\n".join(recent[-5:]) if recent else "(quiet recently)"
+        if len(summary) > 800:
+            summary = summary[-800:]
+        return summary
+    except Exception as e:
+        return f"(error reading room: {e})"
+
+def read_kanban(kanban_path: Path = DEFAULT_KANBAN):
+    if not kanban_path.exists():
+        return "No Kanban file found at expected location."
+    try:
+        content = kanban_path.read_text(encoding="utf-8")
+        lines = content.splitlines()
+
+        # Better extraction: focus on Triage and Ready sections
+        result = []
+        in_relevant_section = False
+        for line in lines:
+            if line.startswith("## "):
+                if "Triage" in line or "Ready for Execution" in line or "In Progress" in line:
+                    in_relevant_section = True
+                    result.append(line)
+                else:
+                    in_relevant_section = False
+            elif in_relevant_section:
+                result.append(line)
+        return "\n".join(result[:40])
+    except Exception as e:
+        return f"Error reading Kanban: {e}"
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--domain", default="discovery")
+    parser.add_argument("--room", default="main")
+    parser.add_argument("--poll", type=float, default=30.0, help="Seconds between Kanban scans")
+    parser.add_argument("--max-runtime-hours", type=float, default=24.0,
+                        help="Hard cap on total runtime before graceful exit (0 = unlimited)")
+    args = parser.parse_args()
+
+    # Graceful shutdown on SIGTERM/SIGINT so the loop is not killed mid-write.
+    signal.signal(signal.SIGTERM, _request_shutdown)
+    signal.signal(signal.SIGINT, _request_shutdown)
+
+    start_time = time.time()
+
+    print(f"[Kanban Finisher Orchestrator] Starting in {args.domain}:{args.room}")
+    print("[Kanban Finisher Orchestrator] I will periodically read the Kanban and drive work using the Harem.")
+    print("[Kanban Finisher Orchestrator] Press Ctrl-C to stop, or create the guardrail STOP sentinel "
+          "(`python3 config/cost_limits.py stop`) to halt all spawning immediately.")
+
+    try:
+        orchestrator = HerderAgent.from_registry("grok", room=args.domain)
+    except Exception:
+        orchestrator = HerderAgent.from_registry("swarm-facilitator", room=args.domain)
+
+    # Ensure we behave like the kanban-finisher
+    try:
+        orchestrator.load_persona("kanban-finisher")
+        orchestrator.load_skill("herder-swarm-control")
+        orchestrator.load_skill("herder-messaging")
+        print("[Kanban Finisher Orchestrator] Loaded kanban-finisher persona + core skills.")
+    except Exception as e:
+        print(f"[Kanban Finisher Orchestrator] Warning: Could not load full skills ({e}). Continuing with basic behavior.")
+
+    print("[Kanban Finisher Orchestrator] Ready. Scanning Kanban periodically...")
+
+    state = load_state()
+    logger.info(f"Loaded state: {state}")
+
+    while True:
+        try:
+            # --- Loop-exit guards (kill switch, graceful shutdown, max runtime) ---
+            if _SHUTDOWN["requested"]:
+                logger.info("Shutdown requested. Exiting main loop.")
+                break
+            if cost_limits.stop_requested():
+                logger.warning("Guardrail STOP sentinel present — halting (no spawning). "
+                               "Clear with `python3 config/cost_limits.py resume`.")
+                time.sleep(args.poll)
+                continue
+            if args.max_runtime_hours and (time.time() - start_time) > args.max_runtime_hours * 3600:
+                logger.info(f"Max runtime ({args.max_runtime_hours}h) reached. Exiting.")
+                break
+
+            write_heartbeat()
+
+            kanban_snapshot = read_kanban()
+            print(f"\n[{datetime.now().strftime('%H:%M')}] Kanban snapshot (abbreviated):")
+            print(kanban_snapshot[:1500] if len(kanban_snapshot) > 1500 else kanban_snapshot)
+
+            # Feed the kanban-finisher persona rich, current context so it can run its own autonomous loop.
+            # The persona (not this Python script) is the autonomous agent. This host's job is to give it
+            # good observations on a regular cadence and let the loaded brain + skills decide and act.
+            try:
+                from config.kanban import get_domain_kanban_config
+                stage_config = get_domain_kanban_config(args.domain)
+                config_summary = "\n".join(
+                    f"- {stage}: team={mapping.team}, workflow={mapping.workflow}, personas={mapping.default_personas}"
+                    for stage, mapping in stage_config.stages.items()
+                )
+            except Exception:
+                config_summary = "(Could not load structured config — falling back to stage-map.md)"
+
+            # Build a *lightweight* context packet.
+            # The autonomous agent should read the large static files (stage-map.md, workflows/*.md, persona)
+            # directly from disk. The host only posts small, high-signal deltas + current state.
+            # This prevents the chat.log from exploding with repeated multi-KB blocks every poll.
+            room_activity = ""
+            try:
+                room_activity = "\n=== Recent room activity (last ~15min, summarized) ===\n" + get_recent_room_activity(args.domain, 15) + "\n"
+            except Exception:
+                pass
+
+            active_agents_summary = ""
+            if state.get("active_delegated_agents"):
+                active_agents_summary = "\n=== Currently tracked delegated agents ===\n" + "\n".join(f"- {a}" for a in state["active_delegated_agents"][-6:]) + "\n"
+
+            # Much smaller packet. The persona/agent is expected to load the full docs itself.
+            context_packet = (
+                f"Current time: {datetime.now().isoformat()}\n"
+                f"Domain: {args.domain}\n\n"
+                f"=== Current Kanban Snapshot (focused) ===\n{kanban_snapshot}\n\n"
+                f"=== Stage Configuration (structured) ===\n{config_summary}\n"
+                f"{room_activity}\n"
+                f"{active_agents_summary}\n"
+                f"Instructions: Run your autonomous loop. Use the stage config + teams/workflows on disk. "
+                f"Output [ACTION] commands when you want the host to execute something (delegate, update Kanban, etc.). "
+                f"Take initiative."
+            )
+
+            # Only post if the Kanban snapshot or tracked agents actually changed (prevents spam)
+            current_hash = hash(kanban_snapshot + active_agents_summary)
+            last_hash = state.get("last_context_hash")
+            if current_hash != last_hash:
+                orchestrator.send_via_room(context_packet, speaker="Kanban Finisher Orchestrator (Context)")
+                state["last_context_hash"] = current_hash
+                print("[Kanban Finisher] Posted lightweight context update.")
+            else:
+                print("[Kanban Finisher] No material change — skipped spamming context to room.")
+
+            # Persist what we're currently focused on
+            if "Triage" in kanban_snapshot:
+                state["current_focus"] = "Triage work (see kanban)"
+                state["last_progress"] = datetime.now().isoformat()
+                save_state(state)
+
+            # Health heartbeat for long-running overnight operation
+            if int(time.time()) % 300 < 30:  # roughly every 5 minutes
+                logger.info("Kanban Finisher host healthy. State: " + str({k: state.get(k) for k in ["current_focus", "active_delegated_agents"]}))
+
+            # If the board has been static for a long time, give the persona a stronger nudge to act
+            last_progress = state.get("last_progress")
+            if last_progress:
+                try:
+                    last_dt = datetime.fromisoformat(last_progress)
+                    hours_idle = (datetime.now() - last_dt).total_seconds() / 3600
+                    if hours_idle > 4:
+                        nudge = "\n\n[SYSTEM NUDGE] The Kanban has had no recorded progress for several hours. As the autonomous Kanban Finisher, you should assess the current top item and take the next concrete step (delegate, review, validate, or move) using the stage configuration and workflows."
+                        context_packet += nudge
+                except Exception:
+                    pass
+
+            # === Execute autonomous actions requested by the Kanban Finisher persona ===
+            # The persona (running in its brain) can output [ACTION] lines in the room.
+            # This host parses recent lines and carries out safe actions.
+            # This is how the agent gains real e2e execution power.
+            try:
+                import hashlib
+                chat_log_path = paths.room_log(args.domain)
+                recent_lines = []
+                if chat_log_path.exists():
+                    # Bounded tail read so a huge chat.log can't blow up memory each cycle.
+                    lines = tail_lines(chat_log_path, 60)
+                    kanban_speaker = "Kanban Finisher Orchestrator"
+                    for line in lines:
+                        if kanban_speaker.lower() in line.lower() and "[ACTION]" in line:
+                            recent_lines.append(line)
+
+                processed = set(state.get("processed_actions", []))
+                spawns_this_cycle = 0
+
+                for line in recent_lines:
+                    action_part = line.split("[ACTION]", 1)[1].strip() if "[ACTION]" in line else ""
+                    if not action_part:
+                        continue
+
+                    # Deduplicate: never execute the same action line twice. This is
+                    # the core fix for the credit-burn bug (the same DELEGATE line used
+                    # to be re-run every poll cycle, spawning paid sessions forever).
+                    action_id = hashlib.sha1(action_part.encode("utf-8")).hexdigest()[:16]
+                    if action_id in processed:
+                        continue
+
+                    print(f"[Kanban Finisher Host] Detected autonomous action: {action_part}")
+
+                    if action_part.upper().startswith("DELEGATE"):
+                        import subprocess
+                        parts = action_part.split()[1:]  # everything after DELEGATE
+                        # Rough agent-name extraction for guardrail + tracking.
+                        candidate_names = [p for p in parts if not p.startswith("--")]
+                        target = candidate_names[0] if candidate_names else "delegated-agent"
+
+                        allowed, reason = cost_limits.can_spawn(
+                            target, spawns_this_cycle=spawns_this_cycle
+                        )
+                        if not allowed:
+                            logger.warning(f"REFUSED delegation '{action_part}': {reason}")
+                            orchestrator.send_via_room(
+                                f"[ACTION REFUSED by guardrail] {action_part} — {reason}",
+                                speaker="Kanban Finisher Orchestrator (Host)")
+                            # Mark processed so we don't retry-spam a blocked action.
+                            processed.add(action_id)
+                            continue
+
+                        cmd = [str(HARNESS_ROOT / "bin" / "harem"), "delegate"] + parts
+                        print(f"[Kanban Finisher Host] Executing delegation: {' '.join(cmd)}")
+                        subprocess.Popen(cmd)
+                        cost_limits.record_spawn(target)
+                        spawns_this_cycle += 1
+                        processed.add(action_id)
+                        orchestrator.send_via_room(f"[ACTION EXECUTED] {action_part}", speaker="Kanban Finisher Orchestrator (Host)")
+
+                        for p in candidate_names:
+                            state.setdefault("active_delegated_agents", []).append(p)
+                            state["active_delegated_agents"] = state["active_delegated_agents"][-10:]
+                        # Persist processed-action ids (bounded) so dedup survives restarts.
+                        state["processed_actions"] = (list(processed))[-500:]
+                        save_state(state)
+
+                    elif action_part.upper().startswith("DISPATCH"):
+                        # Provider-backed dispatch (Devin/echo/etc.) via the generic
+                        # adapter. The adapter enforces the cost guardrail + records
+                        # the spawn itself; we pass spawns_this_cycle for the per-cycle cap.
+                        import shlex
+                        try:
+                            toks = shlex.split(action_part)[1:]
+                        except Exception:
+                            toks = action_part.split()[1:]
+                        opts = {}
+                        i = 0
+                        while i < len(toks) - 1:
+                            if toks[i].startswith("--"):
+                                opts[toks[i][2:]] = toks[i + 1]
+                                i += 2
+                            else:
+                                i += 1
+                        prov = opts.get("provider", "devin")
+                        ag = opts.get("agent", "worker")
+                        task = opts.get("task", "")
+                        model = opts.get("model")
+                        if not task:
+                            orchestrator.send_via_room(
+                                f"[DISPATCH IGNORED] no --task in: {action_part}",
+                                speaker="Kanban Finisher Orchestrator (Host)")
+                            processed.add(action_id)
+                        else:
+                            res = agent_adapter.dispatch(
+                                prov, ag, args.domain, task,
+                                model=model, spawns_this_cycle=spawns_this_cycle)
+                            processed.add(action_id)
+                            if res.get("ok"):
+                                spawns_this_cycle += 1
+                            else:
+                                logger.warning(f"DISPATCH refused: {res.get('reason')}")
+                        state["processed_actions"] = (list(processed))[-500:]
+                        save_state(state)
+
+                    elif action_part.upper().startswith("UPDATE_KANBAN"):
+                        processed.add(action_id)
+                        state["processed_actions"] = (list(processed))[-500:]
+                        # Basic safe Kanban mutation support
+                        result = _execute_kanban_update(action_part, DEFAULT_KANBAN)
+                        orchestrator.send_via_room(
+                            f"[KANBAN UPDATE RESULT] {result}",
+                            speaker="Kanban Finisher Orchestrator (Host)"
+                        )
+
+                    elif action_part.upper().startswith("POST"):
+                        processed.add(action_id)
+                        msg = action_part.split("POST", 1)[1].strip().strip('"\'')
+                        orchestrator.send_via_room(msg, speaker="Kanban Finisher Orchestrator")
+
+                # Persist processed-action ids once per cycle (bounded) so dedup
+                # survives across cycles and restarts even for non-spawn actions.
+                state["processed_actions"] = (list(processed))[-500:]
+                save_state(state)
+
+            except Exception as e:
+                print(f"[Kanban Finisher Host] Action execution error: {e}")
+
+            time.sleep(args.poll)
+
+        except KeyboardInterrupt:
+            print("\n[Kanban Finisher Orchestrator] Shutting down.")
+            break
+        except Exception as e:
+            print(f"[Kanban Finisher Orchestrator] Error: {e}")
+            time.sleep(10)
+
+
+def _execute_kanban_update(action: str, kanban_path: Path) -> str:
+    """
+    Kanban mutation for the autonomous agent.
+    Supports:
+      [ACTION] UPDATE_KANBAN move "Item Name" from Triage to Ready
+      [ACTION] UPDATE_KANBAN add_note "Item Name" "Note text here"
+
+    The whole read-modify-write is wrapped in an exclusive file lock so
+    concurrent writers (other agents, watchers) cannot clobber the Kanban.
+    """
+    import fcntl
+    lock_path = _kanban_lock_path(kanban_path)
+    lock_file = None
+    try:
+        if not kanban_path.exists():
+            return "ERROR: Kanban file not found"
+
+        lock_file = open(lock_path, "w")
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+        content = kanban_path.read_text(encoding="utf-8")
+        lines = content.splitlines(keepends=True)
+
+        import re
+        item_match = re.search(r'"([^"]+)"', action)
+        if not item_match:
+            return "ERROR: Could not find quoted item name"
+
+        item_name = item_match.group(1)
+
+        lower_action = action.lower()
+
+        if "move" in lower_action and "from" in lower_action and "to" in lower_action:
+            # Extract source and target sections
+            from_match = re.search(r'from\s+([A-Za-z /]+?)(?:\s+to|\s*$)', action, re.IGNORECASE)
+            to_match = re.search(r'to\s+([A-Za-z /]+)', action, re.IGNORECASE)
+
+            if not from_match or not to_match:
+                return "ERROR: Could not parse 'from Section' and 'to Section'"
+
+            source_section = from_match.group(1).strip()
+            target_section = to_match.group(1).strip()
+
+            # Find the line containing the item in the source section
+            item_line_idx = None
+            for i, line in enumerate(lines):
+                if item_name.lower() in line.lower() and '|' in line:  # rough table row check
+                    item_line_idx = i
+                    break
+
+            if item_line_idx is None:
+                return f"ERROR: Could not find item '{item_name}' in Kanban"
+
+            # Remove the item line from current position
+            item_line = lines.pop(item_line_idx)
+
+            # Find the target section header and insert after it (or at end of its table)
+            target_header = f"## {target_section}"
+            insert_idx = len(lines)
+
+            for i, line in enumerate(lines):
+                if line.strip().startswith(target_header):
+                    # Find a good spot after the header (after the table header if present)
+                    insert_idx = i + 1
+                    # Skip past any immediate table header
+                    for j in range(insert_idx, min(insert_idx + 5, len(lines))):
+                        if '|' in lines[j] or lines[j].strip().startswith('---'):
+                            insert_idx = j + 1
+                        else:
+                            break
+                    break
+
+            lines.insert(insert_idx, item_line)
+
+            # Add autonomous note
+            timestamp = datetime.now().isoformat()
+            note = f"\n> [AUTONOMOUS by Kanban Finisher] Moved \"{item_name}\" from {source_section} to {target_section} at {timestamp}\n"
+            lines.append(note)
+
+            kanban_path.write_text(''.join(lines), encoding="utf-8")
+            logger.info(f"Autonomous Kanban move executed: {item_name} -> {target_section}")
+            return f"SUCCESS: Moved \"{item_name}\" from {source_section} to {target_section}"
+
+        elif "add_note" in lower_action:
+            note_match = re.search(r'"([^"]+)"\s*$', action)  # last quoted string as note
+            if not note_match:
+                return "ERROR: Could not parse note text"
+
+            note_text = note_match.group(1)
+            timestamp = datetime.now().isoformat()
+
+            # Append a note near the item if possible, else at end
+            for i, line in enumerate(lines):
+                if item_name.lower() in line.lower():
+                    lines.insert(i + 1, f"> [AUTONOMOUS NOTE] {note_text} ({timestamp})\n")
+                    kanban_path.write_text(''.join(lines), encoding="utf-8")
+                    return f"SUCCESS: Added note to \"{item_name}\""
+
+            # Fallback
+            lines.append(f"\n> [AUTONOMOUS NOTE on \"{item_name}\"] {note_text} ({timestamp})\n")
+            kanban_path.write_text(''.join(lines), encoding="utf-8")
+            return f"SUCCESS: Added note for \"{item_name}\" at end of Kanban"
+
+        return f"Unsupported UPDATE_KANBAN format: {action}"
+
+    except Exception as e:
+        logger.exception("Kanban update failed")
+        return f"ERROR during Kanban update: {e}"
+    finally:
+        if lock_file is not None:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                lock_file.close()
+            except Exception:
+                pass
+
+
+if __name__ == "__main__":
+    main()

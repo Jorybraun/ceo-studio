@@ -1,0 +1,88 @@
+version: '3.8'
+
+# Project CEO Harness - Multi-Project 24/7 Deployment
+#
+# This compose supports running the harness against MULTIPLE projects at once.
+# Example:
+#   docker compose --profile pipe up -d     # Your existing project
+#   docker compose --profile new up -d      # A brand new project
+#
+# Each profile has completely isolated state (brain, conversations, Kanban).
+
+services:
+  # =====================================================
+  # Profile: pipe  → Your existing PIPE-OS project
+  # =====================================================
+  ceo-pipe:
+    profiles: ["pipe"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: ceo-pipe
+    restart: unless-stopped
+    env_file:
+      - ${PIPE_ENV_FILE:-examples/pipe-project/.env.example}
+    environment:
+      - PROJECT_NAME=pipe-os
+      - TARGET_PROJECT_PATH=/workspace
+    volumes:
+      - pipe_state:/app/state
+      - pipe_brain_logs:/app/brain/conversations
+      - pipe_kanban:/app/mgmt
+      - ${PIPE_TARGET:-.}:/workspace:ro
+      - shared_work:/shared
+    networks:
+      - ceo-network
+    command: ["python", "/app/entrypoint.py"]
+
+  # =====================================================
+  # Profile: new  → Brand new project you're starting
+  # =====================================================
+  ceo-new:
+    profiles: ["new"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: ceo-new
+    restart: unless-stopped
+    env_file:
+      - ${NEW_ENV_FILE:-examples/new-project/.env.example}
+    environment:
+      - PROJECT_NAME=my-new-idea
+      - TARGET_PROJECT_PATH=/workspace
+    volumes:
+      - new_state:/app/state
+      - new_brain_logs:/app/brain/conversations
+      - new_kanban:/app/mgmt
+      - ${NEW_TARGET:-.}:/workspace:ro
+      - shared_work:/shared
+    networks:
+      - ceo-network
+    command: ["python", "/app/entrypoint.py"]
+
+  # Shared brain (you can also run separate brains per profile if desired)
+  brain:
+    profiles: ["pipe", "new"]
+    image: garrytan/gbrain:latest
+    container_name: gbrain
+    restart: unless-stopped
+    volumes:
+      - brain_data:/data
+    ports:
+      - "8000:8000"
+    networks:
+      - ceo-network
+
+volumes:
+  pipe_state:
+  pipe_brain_logs:
+  pipe_kanban:
+  new_state:
+  new_brain_logs:
+  new_kanban:
+  shared_work:
+  brain_data:
+
+networks:
+  ceo-network:
+    driver: bridge

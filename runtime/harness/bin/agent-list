@@ -1,0 +1,34 @@
+#!/bin/bash
+#
+# agent-list
+# Shows all registered agents and whether their tmux sessions are currently running.
+#
+
+REGISTRY_DIR="$HOME/.agent-sessions"
+
+if [ ! -d "$REGISTRY_DIR" ]; then
+  echo "No agents have been launched yet."
+  exit 0
+fi
+
+echo "Registered agents:"
+echo "------------------"
+
+for file in "$REGISTRY_DIR"/*; do
+  [ -f "$file" ] || continue
+
+  NAME=$(basename "$file")
+  SESSION=$(cat "$file")
+
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    STATUS="running"
+  else
+    STATUS="stopped (session not found)"
+  fi
+
+  echo "$NAME  →  $SESSION  [$STATUS]"
+done
+
+echo ""
+echo "Use ./bin/agent-dashboard to open a single window with all agents."
+echo "Use tmux attach -t <session-name> to attach to a specific agent."

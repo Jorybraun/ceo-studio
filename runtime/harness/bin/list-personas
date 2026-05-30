@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Simple tool to explore the big personas/ folder."""
+
+import sys
+from pathlib import Path
+
+HARNESS_ROOT = Path(__file__).parent.parent
+PERSONAS_ROOT = HARNESS_ROOT / "personas"
+
+def main():
+    if not PERSONAS_ROOT.exists():
+        print(f"No personas folder at {PERSONAS_ROOT}")
+        return
+
+    print("=== Personas (harness/personas/) ===\n")
+    print("Add .md files anywhere under here. Subfolders are fine (domains/, research/, etc.)\n")
+
+    for md in sorted(PERSONAS_ROOT.rglob("*.md")):
+        rel = md.relative_to(PERSONAS_ROOT)
+        name = md.stem
+        print(f"  {name:30}  ({rel})")
+
+    print(f"\nTotal: {len(list(PERSONAS_ROOT.rglob('*.md')))} personas")
+    print("\nUse with:  /new my-name some-persona   or   ./bin/launch-agent --name foo --persona bar")
+
+if __name__ == "__main__":
+    main()

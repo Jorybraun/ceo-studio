@@ -1,0 +1,992 @@
+#!/usr/bin/env python3
+"""
+herder-chat
+
+A proper interactive chat UI for the Harem (using Textual). Primary interface for the
+AI (Grok) and humans to observe rooms and directly message/steer agents in the swarm.
+
+Key feature: the bottom input bar supports direct "fire in the input" steering + auto-launch:
+  @kanban-orchestrator Please focus on the microapp graph schema first
+  @some-new-agent Start doing the thing
+
+If the agent is not running yet, herder-chat will automatically launch it (via the registry + launch-agent)
+before sending the message. This lets you bring new persona agents into existence just by addressing them.
+
+Other input forms:
+  normal text                 → posts to the room (visible to Hermes + human + agents)
+  /steer agent msg            → same as @ (fires)
+  /type agent msg             → types without submitting (leaves text in the prompt)
+  /new <agent>                → explicitly launch a herder instance (tmux + watcher)
+  /die <agent>                → explicitly stop a herder instance
+
+Run with:
+  ./bin/herder-chat --domain discovery
+
+Useful commands in the input bar:
+  @grok status on the builder?          # special: surfaces to the external AI for conversation + I can then @/steer others
+  @grok-builder implement the foo       # normal agent: steers its tmux pane + visible post
+
+  WARNING: Each grok-* agent runs its own tmux session + Grok Build instance.
+  They burn credits INDEPENDENTLY from each other and from your main session.
+
+  Best practice: Do almost all work directly in your current main @grok session.
+  Only spawn extra grok-* agents when you have a very specific need for isolation.
+
+  /die grok-research   # (discouraged in most cases - use main grok instead)
+  /new-room mexicans-planning
+
+@agent = direct message / steer that agent (real tmux pane for normal agents; AI conversation for @grok).
+
+Personas live in the big manageable folder: harness/personas/
+  (general/, research/, architecture/, domains/<your-domain>/, etc.)
+
+When you do /new you can (and should) pick the persona at creation time.
+
+This is the main surface for the Harem.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+TEXTUAL_IMPORT_ERROR: Exception | None = None
+try:
+    from textual.app import App, ComposeResult
+    from textual.containers import Horizontal, Vertical
+    from textual.widgets import Header, Footer, Input, ListView, ListItem, RichLog, Static
+    from textual.reactive import reactive
+    from textual import work
+except ModuleNotFoundError as exc:  # keep non-interactive validation usable without Textual installed
+    TEXTUAL_IMPORT_ERROR = exc
+    App = object  # type: ignore[assignment]
+    ComposeResult = Any  # type: ignore[assignment]
+    Horizontal = Vertical = Header = Footer = Input = ListView = ListItem = RichLog = Static = object  # type: ignore[misc,assignment]
+
+    def reactive(*args: Any, **kwargs: Any) -> None:  # type: ignore[no-redef]
+        return None
+
+    def work(*args: Any, **kwargs: Any) -> None:  # type: ignore[no-redef]
+        return None
+
+HARNESS_ROOT = Path(__file__).parent.parent
+ROOMS_ROOT = HARNESS_ROOT / "brain" / "rooms"
+
+
+def _load_agent_registry():
+    """Import the canonical herder registry without requiring package install."""
+    root = str(HARNESS_ROOT)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from agents import registry as agent_registry
+
+    return agent_registry
+
+
+def _registry_agent_suggestions() -> list[str]:
+    try:
+        agent_registry = _load_agent_registry()
+        return sorted(agent_registry.list_agents())
+    except Exception:
+        return []
+
+
+def _resolve_registry_agent_name(partial: str) -> str:
+    """Resolve exact aliases first, then fuzzy-match known canonical ids.
+
+    Also detects when the user typed a *persona* name (e.g. "architect") instead of an
+    agent id and returns the original so callers can give a helpful suggestion.
+    """
+    try:
+        agent_registry = _load_agent_registry()
+        resolved = agent_registry.resolve_agent_id(partial)
+        if resolved:
+            return resolved
+
+        import difflib
+
+        candidates = agent_registry.list_agents()
+        matches = difflib.get_close_matches(partial, candidates, n=1, cutoff=0.65)
+        if matches:
+            return matches[0]
+
+        # Extra help: did they type a persona name instead of an agent?
+        # We don't auto-resolve (personas aren't unique), but we can detect it later for messaging.
+    except Exception:
+        pass
+    return partial
+
+
+def _find_agents_by_persona(persona: str) -> list[str]:
+    """Return list of agent ids that declare this exact persona string."""
+    try:
+        agent_registry = _load_agent_registry()
+        matches = []
+        for name in agent_registry.list_agents():
+            try:
+                plan = agent_registry.get_launch_plan(name)
+                if plan.get("persona") == persona:
+                    matches.append(plan.get("id") or name)
+            except Exception:
+                continue
+        return matches
+    except Exception:
+        return []
+
+
+def _registry_launch_plan(agent_name: str) -> dict[str, Any]:
+    agent_registry = _load_agent_registry()
+    return agent_registry.get_launch_plan(agent_name)
+
+
+def _parse_steer_text(raw: str) -> tuple[str, str, bool]:
+    """Parse @agent, /steer, or /type text into agent/message/submit."""
+    message = raw.strip()
+    if message.startswith("@"):
+        rest = message[1:].strip()
+        if " " not in rest:
+            raise ValueError("Usage: @agent-name your steering message here")
+        agent_name, steering_msg = rest.split(" ", 1)
+        if not steering_msg.strip():
+            raise ValueError("Usage: @agent-name your steering message here")
+        return agent_name, steering_msg.strip(), True
+
+    if message.startswith("/steer "):
+        parts = message.split(" ", 2)
+        if len(parts) < 3 or not parts[2].strip():
+            raise ValueError("Usage: /steer <agent-name> <message>")
+        return parts[1], parts[2].strip(), True
+
+    if message.startswith("/type "):
+        parts = message.split(" ", 2)
+        if len(parts) < 3 or not parts[2].strip():
+            raise ValueError("Usage: /type <agent-name> <message>")
+        return parts[1], parts[2].strip(), False
+
+    raise ValueError("Expected @agent-name, /steer, or /type steering syntax")
+
+
+def build_noninteractive_steer_check(raw: str, domain: str) -> dict[str, Any]:
+    """Resolve a steering expression without touching tmux.
+
+    This is the process-test equivalent for CI/Kanban validation when Textual is
+    not installed or an interactive TUI is not appropriate.
+    """
+    requested_agent, steering_msg, submit = _parse_steer_text(raw)
+    agent_id = _resolve_registry_agent_name(requested_agent)
+    plan = _registry_launch_plan(agent_id)
+    return {
+        "ok": True,
+        "requested_agent": requested_agent,
+        "agent_id": plan["id"],
+        "display_name": plan["display_name"],
+        "canonical_room": plan["canonical_room"],
+        "chat_domain": domain,
+        "persona": plan["persona"],
+        "launch_mode": plan["launch_mode"],
+        "tmux_session": plan["tmux_session"],
+        "tmux_window": plan["tmux_window"],
+        "profile": plan["profile"],
+        "command": plan["command"],
+        "launchable": plan["launchable"],
+        "steerable": plan["steerable"],
+        "steering_message": steering_msg,
+        "submit": submit,
+    }
+
+
+class HerderChatApp(App):
+    CSS = """
+    Screen {
+        background: #0f0f0f;
+    }
+
+    #chat-log {
+        border: round #444;
+        background: #1a1a1a;
+        color: #ddd;
+    }
+
+    #input-bar {
+        border: round #555;
+        background: #111;
+    }
+
+    #input-area {
+        height: 3;           /* fixed height — chat above never jumps when you type */
+        dock: bottom;
+        background: #111;
+    }
+
+    #input-prompt {
+        width: 2;
+        content-align: right middle;
+        color: #0a0;         /* nice green prompt like many TUIs */
+    }
+
+    #agents-sidebar {
+        width: 36;           /* a bit wider so names + personas aren't cut off as badly */
+        border: round #444;
+        background: #1a1a1a;
+        dock: left;
+    }
+
+    #agents-title {
+        text-style: bold;
+        color: cyan;
+        padding: 0 1;
+    }
+
+    #agents-list {
+        background: #1a1a1a;
+        color: #ddd;
+    }
+
+    ListItem {
+        padding: 0 1;
+    }
+
+    ListItem:hover {
+        background: #2a2a3a;
+    }
+
+    ListItem.-highlighted {
+        background: #3a3a5a;
+    }
+
+    .message {
+        margin: 0 1;
+    }
+
+    .orchestrator-queue {
+        background: #2a2a1a;
+        border: round #aa0;
+    }
+    """
+
+    BINDINGS = [
+        ("ctrl+q", "quit", "Quit"),
+        ("ctrl+l", "clear", "Clear chat"),
+        ("ctrl+s", "steer_mode", "Steer mode"),  # future
+    ]
+
+    def __init__(self, domain: str = "discovery", **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.domain = domain
+        self.room_dir = ROOMS_ROOT / domain
+        self.chat_log = self.room_dir / "chat.log"
+        self.queue_file = self.room_dir / "orchestrator_queue.jsonl"
+        self.last_log_size = 0
+        self.last_queue_size = 0
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+
+        with Horizontal():
+            # Left sidebar: Agents + stats (fixed width)
+            with Vertical(id="agents-sidebar"):
+                yield Static("Agents (Registry)", id="agents-title")
+                yield ListView(id="agents-list")
+
+            # Main area: chat + fixed input
+            with Vertical():
+                yield RichLog(id="chat-log", wrap=True, highlight=True, markup=True)
+
+                # Fixed-height input area at the bottom
+                with Horizontal(id="input-area"):
+                    yield Static(">", id="input-prompt")
+                    yield Input(placeholder="message or @agent to steer", id="input-bar")
+
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = f"Herder Chat — {self.domain}"
+        self.sub_title = "Chat Orchestrator View  |  Enter=send  |  @name=steer  |  Ctrl+Q=quit"
+        self._load_initial_messages()
+        self._refresh_agents_sidebar()
+        self._update_input_suggestions()
+        self.set_interval(1.5, self._poll_for_updates)
+
+    def _load_initial_messages(self) -> None:
+        log = self.query_one("#chat-log", RichLog)
+        log.clear()
+
+        # Load recent room messages
+        if self.chat_log.exists():
+            lines = self.chat_log.read_text(errors="replace").splitlines()[-50:]
+            for line in lines:
+                self._add_message_line(line)
+
+        # Load any queued orchestrator messages
+        self._load_queue_messages()
+
+    def _add_message_line(self, raw_line: str) -> None:
+        log = self.query_one("#chat-log", RichLog)
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            return
+
+        # Try to parse [TS] Speaker: message  or our HERDER_MAIL format
+        if "[HERDER_MAIL]" in line:
+            try:
+                prefix, json_part = line.split("[HERDER_MAIL]", 1)
+                speaker = prefix.split("] ", 1)[1].rstrip(":")
+                data = json.loads(json_part.strip())
+                display = f"[bold cyan]{speaker}[/bold cyan] → [bold]{data.get('to', '?')}[/bold]: {data.get('subject', '')}"
+                if data.get("body"):
+                    display += f"\n  {data['body']}"
+                log.write(display)
+                return
+            except Exception:
+                pass
+
+        # Normal room message
+        if line.startswith("[") and "] " in line:
+            ts_part, rest = line.split("] ", 1)
+            ts = ts_part.lstrip("[")
+            if ": " in rest:
+                speaker, message = rest.split(": ", 1)
+                # Try to attach persona if we know it
+                persona = self._get_persona_for(speaker)
+                if persona:
+                    speaker_display = f"{speaker} ({persona})"
+                else:
+                    speaker_display = speaker
+                log.write(f"[dim]{ts[-8:]}[/dim] [bold]{speaker_display}[/bold]: {message}")
+            else:
+                log.write(line)
+        else:
+            log.write(line)
+
+    def _get_persona_for(self, speaker: str) -> str | None:
+        base = speaker.replace(" (watcher)", "").strip()
+        presence_dir = self.room_dir / "presence"
+        for candidate in (base, speaker):
+            pfile = presence_dir / f"{candidate}.persona"
+            if pfile.exists():
+                return pfile.read_text().strip()
+        return None
+
+    def _get_agent_suggestions(self) -> list[str]:
+        """
+        Return the list of agent names used for autocomplete in the input bar.
+
+        Primary source: the central registry (harness/agents/registry.py).
+        This is what enables the nice @name autocomplete + auto-launch behavior.
+
+        Secondary source: currently live agents from the presence directory
+        (so agents that are running but not yet in the registry still appear).
+        """
+        suggestions = set()
+
+        # Primary source: the canonical registry (authoritative for @autocomplete + auto-launch)
+        for name in _registry_agent_suggestions():
+            suggestions.add(name)
+
+        # Supplement with anything currently live in presence (good for ad-hoc/test agents)
+        presence_dir = self.room_dir / "presence"
+        if presence_dir.exists():
+            for persona_file in presence_dir.glob("*.persona"):
+                name = persona_file.stem
+                suggestions.add(name)
+
+        return sorted(suggestions)
+
+    def _refresh_agents_sidebar(self) -> None:
+        """Show the full list of agents from the registry as clickable items.
+
+        Clicking an agent will insert `@AgentName ` into the input bar.
+        """
+        try:
+            agents_list = self.query_one("#agents-list", ListView)
+        except Exception:
+            return
+
+        agents_list.clear()
+
+        # Load registry (primary source)
+        registry_agents = {}
+        try:
+            agent_registry = _load_agent_registry()
+            for name in agent_registry.list_agents():
+                data = agent_registry.get_launch_plan(name)
+                registry_agents[name] = {
+                    "display_name": data.get("display_name") or name,
+                    "persona": data.get("persona", ""),
+                    "registry_id": data.get("id") or name,
+                    "launch_mode": data.get("launch_mode", ""),
+                }
+        except Exception:
+            agents_list.append(ListItem(Static("[red]Could not load registry[/red]")))
+            return
+
+        presence_dir = self.room_dir / "presence"
+
+        for reg_key, info in sorted(registry_agents.items()):
+            display_name = info["display_name"]
+            persona = info["persona"]
+            registry_id = info["registry_id"]
+
+            # Check if this agent is currently live
+            possible_names = [
+                reg_key,
+                display_name.lower().replace(" ", "-"),
+                display_name,
+                registry_id.lower()
+            ]
+            live = False
+            last_seen = ""
+
+            for candidate in possible_names:
+                pfile = presence_dir / f"{candidate}.persona"
+                lfile = presence_dir / f"{candidate}.last_seen"
+                if pfile.exists():
+                    live = True
+                    if lfile.exists():
+                        try:
+                            last_seen = lfile.read_text().strip()[:19]
+                        except Exception:
+                            pass
+                    break
+
+            # Build display
+            status_icon = "●" if live else "○"
+            status_style = "green" if live else "dim"
+            line = f"[{status_style}]{status_icon}[/{status_style}] [bold]{display_name}[/bold]"
+            if persona:
+                line += f" ([bold]{persona}[/bold])"
+
+            if live and last_seen:
+                line += f"\n   [dim]last: {last_seen}[/dim]"
+            elif not live:
+                line += "\n   [dim]not running[/dim]"
+
+            item = ListItem(Static(line, markup=True))
+            # Store the clean name we want to insert when clicked
+            item._agent_name = registry_id   # custom attribute for easy retrieval
+            agents_list.append(item)
+
+        if not registry_agents:
+            agents_list.append(ListItem(Static("[dim]No agents defined in registry[/dim]")))
+
+    def _update_input_suggestions(self) -> None:
+        """Refresh autocomplete suggestions for the input bar based on current agents."""
+        try:
+            input_bar = self.query_one("#input-bar", Input)
+            suggestions = self._get_agent_suggestions()
+            input_bar.suggestions = suggestions
+        except Exception:
+            pass  # Input not ready yet or other transient issue
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Show a dropdown of registry agents when you start typing @ (or steering commands).
+
+        - Type @          → dropdown with the full list of registry agents
+        - Type @swa...    → filters the list (with fuzzy matching)
+        """
+        value = event.value
+
+        try:
+            input_bar = self.query_one("#input-bar", Input)
+            all_suggestions = self._get_agent_suggestions()
+
+            # User just typed @ or is still typing the agent name after @
+            if value == "@" or (value.startswith("@") and " " not in value):
+                if value == "@":
+                    # Show the complete list of registry agents
+                    input_bar.suggestions = all_suggestions
+                else:
+                    # User has typed some letters after @ → use fuzzy filter
+                    partial = value[1:]
+                    fuzzy = self._fuzzy_match_agents(partial, all_suggestions)
+                    input_bar.suggestions = fuzzy if fuzzy else all_suggestions
+                return
+
+            # Same logic for the explicit steering commands
+            if value.startswith(("/steer ", "/type ", "/submit ")):
+                parts = value.split(" ", 2)
+                if len(parts) == 1 or (len(parts) == 2 and not parts[1]):
+                    # They just typed the command, show full list
+                    input_bar.suggestions = all_suggestions
+                elif len(parts) >= 2:
+                    partial = parts[1]
+                    fuzzy = self._fuzzy_match_agents(partial, all_suggestions)
+                    input_bar.suggestions = fuzzy if fuzzy else all_suggestions
+                return
+
+            # Normal typing (not addressing an agent) → normal suggestions
+            input_bar.suggestions = all_suggestions
+
+        except Exception:
+            pass
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Clicking an agent in the sidebar inserts @Name into the input."""
+        item = event.item
+        if hasattr(item, "_agent_name") and item._agent_name:
+            try:
+                input_bar = self.query_one("#input-bar", Input)
+                current = input_bar.value or ""
+
+                # If already typing a mention, replace the partial name
+                if current.startswith("@"):
+                    space_idx = current.find(" ")
+                    if space_idx != -1:
+                        input_bar.value = "@" + item._agent_name + current[space_idx:]
+                    else:
+                        input_bar.value = "@" + item._agent_name + " "
+                else:
+                    # Append a mention
+                    if current and not current.endswith(" "):
+                        input_bar.value = current + " @" + item._agent_name + " "
+                    else:
+                        input_bar.value = current + "@" + item._agent_name + " "
+
+                input_bar.cursor_position = len(input_bar.value)
+                input_bar.focus()
+            except Exception:
+                pass
+
+    def _fuzzy_match_agents(self, partial: str, candidates: list[str], cutoff: float = 0.6) -> list[str]:
+        """Return close matches for partial input (basic autocorrect)."""
+        import difflib
+        # Get close matches, then sort by similarity
+        matches = difflib.get_close_matches(partial, candidates, n=8, cutoff=cutoff)
+        # Also include any that start with the partial (prefix match wins)
+        prefix_matches = [c for c in candidates if c.lower().startswith(partial.lower())]
+        # Combine, dedup, keep order
+        seen = set()
+        result = []
+        for name in prefix_matches + matches:
+            if name not in seen:
+                seen.add(name)
+                result.append(name)
+        return result[:8]  # keep it reasonable
+
+    def _load_queue_messages(self) -> None:
+        if not self.queue_file.exists():
+            return
+        log = self.query_one("#chat-log", RichLog)
+        try:
+            for line in self.queue_file.read_text().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                    if data.get("type") == "orchestrator_task":
+                        log.write(f"[bold yellow on #2a2a00]ORCH QUEUE[/bold yellow on #2a2a00] {data.get('summary', data)}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _poll_for_updates(self) -> None:
+        log = self.query_one("#chat-log", RichLog)
+
+        # New room messages?
+        if self.chat_log.exists():
+            current_size = self.chat_log.stat().st_size
+            if current_size > self.last_log_size:
+                with open(self.chat_log, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(self.last_log_size)
+                    for line in f:
+                        self._add_message_line(line)
+                self.last_log_size = current_size
+
+        # New queue items?
+        if self.queue_file.exists():
+            current_size = self.queue_file.stat().st_size
+            if current_size > self.last_queue_size:
+                self._load_queue_messages()
+                self.last_queue_size = current_size
+
+        # Refresh agents sidebar (lightweight)
+        self._refresh_agents_sidebar()
+        self._update_input_suggestions()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle input bar:
+        - Normal text → post to the shared domain room (visible to everyone).
+        - @agent-name message   → FIRE the message directly into that agent's tmux input (submit + Enter).
+        - /steer agent msg      → same as @ (fires the steering message).
+        - /type agent msg       → just type text into the agent's prompt (no Enter; rare).
+        """
+        message = event.value.strip()
+        if not message:
+            return
+
+        log = self.query_one("#chat-log", RichLog)
+        ts_short = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        steer_bin = str(HARNESS_ROOT / "bin" / "herder-steer")
+
+        # --- Direct fire steering via @agent-name syntax (the main "fire in the input" UX) ---
+        if message.startswith("@"):
+            # @agent-name the rest of the message
+            try:
+                # split once after the first word
+                rest = message[1:].strip()
+                if " " in rest:
+                    agent_name, steering_msg = rest.split(" ", 1)
+                else:
+                    agent_name, steering_msg = rest, ""
+                if not steering_msg:
+                    log.write(f"[red]Usage: @agent-name your steering message here[/red]")
+                else:
+                    # Special case: @grok goes to the external AI (this conversation).
+                    # We still post it visibly in the room for context/audit.
+                    if agent_name.lower() in ("grok", "grok-ai", "ai"):
+                        ts = datetime.now(timezone.utc).isoformat() + "Z"
+                        line = f"[{ts}] Human (to Grok AI): {steering_msg}"
+                        with open(self.chat_log, "a", encoding="utf-8") as f:
+                            f.write(line + "\n")
+                        log.write(f"[dim]{ts_short}[/dim] [bold magenta]@grok[/bold magenta] {steering_msg}")
+                        log.write("[dim]   (Message surfaced for the AI. Paste relevant parts here if you want a response + actions.)[/dim]")
+                    else:
+                        # Normal agent: resolve + fire into its tmux pane
+                        agent_name = self._resolve_agent_name(agent_name)
+                        self._fire_steering(log, steer_bin, agent_name, steering_msg, submit=True)
+            except Exception as e:
+                log.write(f"[red]Bad @steer syntax:[/red] {e}")
+
+        elif message.startswith("/steer "):
+            # /steer <agent> message  → fires (submits) into the agent's input
+            parts = message.split(" ", 2)
+            if len(parts) < 3:
+                log.write("[red]Usage: /steer <agent-name> <message>   (fires into the agent's input)[/red]")
+            else:
+                agent_name = self._resolve_agent_name(parts[1])
+                self._fire_steering(log, steer_bin, agent_name, parts[2], submit=True)
+
+        elif message.startswith("/type "):
+            # /type <agent> message  → types only, does NOT press Enter (leaves it in the prompt)
+            parts = message.split(" ", 2)
+            if len(parts) < 3:
+                log.write("[red]Usage: /type <agent-name> <message>   (types into prompt, no submit)[/red]")
+            else:
+                agent_name = self._resolve_agent_name(parts[1])
+                self._fire_steering(log, steer_bin, agent_name, parts[2], submit=False)
+
+        # --- Explicit lifecycle commands for the Chat Orchestrator ---
+        elif message.startswith(("/new ", "/start ", "/launch ")):
+            # /new <name> [persona]   — the main way to bring new agents into a room
+            # Personas come from the big harness/personas/ folder (add whatever you want).
+            # You can have many instances with the same persona.
+            parts = message.split(" ", 2)
+            if len(parts) < 2 or not parts[1].strip():
+                log.write("[red]Usage: /new <agent-name> [persona][/red]")
+                log.write("[red]Examples:[/red]")
+                log.write("[red]  /new researcher deep-researcher[/red]")
+                log.write("[red]  /new grok-2 planner[/red]")
+                log.write("[red]  /new my-architect architect[/red]")
+            else:
+                agent_name = self._resolve_agent_name(parts[1].strip())
+                persona = parts[2].strip() if len(parts) > 2 else None
+                self._launch_agent_explicit(log, agent_name, persona)
+
+        elif message.startswith(("/die ", "/stop ", "/kill ")):
+            # /die <agent>  → explicitly tear down the herder instance
+            parts = message.split(" ", 1)
+            if len(parts) < 2 or not parts[1].strip():
+                log.write("[red]Usage: /die <agent-name>[/red]")
+            else:
+                agent_name = self._resolve_agent_name(parts[1].strip())
+                self._stop_agent_explicit(log, agent_name)
+
+        # --- Room creation commands ---
+        elif message.startswith(("/new-room ", "/create-room ", "/room-create ")):
+            parts = message.split(" ", 1)
+            if len(parts) < 2 or not parts[1].strip():
+                log.write("[red]Usage: /new-room <room-slug>   (kebab-case recommended)[/red]")
+            else:
+                room_slug = parts[1].strip().lower()
+                self._create_new_room(log, room_slug)
+
+        else:
+            # Normal message to the shared room (auditable source of truth)
+            ts = datetime.now(timezone.utc).isoformat() + "Z"
+            line = f"[{ts}] Human (via herder-chat): {message}"
+            with open(self.chat_log, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+            log.write(f"[dim]{ts_short}[/dim] [bold green]You[/bold green]: {message}")
+
+        event.input.value = ""
+
+    def _resolve_agent_name(self, partial: str) -> str:
+        """Resolve a typed id/display name/alias to the canonical registry id."""
+        return _resolve_registry_agent_name(partial)
+
+    def _ensure_agent_session(self, agent_name: str) -> bool:
+        """Ensure the canonical registry session exists before steering."""
+        log = self.query_one("#chat-log", RichLog)
+        try:
+            plan = _registry_launch_plan(agent_name)
+        except Exception as e:
+            # Helpful guidance when user types a persona name (common mistake)
+            persona_matches = _find_agents_by_persona(agent_name)
+            if persona_matches:
+                log.write(
+                    f"[red]'{agent_name}' is a persona, not an agent name.[/red] "
+                    f"Agents using the '{agent_name}' persona: {', '.join(persona_matches)}. "
+                    f"Use one of those (e.g. @{' '.join(persona_matches[:1])} your message)."
+                )
+            else:
+                log.write(f"[red]Unknown agent '{agent_name}' — registry lookup failed:[/red] {e}")
+                log.write("[dim]Hint: If you recently edited the registry, restart this herder-chat (Python import cache).[/dim]")
+            return False
+
+        if not plan.get("steerable"):
+            reason = plan.get("launch_status_reason") or f"launch_mode={plan.get('launch_mode')}"
+            log.write(f"[red]Cannot steer '{plan.get('id', agent_name)}': {reason}[/red]")
+            return False
+
+        session = plan["tmux_session"]
+        # Check if canonical session already exists.
+        if subprocess.run(["tmux", "has-session", "-t", f"={session}"], capture_output=True).returncode == 0:
+            return True
+
+        # Guardrail: do NOT silently auto-spawn a paid/separate API session.
+        # (This used to start a separate Grok session on a simple @mention.)
+        try:
+            from config import cost_limits as _cl
+            allowed, reason = _cl.can_spawn(plan["id"], interactive=False)
+            if not allowed:
+                log.write(
+                    f"[red]Refusing to auto-launch '{plan['id']}': {reason}[/red]\n"
+                    f"[dim]If you really want this, launch it explicitly: "
+                    f"CEO_ALLOW_PAID=1 ./bin/launch-agent --name {plan['id']}[/dim]"
+                )
+                return False
+        except Exception:
+            # If the guardrail module can't be imported, fail safe for paid agents.
+            _id = plan.get("id", agent_name)
+            if _id.startswith("grok-") and _id != "grok":
+                log.write(f"[red]Refusing to auto-launch paid session '{_id}' (guardrail unavailable).[/red]")
+                return False
+
+        log.write(
+            f"[yellow]@{plan['id']} ({plan['display_name']}) not running — "
+            f"launching via registry mode={plan['launch_mode']} session={session}...[/yellow]"
+        )
+
+        launch_bin = str(HARNESS_ROOT / "bin" / "launch-agent")
+        try:
+            result = subprocess.run(
+                [launch_bin, "--name", plan["id"]],
+                capture_output=True, text=True, timeout=45
+            )
+            if result.returncode == 0:
+                log.write(f"[green]Launched agent '{plan['id']}' via registry.[/green]")
+                persona = plan.get("persona") or ""
+                launch_mode = plan.get("launch_mode")
+                if launch_mode == "external":
+                    log.write(
+                        f"[dim]  (persona={persona}) watcher in 'watcher' window; "
+                        f"steering targets 'main' window (empty by default for external agents). "
+                        f"Brain must be started in main or driven via Python HerderAgent/reactor.[/dim]"
+                    )
+                time.sleep(2.5)  # Give the watcher a moment to register presence
+                return True
+            else:
+                log.write(f"[red]Failed to launch '{plan['id']}': {result.stderr.strip() or result.stdout.strip()}[/red]")
+                return False
+        except subprocess.TimeoutExpired:
+            log.write(f"[red]Timed out trying to launch '{plan['id']}'.[/red]")
+            return False
+        except Exception as e:
+            log.write(f"[red]Error launching '{plan['id']}': {e}[/red]")
+            return False
+
+    def _fire_steering(self, log: RichLog, steer_bin: str, agent_name: str, steering_msg: str, submit: bool) -> None:
+        """Call herder-steer to inject keys. If the agent is not running, auto-launch it first using the registry."""
+        # Auto-create the tmux session if it doesn't exist (the feature you asked for)
+        if not self._ensure_agent_session(agent_name):
+            return  # Failed to launch — error already logged
+
+        cmd = [steer_bin, agent_name, steering_msg]
+        if submit:
+            cmd.append("--submit")
+        else:
+            cmd.append("--type-only")
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        ts = datetime.now(timezone.utc).isoformat() + "Z"
+        ts_short = datetime.now(timezone.utc).strftime("%H:%M:%S")
+
+        persona = self._get_persona_for(agent_name) or ""
+        persona_part = f" ({persona})" if persona else ""
+
+        if result.returncode == 0:
+            action = "Fired" if submit else "Typed"
+            # Persist to the shared room so the steering is visible/auditable
+            log_line = f"[{ts}] Human (steer → {agent_name}{persona_part}): {steering_msg}"
+            with open(self.chat_log, "a", encoding="utf-8") as f:
+                f.write(log_line + "\n")
+
+            # Nice live feedback in this UI
+            arrow = "→" if submit else "↳"
+            color = "bold magenta" if submit else "yellow"
+            log.write(f"[dim]{ts_short}[/dim] [{color}]{arrow} @{agent_name}{persona_part}[/{color}] {steering_msg}")
+            log.write(f"   [dim]{action} into {agent_name}'s input[/dim]")
+        else:
+            log.write(f"[red]Steering {agent_name} failed:[/red] {result.stderr or result.stdout}")
+
+    def _launch_agent_explicit(self, log: RichLog, agent_name: str, persona: str | None = None) -> None:
+        """Explicit /new or /start command.
+        
+        If persona is provided, it overrides the registry value.
+        This keeps the persona system config-based (from registry + persona files),
+        not full of if/elif conditionals.
+        """
+        try:
+            plan = _registry_launch_plan(agent_name)
+        except Exception:
+            # Agent not in registry — allow ad-hoc creation if persona is explicitly given
+            plan = {
+                "id": agent_name,
+                "display_name": agent_name,
+                "persona": persona or "default",
+                "tmux_session": f"pipe-{agent_name}",
+            }
+
+        session = plan["tmux_session"]
+        if subprocess.run(["tmux", "has-session", "-t", f"={session}"], capture_output=True).returncode == 0:
+            log.write(f"[yellow]Agent '{plan['display_name']}' is already running ({session}).[/yellow]")
+            return
+
+        effective_persona = persona or plan.get("persona") or "default"
+        log.write(
+            f"[yellow]Launching '{plan['display_name']}' with persona='{effective_persona}'[/yellow]"
+        )
+        log.write("[dim]  (Personas live in harness/personas/ — add files there, organize by domain/category)[/dim]")
+
+        # Strong credit protection for extra grok-* sessions
+        if plan.get("id", "").startswith("grok-") and plan.get("id") != "grok":
+            log.write("")
+            log.write("[bold red]⚠️  WARNING: This will create a NEW separate Grok Build session.[/bold red]")
+            log.write("[bold red]    It will consume credits independently from your main session.[/bold red]")
+            log.write("[red]    Strongly prefer using your current main @grok for this work instead.[/red]")
+            log.write("")
+            # Simple confirmation in the log
+            log.write("[yellow]Type 'yes' in the next 10 seconds to proceed anyway, or cancel.[/yellow]")
+            # For now we just warn heavily; full interactive confirm can be added later if needed
+
+        launch_bin = str(HARNESS_ROOT / "bin" / "launch-agent")
+        cmd = [launch_bin, "--name", plan["id"]]
+        if effective_persona and effective_persona != "default":
+            cmd += ["--persona", effective_persona]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode == 0:
+                log.write(f"[green]Agent '{plan['display_name']}' started successfully.[/green]")
+                if plan.get("launch_mode") == "external":
+                    log.write(
+                        "[dim]  Text you @steer will go to the 'main' window. "
+                        "For real replies the pane needs a brain process (or use the orchestrator Python API to drive it).[/dim]"
+                    )
+            else:
+                log.write(f"[red]Failed to launch '{plan['id']}': {result.stderr or result.stdout}[/red]")
+        except Exception as e:
+            log.write(f"[red]Error launching '{plan['id']}': {e}[/red]")
+
+    def _stop_agent_explicit(self, log: RichLog, agent_name: str) -> None:
+        """Explicit /die or /stop command."""
+        try:
+            plan = _registry_launch_plan(agent_name)
+        except Exception as e:
+            log.write(f"[red]Unknown agent '{agent_name}': {e}[/red]")
+            return
+
+        session = plan["tmux_session"]
+        if subprocess.run(["tmux", "has-session", "-t", f"={session}"], capture_output=True).returncode != 0:
+            log.write(f"[yellow]Agent '{plan['display_name']}' is not currently running.[/yellow]")
+            return
+
+        log.write(f"[yellow]Stopping agent '{plan['display_name']}' ({session})...[/yellow]")
+        subprocess.run(["tmux", "kill-session", "-t", f"={session}"], capture_output=True)
+
+        # Best-effort cleanup of presence files
+        presence_dir = self.room_dir / "presence"
+        for candidate in (plan.get("id"), plan.get("display_name")):
+            if candidate:
+                for suffix in (".persona", ".last_seen"):
+                    try:
+                        (presence_dir / f"{candidate}{suffix}").unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+        log.write(f"[green]Agent '{plan['display_name']}' stopped.[/green]")
+
+    def _create_new_room(self, log: RichLog, room_slug: str) -> None:
+        """Create a new domain room via the existing domain-room tool."""
+        domain_room_bin = str(HARNESS_ROOT / "bin" / "domain-room")
+
+        # Check if it already exists (simple check via tmux session)
+        session_name = f"pipe-{room_slug}-room"
+        if subprocess.run(["tmux", "has-session", "-t", f"={session_name}"], capture_output=True).returncode == 0:
+            log.write(f"[yellow]Room '{room_slug}' already exists (session {session_name}).[/yellow]")
+            log.write(f"  You can switch with:  tmux attach -t {session_name}")
+            log.write(f"  Or open with:         ./bin/herder-chat --domain {room_slug}")
+            return
+
+        log.write(f"[yellow]Creating new room '{room_slug}'...[/yellow]")
+
+        try:
+            result = subprocess.run(
+                [domain_room_bin, "create", room_slug],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                log.write(f"[green]Room '{room_slug}' created successfully![/green]")
+                log.write(f"  Attach in tmux:     tmux attach -t {session_name}")
+                log.write(f"  Open in herder-chat: ./bin/herder-chat --domain {room_slug}")
+                log.write(f"  Or use:             ./bin/domain-room chat {room_slug}")
+
+                # Announce in current room for the swarm
+                ts = datetime.now(timezone.utc).isoformat() + "Z"
+                announcement = f"[{ts}] System: New room created → '{room_slug}'. Use herder-chat --domain {room_slug} to join."
+                with open(self.chat_log, "a", encoding="utf-8") as f:
+                    f.write(announcement + "\n")
+            else:
+                log.write(f"[red]Failed to create room '{room_slug}': {result.stderr or result.stdout}[/red]")
+        except Exception as e:
+            log.write(f"[red]Error creating room '{room_slug}': {e}[/red]")
+
+    def action_clear(self) -> None:
+        self.query_one("#chat-log", RichLog).clear()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Interactive Herder Chat (Textual)")
+    parser.add_argument("--domain", default="discovery", help="Domain room to monitor")
+    parser.add_argument(
+        "--check-steer",
+        help="Non-interactive validation: resolve an @agent or /steer expression through the registry and print JSON without touching tmux.",
+    )
+    args = parser.parse_args()
+
+    if args.check_steer:
+        try:
+            print(json.dumps(build_noninteractive_steer_check(args.check_steer, args.domain), sort_keys=True))
+        except Exception as e:
+            print(json.dumps({"ok": False, "error": str(e), "input": args.check_steer}, sort_keys=True), file=sys.stderr)
+            raise SystemExit(2)
+        raise SystemExit(0)
+
+    if TEXTUAL_IMPORT_ERROR is not None:
+        print(
+            f"Error: Textual is required for interactive herder-chat ({TEXTUAL_IMPORT_ERROR}). "
+            "Use --check-steer for non-interactive registry validation.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    app = HerderChatApp(domain=args.domain)
+    app.run()

@@ -1,0 +1,35 @@
+#!/bin/bash
+# grok-msg <agent-name> "your message"
+#
+# The simplest possible way for this AI (or you) to message another agent.
+# - Posts visibly in the agent's default room as "Grok"
+# - Fires the text directly into the agent's tmux pane (herder-steer)
+
+set -e
+
+if [[ $# -lt 2 ]]; then
+    echo "Usage: $0 <agent-name> \"message\""
+    echo "Example: $0 grok-builder \"hey, status check?\""
+    exit 1
+fi
+
+AGENT="$1"
+shift
+MSG="$*"
+
+HARNESS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+echo "Grok → $AGENT: $MSG"
+
+# 1. Visible post in the room (as Grok)
+"$HARNESS_ROOT/bin/domain-room" post discovery "Grok" "$AGENT: $MSG" 2>/dev/null || true
+
+# 2. Direct steer into the agent's session (the important part)
+if "$HARNESS_ROOT/bin/herder-steer" "$AGENT" "$MSG" --submit 2>/dev/null; then
+    echo "  (steered into $AGENT's pane)"
+else
+    echo "  (steer failed — agent may not be running)"
+fi
+
+# This is the concrete implementation of the "herder-messaging" skill for external AIs / humans.
+# See skills/herder-messaging/SKILL.md for the full documented behavior.

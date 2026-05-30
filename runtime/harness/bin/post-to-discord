@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""
+Tiny helper to post a message to a Discord channel via webhook.
+
+Usage:
+    ./bin/post-to-discord "https://discord.com/api/webhooks/..." "Your message here" "Optional username"
+
+This is deliberately minimal to show how trivial external chat integration is.
+No dependencies beyond Python stdlib.
+"""
+
+import json
+import sys
+import urllib.request
+
+def post_to_discord(webhook_url, message, username="Agent"):
+    if not webhook_url or not message:
+        print("Usage: post-to-discord <webhook_url> <message> [username]")
+        sys.exit(1)
+
+    payload = {
+        "content": message,
+        "username": username
+    }
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(webhook_url, data=data, headers={"Content-Type": "application/json"})
+
+    try:
+        with urllib.request.urlopen(req) as response:
+            print(f"Posted to Discord. Status: {response.status}")
+    except Exception as e:
+        print(f"Failed to post: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print("Usage: post-to-discord <webhook_url> <message> [username]")
+        sys.exit(1)
+
+    url = sys.argv[1]
+    msg = sys.argv[2]
+    user = sys.argv[3] if len(sys.argv) > 3 else "Agent"
+
+    post_to_discord(url, msg, user)

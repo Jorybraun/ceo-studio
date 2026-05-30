@@ -1,0 +1,57 @@
+#!/bin/bash
+#
+# agent-dashboard
+# Opens (or creates) a single terminal window showing all running agents.
+# Similar in spirit to "ov dashboard" from Overstory, but using the harness + Hermes profiles.
+#
+# Usage:
+#   ./bin/agent-dashboard
+#
+
+set -e
+
+DASHBOARD_SESSION="pipe-dashboard"
+REGISTRY_DIR="$HOME/.agent-sessions"
+
+if ! tmux has-session -t "$DASHBOARD_SESSION" 2>/dev/null; then
+  tmux new-session -d -s "$DASHBOARD_SESSION" -n overview
+  tmux send-keys -t "$DASHBOARD_SESSION:overview" "echo 'PIPE Agent Dashboard - attach with: tmux attach -t $DASHBOARD_SESSION'" C-m
+fi
+
+# Find all registered agents
+if [ -d "$REGISTRY_DIR" ]; then
+  for file in "$REGISTRY_DIR"/*; do
+    [ -f "$file" ] || continue
+
+    AGENT_NAME=$(basename "$file")
+    SESSION_NAME=$(cat "$file")
+
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+      # Create a new window in the dashboard for this agent
+      tmux new-window -t "$DASHBOARD_SESSION" -n "$AGENT_NAME" "tmux attach -t $SESSION_NAME || echo 'Session $SESSION_NAME not found'"
+
+      echo "Added pane/window for agent: $AGENT_NAME ($SESSION_NAME)"
+    else
+      echo "Warning: registered agent $AGENT_NAME but tmux session $SESSION_NAME not found"
+    fi
+  done
+else
+  echo "No agents registered yet in $REGISTRY_DIR"
+fi
+
+# NOTE (herder compliance): We no longer auto-spawn new macOS Terminal windows.
+# Use herder-native mechanisms instead:
+#   - tmux attach -t $DASHBOARD_SESSION   (from within your main herder session)
+#   - domain-room attach / web UI / rich chat for rooms
+#
+# This keeps everything inside the herder coordination model.
+
+echo ""
+echo "Dashboard tmux session prepared: $DASHBOARD_SESSION"
+echo ""
+echo "To surface it using herder mechanisms:"
+echo "  tmux attach -t $DASHBOARD_SESSION"
+echo "  (Run the above from inside your primary herder tmux session)"
+echo ""
+echo "Each agent has its own window inside the dashboard session."
+echo "No new OS Terminal windows were auto-opened (herder-native)."

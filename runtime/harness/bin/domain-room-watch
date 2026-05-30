@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""
+domain-room-watch
+Lightweight long-running watcher for domain rooms.
+
+Purpose:
+- Keep live agent sessions that periodically check the room.
+- Deliver new messages since last check.
+- Support heartbeats / presence so `domain-room who` can see active agents.
+
+Usage (inside an agent's persistent tmux session):
+  ./bin/domain-room-watch discovery "Grok" --interval 10
+
+  # With a custom handler script that gets called on new messages:
+  ./bin/domain-room-watch discovery "Grok" --interval 15 --on-message ./my_agent_reactor.sh --persona DEEP_RESEARCHER
+
+The watcher will:
+- Remember the last read position per speaker.
+- On each interval, read new lines from the room's chat.log.
+- Print new messages to stdout (so you can see them or pipe them).
+- Optionally call your handler with the new message as argument.
+- Support --persona to load a full persona definition (from skills/planning-team or agents/personas) at startup.
+- Periodically post a lightweight heartbeat (optional with --heartbeat).
+
+This is the recommended pattern for "live agent sessions that have to check the room within intervals".
+"""
+
+import argparse
+import os
+import sys
+import time
+import random
+from datetime import datetime, timezone
+from pathlib import Path
+import subprocess
+from typing import Optional
+
+
+def prune_stale_presence(presence_dir: Path, stale_seconds: int = 600) -> None:
+    """Remove presence files for agents not seen recently so `who` doesn't show
+    dead agents (cleans up after crashed/externally-killed agents)."""
+    try:
+        if not presence_dir.exists():
+            return
+        now = time.time()
+        for last_seen in presence_dir.glob("*.last_seen"):
+            try:
+                if now - last_seen.stat().st_mtime > stale_seconds:
+                    stem = last_seen.name[: -len(".last_seen")]
+                    (presence_dir / f"{stem}.persona").unlink(missing_ok=True)
+                    last_seen.unlink(missing_ok=True)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+HARNESS_ROOT = Path(__file__).parent.parent
+ROOMS_ROOT = HARNESS_ROOT / "brain" / "rooms"
+
+
+def get_room_paths(domain: str):
+    room_dir = ROOMS_ROOT / domain
+    room_dir.mkdir(parents=True, exist_ok=True)
+    chat_log = room_dir / "chat.log"
+    presence_dir = room_dir / "presence"
+    presence_dir.mkdir(exist_ok=True)
+    return chat_log, presence_dir
+
+
+def get_last_offset(state_file: Path) -> int:
+    if state_file.exists():
+        try:
+            return int(state_file.read_text().strip())
+        except Exception:
+            pass
+    return 0
+
+
+def save_last_offset(state_file: Path, offset: int):
+    state_file.write_text(str(offset))
+
+
+def update_presence(presence_dir: Path, speaker: str, persona: Optional[str] = None):
+    ts = datetime.now(timezone.utc).isoformat()
+    (presence_dir / f"{speaker}.last_seen").write_text(ts)
+    if persona:
+        (presence_dir / f"{speaker}.persona").write_text(persona)
+
+
+def load_persona(name: str) -> Optional[str]:
+    """Try to load a persona definition.
+
+    Primary home is now harness/personas/ — a big, user-managed folder.
+    You can organize it however you want (general/, domains/<domain>/, research/, etc.).
+    The loader searches recursively.
+    """
+    search_roots = [
+        HARNESS_ROOT / "personas",                    # NEW primary big manageable folder
+        HARNESS_ROOT / "skills" / "planning-team",
+        HARNESS_ROOT / "agents" / "personas",         # legacy
+    ]
+    name_variants = [name, name.lower(), name.replace(" ", "_"), name.replace(" ", "-")]
+
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for variant in name_variants:
+            for path in root.rglob(f"*{variant}*.md"):
+                if path.is_file():
+                    content = path.read_text(encoding="utf-8")
+                    return f"# Loaded Persona: {name}\n# Source: {path.relative_to(HARNESS_ROOT)}\n\n{content}"
+    return None
+
+
+def post_heartbeat(domain: str, speaker: str):
+    cmd = [
+        str(HARNESS_ROOT / "bin" / "domain-room"),
+        "post", domain, f"{speaker} (watcher)",
+        f"heartbeat at {datetime.now(timezone.utc).isoformat()}"
+    ]
+    try:
+        subprocess.run(cmd, check=False, capture_output=True)
+    except Exception:
+        pass
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Watch a domain room for new messages (for live agents).")
+    parser.add_argument("domain", help="Domain slug (e.g. discovery)")
+    parser.add_argument("speaker", help="Your speaker name as registered in the room (e.g. 'Grok')")
+    parser.add_argument("--interval", type=float, default=10.0, help="Seconds between checks (default 10)")
+    parser.add_argument("--on-message", help="Optional script/command to run for each new message (receives the full line as $1)")
+    parser.add_argument("--heartbeat", action="store_true", help="Post lightweight heartbeats to the room on each cycle")
+    parser.add_argument("--heartbeat-interval", type=int, default=60, help="How often to heartbeat (in cycles)")
+    parser.add_argument("--persona", help="Persona name to load (e.g. DEEP_RESEARCHER, SYSTEMS_ARCHITECT, ceo-orchestrator). Will be injected at startup and recorded in presence.")
+    args = parser.parse_args()
+
+    chat_log, presence_dir = get_room_paths(args.domain)
+    state_file = presence_dir / f".last_offset.{args.speaker.replace(' ', '_')}"
+
+    persona_content = None
+    if args.persona:
+        persona_content = load_persona(args.persona)
+        if persona_content:
+            print(f"\n{'='*60}")
+            print(persona_content[:2000] + ("\n... (truncated)" if len(persona_content) > 2000 else ""))
+            print(f"{'='*60}\n")
+            print(f"[watcher] Persona '{args.persona}' loaded and will be used for this session.\n")
+        else:
+            print(f"[watcher] WARNING: Could not find persona definition for '{args.persona}'")
+
+    print(f"[watcher] Starting for room '{args.domain}' as '{args.speaker}'")
+    if args.persona:
+        print(f"[watcher] Running with persona: {args.persona}")
+    print(f"[watcher] Checking every {args.interval}s. Log: {chat_log}")
+    print(f"[watcher] Press Ctrl-C to stop.\n")
+
+    last_offset = get_last_offset(state_file)
+    cycle = 0
+    consecutive_errors = 0
+    max_consecutive_errors = 10
+    max_backoff = min(args.interval * 10, 300)
+
+    try:
+        while True:
+            cycle += 1
+
+            try:
+                if chat_log.exists():
+                    with open(chat_log, "r", encoding="utf-8", errors="replace") as f:
+                        f.seek(last_offset)
+                        new_lines = f.readlines()
+                        new_offset = f.tell()
+
+                    for line in new_lines:
+                        line = line.rstrip("\n")
+                        if not line or line.startswith("#"):
+                            continue
+                        print(f"[room] {line}")
+
+                        if args.on_message:
+                            try:
+                                subprocess.run([args.on_message, line], check=False)
+                            except Exception as e:
+                                print(f"[watcher] handler error: {e}", file=sys.stderr)
+
+                    if new_offset != last_offset:
+                        save_last_offset(state_file, new_offset)
+                        last_offset = new_offset
+
+                # Update presence (including current persona if set)
+                update_presence(presence_dir, args.speaker, args.persona)
+
+                # Periodically clean up presence files of dead agents (~ every 30 cycles)
+                if cycle % 30 == 0:
+                    prune_stale_presence(presence_dir)
+
+                # Optional heartbeat
+                if args.heartbeat and (cycle % max(1, args.heartbeat_interval) == 0):
+                    post_heartbeat(args.domain, args.speaker)
+
+                consecutive_errors = 0
+                # Jitter avoids a thundering herd when many watchers poll together.
+                time.sleep(args.interval + random.uniform(0, 1))
+
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                consecutive_errors += 1
+                backoff = min(args.interval * (2 ** consecutive_errors), max_backoff)
+                print(f"[watcher] error (attempt {consecutive_errors}/{max_consecutive_errors}): {e}. "
+                      f"Backing off {backoff:.0f}s", file=sys.stderr)
+                if consecutive_errors >= max_consecutive_errors:
+                    print("[watcher] too many consecutive errors; exiting.", file=sys.stderr)
+                    sys.exit(1)
+                time.sleep(backoff)
+
+    except KeyboardInterrupt:
+        print("\n[watcher] Stopped.")
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

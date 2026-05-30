@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""
+reference-for-chat
+
+Create a clean, copy-pasteable reference to a file (or lines in a file) that works well in Slack, Discord, or the custom room.
+
+Usage examples:
+  # Basic reference
+  ./bin/reference-for-chat context/discovery-team/docs/briefs/discovery-agent-analysis-microapp-brief.md
+
+  # Specific lines
+  ./bin/reference-for-chat path/to/file.py 42 67
+
+  # With a short note
+  ./bin/reference-for-chat path/to/file.md --note "This is the key section on semantic graphs"
+
+Output is designed to be posted directly into chat. It includes:
+- Clean relative path
+- Line range if specified
+- Optional short note
+- Small content snippet (if the range is reasonable)
+"""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+def get_project_root():
+    # Try to find the project root (where .git or harness/ exists)
+    current = Path.cwd()
+    for parent in [current] + list(current.parents):
+        if (parent / ".git").exists() or (parent / "harness").exists():
+            return parent
+    return current
+
+def read_file_slice(file_path: Path, start_line: int | None, end_line: int | None, max_lines=30):
+    if not file_path.exists():
+        return None, f"File not found: {file_path}"
+
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except Exception as e:
+        return None, f"Error reading file: {e}"
+
+    total_lines = len(lines)
+
+    if start_line is None:
+        start_line = 1
+    if end_line is None:
+        end_line = total_lines
+
+    start_line = max(1, start_line)
+    end_line = min(total_lines, end_line)
+
+    if end_line - start_line + 1 > max_lines:
+        end_line = start_line + max_lines - 1
+
+    snippet = "".join(lines[start_line-1:end_line])
+    return snippet, None
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate a chat-friendly file reference")
+    parser.add_argument("path", help="Path to the file (relative or absolute)")
+    parser.add_argument("start_line", nargs="?", type=int, default=None, help="Start line (optional)")
+    parser.add_argument("end_line", nargs="?", type=int, default=None, help="End line (optional)")
+    parser.add_argument("--note", help="Optional short note to include")
+    parser.add_argument("--no-snippet", action="store_true", help="Don't include a content snippet")
+
+    args = parser.parse_args()
+
+    project_root = get_project_root()
+    target_path = Path(args.path)
+
+    # Make path relative to project root if possible
+    try:
+        rel_path = target_path.resolve().relative_to(project_root.resolve())
+    except ValueError:
+        rel_path = target_path.resolve()
+
+    snippet = None
+    if not args.no_snippet and (args.start_line or args.end_line):
+        snippet, error = read_file_slice(target_path, args.start_line, args.end_line)
+        if error:
+            print(error, file=sys.stderr)
+            sys.exit(1)
+
+    # Build the reference message
+    parts = []
+    parts.append(f"**File:** `{rel_path}`")
+
+    if args.start_line or args.end_line:
+        start = args.start_line or 1
+        end = args.end_line or "end"
+        parts.append(f"**Lines:** {start}-{end}")
+
+    if args.note:
+        parts.append(f"**Note:** {args.note}")
+
+    if snippet:
+        parts.append("```")
+        parts.append(snippet.rstrip())
+        parts.append("```")
+
+    output = "\n".join(parts)
+    print(output)
+
+if __name__ == "__main__":
+    main()

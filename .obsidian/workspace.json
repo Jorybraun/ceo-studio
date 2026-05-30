@@ -1,0 +1,225 @@
+{
+  "main": {
+    "id": "6c2c5618b04f5c5d",
+    "type": "split",
+    "children": [
+      {
+        "id": "d90f415ca1db5c0a",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "636404cfae7150d1",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "DOMAIN_DESIGN.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "DOMAIN_DESIGN"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "d851805d15ee2d83",
+    "type": "split",
+    "children": [
+      {
+        "id": "c3179248722b4233",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "55a66d4c4b366093",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "7586a88fc0805274",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "0ebee0b3348358a9",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "4631037957cf724e",
+    "type": "split",
+    "children": [
+      {
+        "id": "b79f86c6c494ad46",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "a9de81adc6623096",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "DOMAIN_DESIGN.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for DOMAIN_DESIGN"
+            }
+          },
+          {
+            "id": "64eaae084d0acf50",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "DOMAIN_DESIGN.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from DOMAIN_DESIGN"
+            }
+          },
+          {
+            "id": "7430ac0d9cc93f59",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "afee244ad254a8ad",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "74079a22e105b77c",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "DOMAIN_DESIGN.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline of DOMAIN_DESIGN"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "636404cfae7150d1",
+  "lastOpenFiles": [
+    "runtime/harness/tests/__pycache__/test_registry_lifecycle.cpython-314-pytest-9.0.3.pyc",
+    "runtime/harness/tests/__pycache__/test_cost_limits.cpython-314-pytest-9.0.3.pyc",
+    "runtime/harness/brain/rooms/__adaptertest__/agents/capworker1.json",
+    "runtime/harness/brain/rooms/__adaptertest__/agents/capworker1/echo_sessions.json",
+    "runtime/harness/brain/rooms/__adaptertest__/agents/capworker1",
+    "runtime/harness/brain/rooms/__adaptertest__/agents/capworker0.json",
+    "runtime/harness/brain/rooms/__adaptertest__/agents/capworker0/echo_sessions.json",
+    "runtime/harness/brain/rooms/__adaptertest__/agents/capworker0",
+    "runtime/harness/brain/rooms/__adaptertest__/chat.log.lockd",
+    "runtime/harness/brain/rooms/__adaptertest__/agents/tester/echo_sessions.json",
+    "runtime/harness/brain/rooms/__adaptertest__/agents/tester.json",
+    "runtime/harness/brain/rooms/__adaptertest__/agenda.md",
+    "runtime/harness/templates/workspace/mgmt/stage-map.md",
+    "runtime/harness/templates/workspace/kanban/all.md",
+    "runtime/harness/skills/planning-team/research/DEEP_RESEARCHER.md",
+    "runtime/harness/skills/planning-team/design-ux/SENIOR_DESIGNER_UX.md",
+    "runtime/harness/skills/planning-team/architecture/SYSTEMS_ARCHITECT.md",
+    "runtime/harness/templates/workspace/SCHEMA.md",
+    "runtime/harness/templates/workspace/README.md",
+    "runtime/harness/teams/discovery-planning/definition.md",
+    "runtime/harness/src/herder-overstory/README.md",
+    "runtime/harness/src/herder-overstory/AGENT_ACTIVATION.md",
+    "runtime/harness/src/herder-overstory/A2A_INTEGRATION.md",
+    "runtime/harness/skills/pipe-os-management/SKILL.md",
+    "runtime/harness/skills/meta/SKILL_CREATOR_AUDITOR.md",
+    "runtime/harness/skills/herder-swarm-control/SKILL.md",
+    "runtime/harness/skills/herder-messaging/USAGE.md",
+    "runtime/harness/skills/herder-messaging/SKILL.md",
+    "runtime/harness/skills/custom-kanban-workflows/SKILL.md",
+    "runtime/harness/personas/research/DEEP_RESEARCHER.md",
+    "runtime/harness/personas/general/swarm-facilitator.md",
+    "runtime/harness/personas/general/pm.md",
+    "runtime/harness/personas/general/planner.md",
+    "runtime/harness/personas/general/ceo-orchestrator.md",
+    "runtime/harness/personas/general/ba.md",
+    "runtime/harness/personas/general/architect.md"
+  ]
+}

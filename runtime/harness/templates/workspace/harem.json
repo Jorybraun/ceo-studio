@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "project": {
+    "slug": "__SLUG__",
+    "name": "__NAME__",
+    "root": ".."
+  },
+  "default_domain": "all",
+  "domains": ["all"],
+  "providers": {
+    "default": "echo",
+    "allow_paid": false
+  },
+  "cost": {
+    "max_session_usd": 5,
+    "max_day_usd": 20,
+    "max_concurrent_agents": 5,
+    "max_spawns_per_cycle": 2,
+    "max_spawns_per_hour": 12
+  },
+  "created_at": "__CREATED_AT__",
+  "harness_version": "__HARNESS_VERSION__"
+}

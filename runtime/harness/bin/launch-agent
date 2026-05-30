@@ -1,0 +1,215 @@
+#!/bin/bash
+#
+# launch-agent
+# Start or prepare a live agent session using the canonical herder registry.
+#
+
+set -e
+
+NAME=""
+PERSONA_OVERRIDE=""
+DOMAIN_OVERRIDE=""
+PROFILE_OVERRIDE=""
+
+usage() {
+    echo "Usage: ./bin/launch-agent --name <agent-name> [--persona <PersonaName>] [--domain discovery] [--profile <hermes-profile>]"
+    echo ""
+    echo "Personas come from the big manageable folder: harness/personas/"
+    echo "  (you can organize into subfolders: general/, research/, domains/<foo>/, etc.)"
+    echo "  Use /new <name> <persona> in herder-chat, or pass --persona here."
+    echo ""
+    echo "This is part of the Harem (the local agent/persona/herder system)."
+    echo ""
+    echo "Examples:"
+    echo "  ./bin/launch-agent --name my-researcher --persona deep-researcher"
+    echo "  ./bin/launch-agent --name grok-2 --persona planner"
+    echo ""
+    exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --name) NAME="$2"; shift 2 ;;
+        --persona) PERSONA_OVERRIDE="$2"; shift 2 ;;
+        --domain) DOMAIN_OVERRIDE="$2"; shift 2 ;;
+        --profile) PROFILE_OVERRIDE="$2"; shift 2 ;;
+        -h|--help) usage ;;
+        *) echo "Unknown option: $1"; usage ;;
+    esac
+done
+
+if [[ -z "$NAME" ]]; then
+    usage
+fi
+
+HARNESS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REGISTRY_LOOKUP=(python3 "$HARNESS_ROOT/agents/registry.py" lookup "$NAME" --format shell)
+if [[ -n "$DOMAIN_OVERRIDE" ]]; then
+    REGISTRY_LOOKUP+=(--domain "$DOMAIN_OVERRIDE")
+fi
+
+if ! REGISTRY_OUTPUT="$("${REGISTRY_LOOKUP[@]}" 2>&1)"; then
+    echo "$REGISTRY_OUTPUT" >&2
+    exit 1
+fi
+
+# registry.py emits shlex-quoted fixed variable assignments.
+eval "$REGISTRY_OUTPUT"
+
+if [[ -n "$PERSONA_OVERRIDE" ]]; then
+    PERSONA="$PERSONA_OVERRIDE"
+fi
+if [[ -n "$PROFILE_OVERRIDE" ]]; then
+    PROFILE="$PROFILE_OVERRIDE"
+fi
+
+if [[ "$LAUNCHABLE" != "1" ]]; then
+    echo "Error: Agent '$NAME' is not launchable: ${LAUNCH_STATUS_REASON:-disabled or unsupported launch mode}" >&2
+    exit 1
+fi
+
+WATCH_CMD="cd $HARNESS_ROOT && ./bin/domain-room watch $CANONICAL_ROOM \"$ROOM_SPEAKER\" --persona $PERSONA --interval 12 --heartbeat"
+
+tmux_session_target() {
+    # tmux target matching is prefix-based by default. Use '=' so short names
+    # like pipe-grok never accidentally resolve to pipe-grok-builder.
+    printf '=%s' "$1"
+}
+
+ensure_watcher_window() {
+    local session="$1"
+    local window="$2"
+    local cmd="$3"
+    if tmux list-windows -t "$(tmux_session_target "$session")" -F '#{window_name}' 2>/dev/null | grep -Fxq "$window"; then
+        echo "Watcher window '$window' already exists in $session; reusing it."
+    else
+        tmux new-window -t "$(tmux_session_target "$session")" -n "$window" "$cmd"
+    fi
+}
+
+echo "=== Launching agent: $AGENT_ID ==="
+echo "Display name: $DISPLAY_NAME"
+echo "Domain: $CANONICAL_ROOM"
+echo "Tmux session: $TMUX_SESSION"
+echo "Tmux window: $TMUX_WINDOW"
+echo "Launch mode: $LAUNCH_MODE"
+if [[ -n "$PROFILE" ]]; then
+    echo "Profile: $PROFILE"
+fi
+if [[ -n "$COMMAND" ]]; then
+    echo "Command: $COMMAND"
+fi
+
+# Enforced cost/concurrency guardrail (single source of truth: config/cost_limits.py).
+# This works for BOTH humans and automated/subprocess callers — the old interactive
+# "type yes" prompt was silently skipped when spawned via subprocess, which is how
+# credits got burned. We now consult the enforced gate first, then optionally prompt.
+GUARDRAIL_INTERACTIVE=""
+if [[ -t 0 ]]; then
+    GUARDRAIL_INTERACTIVE="--interactive"
+fi
+
+if ! GUARDRAIL_OUT="$(python3 "$HARNESS_ROOT/config/cost_limits.py" check "$AGENT_ID" $GUARDRAIL_INTERACTIVE 2>&1)"; then
+    echo ">>> Spawn refused by cost guardrail: $GUARDRAIL_OUT" >&2
+    if [[ "$AGENT_ID" =~ ^grok- && "$AGENT_ID" != "grok" ]]; then
+        echo ">>> '$AGENT_ID' is a SEPARATE paid Grok session — the #1 credit-burn vector." >&2
+        echo ">>> To allow it deliberately, re-run with CEO_ALLOW_PAID=1 (interactive) and confirm below." >&2
+    fi
+    # Only humans at a TTY may override; automated callers are hard-blocked.
+    if [[ -t 0 && "$AGENT_ID" =~ ^grok- && "$AGENT_ID" != "grok" ]]; then
+        read -r -p ">>> Type 'yes' to override and proceed anyway (not recommended): " confirm
+        if [[ "$confirm" != "yes" ]]; then
+            echo "Aborted."
+            exit 1
+        fi
+        echo ""
+    else
+        exit 1
+    fi
+fi
+
+# Record the spawn against the rolling guardrail ledger (best-effort).
+python3 "$HARNESS_ROOT/config/cost_limits.py" check "$AGENT_ID" --interactive --record >/dev/null 2>&1 || true
+
+case "$LAUNCH_MODE" in
+    hermes_profile)
+        if [[ -z "$PROFILE" ]]; then
+            echo "Error: Registry entry '$AGENT_ID' uses launch_mode=hermes_profile but has no profile." >&2
+            exit 1
+        fi
+
+        if ! tmux has-session -t "$(tmux_session_target "$TMUX_SESSION")" 2>/dev/null; then
+            tmux new-session -d -s "$TMUX_SESSION" -n "$TMUX_WINDOW"
+            echo "Created new tmux session: $TMUX_SESSION"
+        else
+            echo "Reusing existing session: $TMUX_SESSION"
+        fi
+
+        echo "Launching Hermes profile '$PROFILE' inside ${TMUX_SESSION}:${TMUX_WINDOW}..."
+        tmux send-keys -t "=$(printf '%s:%s' "$TMUX_SESSION" "$TMUX_WINDOW")" "cd $HARNESS_ROOT && hermes --profile $PROFILE" C-m
+        echo "Starting persona-enabled room watcher in window '$WATCHER_WINDOW'..."
+        ensure_watcher_window "$TMUX_SESSION" "$WATCHER_WINDOW" "$WATCH_CMD"
+        ;;
+
+    external)
+        if ! tmux has-session -t "$(tmux_session_target "$TMUX_SESSION")" 2>/dev/null; then
+            tmux new-session -d -s "$TMUX_SESSION" -n "$TMUX_WINDOW"
+            echo "Created new tmux session: $TMUX_SESSION"
+        else
+            echo "Reusing existing session: $TMUX_SESSION"
+        fi
+
+        if [[ -n "$COMMAND" ]]; then
+            # Previously this only PRINTED the command and never ran it — so an
+            # "external" agent had no brain and could never communicate. Now we
+            # actually start the registry command in the main window (the spawn
+            # already passed the cost guardrail above).
+            echo "Starting external agent command in ${TMUX_SESSION}:${TMUX_WINDOW}: $COMMAND"
+            tmux send-keys -t "=$(printf '%s:%s' "$TMUX_SESSION" "$TMUX_WINDOW")" "cd $HARNESS_ROOT && $COMMAND" C-m
+        else
+            echo "No registry command configured for '$AGENT_ID'."
+            echo "Prefer a provider-backed adapter instead (recommended): ./bin/agent dispatch --provider <p> --agent $AGENT_ID --room $CANONICAL_ROOM --task \"...\""
+            echo "(A bare tmux window with no brain cannot communicate — see harness/COMMS_FINDINGS.md.)"
+        fi
+        echo "Starting persona-enabled room watcher in window '$WATCHER_WINDOW'..."
+        ensure_watcher_window "$TMUX_SESSION" "$WATCHER_WINDOW" "$WATCH_CMD"
+        ;;
+
+    watcher_only)
+        if ! tmux has-session -t "$(tmux_session_target "$TMUX_SESSION")" 2>/dev/null; then
+            tmux new-session -d -s "$TMUX_SESSION" -n "$WATCHER_WINDOW" "$WATCH_CMD"
+            echo "Created watcher-only tmux session: $TMUX_SESSION"
+        else
+            echo "Reusing existing watcher-only session: $TMUX_SESSION"
+        fi
+        echo "Agent '$AGENT_ID' is watcher-only; no agent brain was started."
+        ;;
+
+    disabled)
+        echo "Error: Agent '$AGENT_ID' is disabled: ${LAUNCH_STATUS_REASON:-disabled}" >&2
+        exit 1
+        ;;
+
+    *)
+        echo "Error: Unsupported launch mode '$LAUNCH_MODE' for '$AGENT_ID'." >&2
+        exit 1
+        ;;
+esac
+
+echo ""
+echo "=== Agent session prepared (herder-native) ==="
+echo "Agent id: $AGENT_ID"
+echo "Display name: $DISPLAY_NAME"
+echo "Launch mode: $LAUNCH_MODE"
+echo "Tmux session: $TMUX_SESSION"
+echo "Room: $CANONICAL_ROOM"
+echo "Watcher speaker: $ROOM_SPEAKER"
+echo ""
+echo "To open/surface the room using herder mechanisms (recommended):"
+echo "  - Inside your main herder tmux:  tmux switch-client -t $TMUX_SESSION"
+echo "  - Or attach:                     tmux attach -t $TMUX_SESSION"
+echo "  - Web herder room view:          ./bin/domain-room-ui $CANONICAL_ROOM"
+echo "  - Rich herder chat:              ./bin/herder-chat --domain $CANONICAL_ROOM"
+echo "  - Status + presence:             ./bin/domain-room who $CANONICAL_ROOM"
+echo ""
+echo "Use herder tools (domain-room commands) to interact — no new OS terminals will be auto-opened."

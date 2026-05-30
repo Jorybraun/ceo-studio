@@ -1,0 +1,13 @@
+# Core dependencies for the CEO Harness meta-layer
+# Add more as we implement real orchestrator logic
+
+# For now keep it very light — the heavy lifting happens in delegated harnesses
+python-dotenv>=1.0.0
+pydantic>=2.0
+rich>=13.0   # nice CLI output for chat / status
+
+# Future:
+# fastapi          # if we add an API for Kanban + chat
+# uvicorn
+# sqlalchemy
+# httpx            # for talking to Hermes / GBrain / Overstory

@@ -1,0 +1,62 @@
+#!/bin/bash
+#
+# agent-launch
+# Launches a Hermes profile inside its own tmux session and opens a terminal window.
+#
+# Usage:
+#   ./bin/agent-launch --profile kanban-orchestrator --name ceo --board pipe-os
+#   ./bin/agent-launch --profile pipe-research --name research --board pipe-os
+#
+
+set -e
+
+PROFILE=""
+NAME=""
+BOARD=""
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --profile) PROFILE="$2"; shift 2 ;;
+    --name)    NAME="$2"; shift 2 ;;
+    --board)   BOARD="$2"; shift 2 ;;
+    *) echo "Unknown option: $1"; exit 1 ;;
+  esac
+done
+
+if [[ -z "$PROFILE" || -z "$NAME" ]]; then
+  echo "Usage: $0 --profile <hermes-profile> --name <agent-name> [--board <board>]"
+  exit 1
+fi
+
+SESSION_NAME="pipe-${NAME}"
+REGISTRY_DIR="$HOME/.agent-sessions"
+mkdir -p "$REGISTRY_DIR"
+
+# Create the tmux session if it doesn't exist
+if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+  tmux new-session -d -s "$SESSION_NAME" -n main
+
+  # Build the command to run inside the session
+  CMD="hermes"
+  if [[ -n "$BOARD" ]]; then
+    CMD="$CMD --board $BOARD"
+  fi
+  CMD="$CMD --profile $PROFILE"
+
+  # You can customize the exact Hermes command here later
+  # For now we just attach the profile so the agent is "alive" and ready
+  tmux send-keys -t "$SESSION_NAME:main" "$CMD" C-m
+
+  echo "Started tmux session: $SESSION_NAME with profile: $PROFILE"
+else
+  echo "Session $SESSION_NAME already exists."
+fi
+
+# Register the session so other agents can discover it
+echo "$SESSION_NAME" > "$REGISTRY_DIR/$NAME"
+
+# Open a new Terminal window attached to this session (macOS)
+osascript -e "tell application \"Terminal\" to do script \"tmux attach -t $SESSION_NAME\""
+
+echo "Opened terminal window for agent: $NAME"
+echo "You can re-attach anytime with: tmux attach -t $SESSION_NAME"

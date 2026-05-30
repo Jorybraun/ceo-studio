@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""
+herder-dashboard
+
+A live terminal dashboard for the herder, inspired by Overstory's `ov dashboard`.
+
+Shows:
+- Narrow left sidebar: Currently active agents + their personas (from live heartbeats/presence)
+- Large main area: Live Agent Chat from the domain room, with every message clearly showing "Speaker (Persona)"
+
+You can type messages directly while the dashboard is running — they post to the room and appear in the chat panel.
+
+Designed as a clean herder-native dashboard (inspired by Overstory style but adapted to our domain room + persona system).
+
+Usage:
+  ./bin/herder-dashboard --domain discovery --interval 3
+
+  While running, just type a message and press Enter to post it to the room.
+
+Requires: pip install rich
+"""
+
+import argparse
+import json
+import select
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+try:
+    from rich.console import Console
+    from rich.layout import Layout
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+except ImportError:
+    print("Please install rich: pip install rich")
+    exit(1)
+
+HARNESS_ROOT = Path(__file__).parent.parent
+ROOMS_ROOT = HARNESS_ROOT / "brain" / "rooms"
+
+
+def load_agent_registry(domain: str) -> dict[str, Any]:
+    """Load agents for a domain from the central registry (PR 1)."""
+    try:
+        # Add harness root to path so we can import the registry module
+        sys.path.insert(0, str(HARNESS_ROOT))
+        from agents import registry as agent_registry
+
+        agents = {}
+        for name, data in agent_registry.AGENTS.items():
+            if data.get("default_room") == domain or domain == "all":
+                agents[name] = {
+                    "name": name,
+                    "persona": data.get("persona"),
+                    "role": data.get("role"),
+                    "tmux_session": data.get("tmux_session"),
+                }
+        return agents
+    except Exception:
+        return {}
+
+
+def get_presence(room_dir: Path) -> list[dict[str, str]]:
+    """Read current presence from the room's presence/ directory."""
+    presence_dir = room_dir / "presence"
+    agents = []
+    if not presence_dir.exists():
+        return agents
+
+    for last_seen_file in presence_dir.glob("*.last_seen"):
+        speaker = last_seen_file.stem
+        try:
+            last_seen = last_seen_file.read_text().strip()
+        except Exception:
+            last_seen = "unknown"
+
+        persona_file = presence_dir / f"{speaker}.persona"
+        persona = persona_file.read_text().strip() if persona_file.exists() else "—"
+
+        agents.append({
+            "speaker": speaker,
+            "persona": persona,
+            "last_seen": last_seen,
+        })
+    return sorted(agents, key=lambda x: x["last_seen"], reverse=True)
+
+
+def send_message_to_room(domain: str, speaker: str, message: str):
+    """Post a message to the domain room (same format as domain-room post)."""
+    room_dir = ROOMS_ROOT / domain
+    chat_log = room_dir / "chat.log"
+    ts = datetime.now(timezone.utc).isoformat() + "Z"
+    line = f"[{ts}] {speaker}: {message}"
+    with open(chat_log, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+def parse_room_messages(chat_log: Path, limit: int = 15) -> list[tuple[str, str, str]]:
+    """Return list of (timestamp, speaker, message) from the room log, most recent last."""
+    if not chat_log.exists():
+        return []
+    try:
+        lines = chat_log.read_text(encoding="utf-8", errors="replace").splitlines()
+        parsed = []
+        for line in lines[-limit:]:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # Expected format: [2026-05-28T18:32:38Z] Speaker: message here
+            if line.startswith("[") and "] " in line:
+                ts_part, rest = line.split("] ", 1)
+                ts = ts_part.lstrip("[")
+                if ": " in rest:
+                    speaker, message = rest.split(": ", 1)
+                    parsed.append((ts, speaker.strip(), message.strip()))
+                else:
+                    parsed.append((ts, "System", rest))
+            else:
+                parsed.append(("", "System", line))
+        return parsed
+    except Exception:
+        return []
+
+
+def build_layout(domain: str, agents: list[dict], recent: list[tuple[str, str, str]]) -> Layout:
+    layout = Layout()
+
+    layout.split(
+        Layout(name="header", size=3),
+        Layout(name="main"),
+        Layout(name="footer", size=3),
+    )
+
+    # Header
+    header = Panel(
+        Text(f"Herder Dashboard — {domain}", style="bold cyan"),
+        border_style="cyan",
+    )
+    layout["header"].update(header)
+
+    # Main layout:
+    # - Left: narrow fixed-width sidebar for agents/personas (so it doesn't feel like a big competing panel)
+    # - Right: the main Agent Chat area
+    layout["main"].split_row(
+        Layout(name="agents", size=28),   # fixed narrow sidebar (~28 chars wide)
+        Layout(name="chat"),              # takes the rest (the important chat)
+    )
+
+    # Agents panel (left sidebar) - compact list instead of wide table
+    # This prevents ugly truncation and makes it feel like a clean sidebar, not a competing panel.
+    agent_lines = Text()
+    if agents:
+        for a in agents:
+            name = a["speaker"]
+            persona = a["persona"] if a.get("persona") and a["persona"] != "—" else ""
+            last = a["last_seen"][:19] if a.get("last_seen") else ""
+
+            if persona:
+                line = f"{name} ({persona})"
+            else:
+                line = name
+
+            agent_lines.append(line + "\n", style="cyan")
+            if last:
+                agent_lines.append(f"  last: {last}\n", style="dim")
+            agent_lines.append("\n")
+    else:
+        agent_lines.append("No active agents\n", style="dim italic")
+
+    layout["agents"].update(Panel(agent_lines, border_style="green", title="[bold]Active Agents[/bold]"))
+
+    # Build speaker -> persona lookup from live presence data
+    # Be a bit forgiving with common suffixes like " (watcher)"
+    speaker_to_persona = {}
+    for a in agents:
+        if a.get("persona") and a["persona"] != "—":
+            base = a["speaker"].replace(" (watcher)", "").strip()
+            speaker_to_persona[base] = a["persona"]
+            speaker_to_persona[a["speaker"]] = a["persona"]  # also keep exact match
+
+    # Chat panel (right) - proper agent chat view with clear agent identification
+    chat_lines = Text()
+    if recent:
+        for ts, speaker, message in recent[-12:]:
+            short_ts = ts[11:19] if len(ts) > 18 else ts  # HH:MM:SS
+            base_speaker = speaker.replace(" (watcher)", "").strip()
+            persona = speaker_to_persona.get(base_speaker, speaker_to_persona.get(speaker, ""))
+
+            # Determine display name with persona
+            if persona:
+                display_name = f"{speaker} ({persona})"
+            else:
+                display_name = speaker
+
+            # Color the whole agent identifier
+            if any(x in speaker.lower() for x in ["grok", "builder", "architect"]):
+                name_style = "bold green"
+            elif "hermes" in speaker.lower() or "orchestrator" in speaker.lower():
+                name_style = "bold yellow"
+            else:
+                name_style = "bold cyan"
+
+            chat_lines.append(f"[{short_ts}] ", style="dim")
+            chat_lines.append(f"{display_name}: ", style=name_style)
+            chat_lines.append(f"{message}\n", style="white")
+    else:
+        chat_lines.append("No messages in room yet...", style="dim italic")
+
+    chat_panel = Panel(
+        chat_lines,
+        title=f"[bold blue]Live Agent Chat — {domain} Room (with persona names)[/bold blue]",
+        border_style="blue",
+        padding=(0, 1),
+    )
+    layout["chat"].update(chat_panel)
+
+    # Footer
+    footer = Panel(
+        Text("Left sidebar = Active Agents + Personas   |   Main = Live Agent Chat (with names + personas)   |   Type + Enter to send   |   Ctrl+C to exit", style="dim"),
+        border_style="dim",
+    )
+    layout["footer"].update(footer)
+
+    return layout
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Herder live dashboard (Overstory-inspired)")
+    parser.add_argument("--domain", default="discovery", help="Domain room to monitor")
+    parser.add_argument("--interval", type=float, default=2.0, help="Refresh interval in seconds")
+    args = parser.parse_args()
+
+    console = Console()
+    room_dir = ROOMS_ROOT / args.domain
+    chat_log = room_dir / "chat.log"
+
+    console.print(f"[bold cyan]Starting herder dashboard for domain: {args.domain}[/bold cyan]")
+    console.print("[yellow]This is a view-only monitoring dashboard (agents sidebar + chat).[/yellow]")
+    console.print("[yellow]For typing / sending messages / steering with a stable fixed input bar at the bottom (no jumping), run:[/yellow]")
+    console.print(f"  [bold]./bin/herder-chat --domain {args.domain}[/bold]")
+    console.print("Showing live agents (with personas) + Agent Chat from the domain room.")
+
+    try:
+        with Live(build_layout(args.domain, [], []), refresh_per_second=4, screen=True) as live:
+            while True:
+                agents = get_presence(room_dir)
+                recent = parse_room_messages(chat_log)
+                live.update(build_layout(args.domain, agents, recent))
+
+                # Input handling is disabled here on purpose.
+                # The old select+readline method caused constant jumping and disappearing text
+                # when typing (especially longer messages).
+                #
+                # For a proper fixed-height input bar at the bottom (no jumping, clean typing like your screenshot),
+                # use the Textual version instead:
+                #     ./bin/herder-chat --domain {args.domain}
+                #
+                # This dashboard is now view-only / monitoring (agents + chat).
+                # Type in herder-chat when you want to send messages or steer agents.
+
+                time.sleep(max(0.2, args.interval - 0.1))
+    except KeyboardInterrupt:
+        console.print("\n[green]Dashboard stopped.[/green]")
+
+
+if __name__ == "__main__":
+    main()

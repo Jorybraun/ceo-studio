@@ -1,0 +1,92 @@
+#!/bin/bash
+#
+# herder-steer
+#
+# Send a steering message directly into a running agent's canonical tmux session
+# using metadata from harness/agents/registry.py.
+#
+
+set -e
+
+if [[ $# -lt 2 ]]; then
+    echo "Usage: $0 <agent-name> <message> [--submit | --type-only]"
+    echo ""
+    echo "The agent-name must resolve through harness/agents/registry.py. Unknown or watcher-only"
+    echo "agents fail visibly; this command never guesses pipe-<name> sessions."
+    echo ""
+    echo "Examples:"
+    echo "  $0 kanban-orchestrator \"Please review the graph schema first\""
+    echo "  $0 grok-builder \"Start implementing the activation handler\" --submit"
+    exit 1
+fi
+
+AGENT_NAME="$1"
+shift
+
+SUBMIT=false
+MESSAGE_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --submit)
+            SUBMIT=true
+            shift
+            ;;
+        --type-only)
+            SUBMIT=false
+            shift
+            ;;
+        *)
+            MESSAGE_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+MESSAGE="${MESSAGE_ARGS[*]}"
+
+if [[ -z "$MESSAGE" ]]; then
+    echo "Error: No message provided." >&2
+    exit 1
+fi
+
+HARNESS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REGISTRY_LOOKUP=(python3 "$HARNESS_ROOT/agents/registry.py" lookup "$AGENT_NAME" --format shell)
+if ! REGISTRY_OUTPUT="$("${REGISTRY_LOOKUP[@]}" 2>&1)"; then
+    echo "$REGISTRY_OUTPUT" >&2
+    exit 1
+fi
+
+# registry.py emits shlex-quoted fixed variable assignments.
+eval "$REGISTRY_OUTPUT"
+
+if [[ "$STEERABLE" != "1" ]]; then
+    if [[ "$LAUNCH_MODE" == "watcher_only" ]]; then
+        echo "Error: Agent '$AGENT_ID' is watcher-only and has no steerable input window." >&2
+    elif [[ "$LAUNCHABLE" != "1" ]]; then
+        echo "Error: Agent '$AGENT_ID' is not steerable: ${LAUNCH_STATUS_REASON:-disabled or unsupported launch mode}." >&2
+    else
+        echo "Error: Agent '$AGENT_ID' is not steerable (launch_mode=$LAUNCH_MODE)." >&2
+    fi
+    exit 1
+fi
+
+TARGET="=${TMUX_SESSION}:${TMUX_WINDOW}"
+
+if ! tmux has-session -t "=${TMUX_SESSION}" 2>/dev/null; then
+    echo "Error: No tmux session found for agent '$AGENT_ID' (expected $TMUX_SESSION from registry)" >&2
+    echo "Launch it first with: ./bin/launch-agent --name $AGENT_ID" >&2
+    exit 1
+fi
+
+# Send the message text into the agent's canonical input window.
+tmux send-keys -t "$TARGET" "$MESSAGE"
+
+if $SUBMIT; then
+    tmux send-keys -t "$TARGET" C-m
+    echo "Submitted message to agent '$AGENT_ID' ($DISPLAY_NAME) at $TARGET:"
+else
+    echo "Typed into input of agent '$AGENT_ID' ($DISPLAY_NAME) at $TARGET (review/edit before sending inside the agent):"
+fi
+
+echo "  $MESSAGE"

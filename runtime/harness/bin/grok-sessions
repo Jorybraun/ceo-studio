@@ -1,0 +1,43 @@
+#!/bin/bash
+#
+# grok-sessions
+# List active Grok Build tmux sessions and give credit-aware advice.
+#
+# Because each separate grok-* session is its own independent API consumer.
+
+set -e
+
+echo "=== Grok Build Sessions (Credit Impact) ==="
+echo
+
+sessions=$(tmux list-sessions 2>/dev/null | grep -E 'pipe-grok' | awk -F: '{print $1}' || true)
+
+if [[ -z "$sessions" ]]; then
+    echo "No active pipe-grok* sessions found."
+    echo
+    echo "Current best practice: Do most work in your main 'grok' session."
+    echo "Only start extra ones (grok-research, grok-builder, etc.) when you have a very specific need for isolation."
+    exit 0
+fi
+
+count=$(echo "$sessions" | wc -l | tr -d ' ')
+
+echo "Active sessions ($count):"
+echo "$sessions" | sed 's/^/  /'
+echo
+
+if [[ "$count" -gt 1 ]]; then
+    echo ">>> You currently have MULTIPLE Grok Build sessions running."
+    echo ">>> Each one is making its own separate calls to the xAI API."
+    echo ">>> This burns credits much faster than using a single strong session."
+    echo
+    echo "Recommended actions:"
+    echo "  - Do research, planning, and building directly in your main 'grok' session."
+    echo "  - Kill extras with: tmux kill-session -t <session>"
+    echo "  - Quick kill all but main: tmux list-sessions | grep pipe-grok- | grep -v 'pipe-grok:' | awk -F: '{print \$1}' | xargs -I {} tmux kill-session -t ={}"
+    echo "  - Use ./bin/grok-sessions before starting new work to check."
+else
+    echo "Only one Grok session active. Good."
+    echo "Try to keep it this way for most work."
+fi
+echo

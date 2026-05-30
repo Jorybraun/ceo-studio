@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""
+agent — generic, provider-backed agent adapter for the harness swarm.
+
+Run ANY provider's agent (Devin CLI today; others via the provider interface)
+as a first-class swarm member that communicates on the domain-room bus, with
+two-way (resumable) conversations and enforced cost guardrails.
+
+Examples:
+  ./bin/agent dispatch --provider devin --agent devin-research --room discovery \
+      --task "Summarize the top Triage item in 2 sentences. Don't edit files."
+  ./bin/agent tell --agent devin-research --room discovery \
+      --message "The human asks: give one concrete example."
+  ./bin/agent dispatch --provider echo --agent tester --room demo --task "hello"   # free, no API
+  ./bin/agent sessions --room discovery
+  ./bin/agent providers
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from agents import agent_adapter
+from agents import providers
+
+
+def cmd_dispatch(args):
+    # A human at a TTY may dispatch paid providers; automated callers can't (unless CEO_ALLOW_PAID=1).
+    r = agent_adapter.dispatch(args.provider, args.agent, args.room, args.task,
+                               model=args.model, timeout=args.timeout,
+                               interactive=sys.stdin.isatty())
+    if not r.get("ok"):
+        print(f"[agent] refused/failed: {r.get('reason')}", file=sys.stderr)
+        sys.exit(3)
+    print(f"[agent] {args.agent} via {r['provider']} in {r.get('seconds')}s (session={r.get('session_id')})")
+    print(f"\n--- {args.agent} reply ---\n{r['reply']}\n")
+
+
+def cmd_tell(args):
+    r = agent_adapter.tell(args.agent, args.room, args.message, timeout=args.timeout)
+    if not r.get("ok"):
+        print(f"[agent] {r.get('reason')}", file=sys.stderr)
+        sys.exit(1)
+    print(f"\n--- {args.agent} reply ---\n{r['reply']}\n")
+
+
+def cmd_sessions(args):
+    rows = agent_adapter.list_agents(args.room)
+    if not rows:
+        print(f"(no agents in room '{args.room}')")
+        return
+    for s in rows:
+        print(f"{s.get('agent'):24} provider={s.get('provider'):8} "
+              f"model={str(s.get('model')):10} session={s.get('session_id')}")
+
+
+def cmd_providers(_args):
+    print("Available providers:", ", ".join(providers.known_providers()))
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Generic provider-backed swarm agent adapter")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    d = sub.add_parser("dispatch")
+    d.add_argument("--provider", default="devin")
+    d.add_argument("--agent", required=True)
+    d.add_argument("--room", default="discovery")
+    d.add_argument("--task", required=True)
+    d.add_argument("--model", default=None)
+    d.add_argument("--timeout", type=int, default=600)
+    d.set_defaults(func=cmd_dispatch)
+
+    t = sub.add_parser("tell")
+    t.add_argument("--agent", required=True)
+    t.add_argument("--room", default="discovery")
+    t.add_argument("--message", required=True)
+    t.add_argument("--timeout", type=int, default=600)
+    t.set_defaults(func=cmd_tell)
+
+    s = sub.add_parser("sessions")
+    s.add_argument("--room", default="discovery")
+    s.set_defaults(func=cmd_sessions)
+
+    p = sub.add_parser("providers")
+    p.set_defaults(func=cmd_providers)
+
+    args = ap.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

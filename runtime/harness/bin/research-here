@@ -1,0 +1,34 @@
+#!/bin/bash
+#
+# research-here
+# Quick helper to frame a research task for the current main Grok session.
+# Use this instead of spawning a separate grok-research agent when possible.
+#
+# Example:
+#   ./bin/research-here "Analyze the micro-app brief and list the top 5 risks with evidence"
+
+set -e
+
+if [[ $# -eq 0 ]]; then
+    echo "Usage: ./bin/research-here \"your research question or task\""
+    echo ""
+    echo "This is meant to be used in your main 'grok' (pipe-grok) session."
+    echo "It helps you get high-quality research without spinning up a separate expensive grok-research session."
+    exit 1
+fi
+
+TASK="$*"
+
+echo "=== Research Task for Current Grok Session ==="
+echo ""
+echo "Task: $TASK"
+echo ""
+echo "Recommendation:"
+echo "  - Copy the task above into your main @grok chat."
+echo "  - Or post it in the discovery room as a clear research request."
+echo "  - The current strong Grok session usually gives better results than the dedicated grok-research agent."
+echo ""
+echo "If you still want to use a dedicated session (not recommended for credits):"
+echo "  herder-chat --domain discovery"
+echo "  Then: /new grok-research deep-researcher   (will warn heavily)"
+echo ""

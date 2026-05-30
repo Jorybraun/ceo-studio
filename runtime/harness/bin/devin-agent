@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""
+devin-agent — thin back-compat alias for the generic `bin/agent` adapter with
+the Devin provider preselected. The generic, provider-based adapter is the
+canonical tool now (see bin/agent and agents/providers/). Kept so existing
+muscle memory / scripts keep working.
+
+  devin-agent dispatch --agent X --room R --task "..."   ==  agent dispatch --provider devin ...
+  devin-agent tell     --agent X --room R --message "..." ==  agent tell ...
+  devin-agent sessions --room R
+"""
+
+import os
+import sys
+from pathlib import Path
+
+HARNESS_ROOT = Path(__file__).resolve().parent.parent
+AGENT_BIN = str(HARNESS_ROOT / "bin" / "agent")
+
+args = sys.argv[1:]
+# Inject --provider devin for dispatch unless caller already set one.
+if args and args[0] == "dispatch" and "--provider" not in args:
+    args = ["dispatch", "--provider", "devin"] + args[1:]
+
+os.execvp(sys.executable, [sys.executable, AGENT_BIN] + args)

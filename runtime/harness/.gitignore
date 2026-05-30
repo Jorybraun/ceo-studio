@@ -1,0 +1,8 @@
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Runaway feedback-loop log: ~55MB of persona-responder stub self-replies
+# (free CPU/disk, no API cost). Root cause documented in SWARM_ISSUES.md.
+brain/rooms/discovery/chat.log

@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""
+harem-kanban-finisher
+
+Convenience command to start the Kanban-Finishing Orchestrator.
+
+This is the recommended way to run the long-lived orchestrator that drives Kanban items to completion using the Harem.
+"""
+
+import os
+import sys
+from pathlib import Path
+
+HARNESS_ROOT = Path(__file__).parent.parent
+
+def main():
+    domain = "discovery"
+    room = "main"
+
+    args = sys.argv[1:]
+    for i, arg in enumerate(args):
+        if arg in ("--domain", "-d") and i + 1 < len(args):
+            domain = args[i + 1]
+        if arg in ("--room", "-r") and i + 1 < len(args):
+            room = args[i + 1]
+
+    print(f"[Harem] Starting Kanban Finisher Orchestrator in {domain}:{room}")
+    print("Using kanban-finisher persona + herder-swarm-control + herder-messaging skills.")
+    print("This process will drive the Kanban to completion by creating and delegating to persona agents.")
+
+    cmd = [
+        str(HARNESS_ROOT / "bin" / "harem-orchestrator"),
+        "--domain", domain,
+        "--room", room
+    ]
+    os.execvp(cmd[0], cmd)
+
+if __name__ == "__main__":
+    main()

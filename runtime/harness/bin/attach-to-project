@@ -1,0 +1,60 @@
+#!/bin/bash
+#
+# attach-to-project
+# Helper to quickly prepare the CEO Harness for a target project.
+#
+# Usage:
+#   ./bin/attach-to-project /path/to/my-project my-project-name
+#
+
+set -e
+
+TARGET_DIR="${1:-}"
+PROJECT_SLUG="${2:-}"
+
+if [ -z "$TARGET_DIR" ]; then
+  echo "Usage: $0 <target-project-path> [project-slug]"
+  exit 1
+fi
+
+if [ -z "$PROJECT_SLUG" ]; then
+  PROJECT_SLUG=$(basename "$TARGET_DIR" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+fi
+
+echo "Attaching CEO Harness to project:"
+echo "  Path : $TARGET_DIR"
+echo "  Slug : $PROJECT_SLUG"
+echo
+
+# Create data directories
+DATA_ROOT="$HOME/.ceo-harness/$PROJECT_SLUG"
+mkdir -p "$DATA_ROOT/brain"
+mkdir -p "$DATA_ROOT/conversations"
+mkdir -p "$DATA_ROOT/kanban"
+
+echo "Created data directories at: $DATA_ROOT"
+
+# Create an example env file for this project
+ENV_EXAMPLE="examples/$PROJECT_SLUG/.env.example"
+mkdir -p "$(dirname "$ENV_EXAMPLE")"
+
+cat > "$ENV_EXAMPLE" <<EOF
+PROJECT_NAME=$PROJECT_SLUG
+TARGET_PROJECT=$TARGET_DIR
+
+BRAIN_DATA_PATH=$DATA_ROOT/brain
+CONVERSATIONS_PATH=$DATA_ROOT/conversations
+KANBAN_STATE_PATH=$DATA_ROOT/kanban
+
+# HERMES_URL=http://localhost:8080
+# BRAIN_URL=http://localhost:8000
+EOF
+
+echo "Created example env file: $ENV_EXAMPLE"
+echo
+echo "Next steps:"
+echo "  1. Copy $ENV_EXAMPLE to a real .env file and adjust paths if needed"
+echo "  2. Start with Docker:"
+echo "     docker compose --profile $PROJECT_SLUG up -d"
+echo
+echo "  Or run the chat directly against this project once the orchestrator supports it."

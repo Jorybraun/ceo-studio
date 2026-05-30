@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""
+harem-delegate
+
+Helper used by the Kanban Finisher Orchestrator (and humans) to spin up agents for a Kanban task
+using the new team + workflow + stage-map system (or raw personas for power users).
+
+Preferred forms (stage-map driven):
+  harem delegate --task "..." --team discovery-planning --workflow discovery-planning-triage --room discovery:main
+
+Legacy / explicit form (still supported):
+  harem-delegate --task "..." --personas "ba,architect,pm" --room discovery:main
+"""
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+# Make the harness package importable when running the script directly
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from config.kanban import get_stage_mapping, DomainKanbanConfig  # noqa: E402
+from config import cost_limits  # noqa: E402
+
+HARNESS_ROOT = Path(__file__).parent.parent
+
+
+def _agent_session_running(agent_name: str) -> bool:
+    """True if a tmux session for this agent already exists (avoid duplicates)."""
+    try:
+        r = subprocess.run(
+            ["tmux", "has-session", "-t", f"={agent_name}"],
+            capture_output=True,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _load_default_personas_for_team(team: str) -> str | None:
+    """Very lightweight extraction from teams/<team>/definition.md.
+    Looks for a line like: **Default Personas**: foo, bar, baz
+    This is intentionally tiny and stdlib-only (no YAML, no heavy parsing).
+    """
+    team_def = HARNESS_ROOT / "teams" / team / "definition.md"
+    if not team_def.exists():
+        return None
+    try:
+        text = team_def.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if "Default Personas" in line and ":" in line:
+                _, rest = line.split(":", 1)
+                personas = rest.strip().strip("`*_").strip()
+                if personas:
+                    return personas
+    except Exception:
+        pass
+    return None
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Delegate a Kanban task to the right team / personas (stage-map aware)"
+    )
+    parser.add_argument("--task", required=True, help="Kanban task / item title or description")
+    parser.add_argument("--personas", help="Comma-separated list of personas (legacy / explicit form)")
+    parser.add_argument("--team", help="Named team from harness/teams/ (preferred with stage-map)")
+    parser.add_argument("--workflow", help="Named workflow from harness/workflows/ (goes with --team)")
+    parser.add_argument("--stage", help="Kanban stage name (Triage, Ready for Execution, etc). Will try to look up team/workflow from the domain stage-map.")
+    parser.add_argument("--room", "--domain", default="discovery:main", dest="room")
+    parser.add_argument("--tag", default="kanban-delegation", help="Tag for spawned agents (persistence / filtering)")
+    args = parser.parse_args()
+
+    domain, room = args.room.split(":", 1) if ":" in args.room else (args.room, "main")
+
+    # Resolve using the real config object when --stage is provided
+    personas = args.personas
+    team_used = args.team
+    workflow_used = args.workflow
+    resolved_from_stage = False
+
+    if args.stage and not (args.team or args.personas):
+        try:
+            mapping = get_stage_mapping(domain, args.stage)
+            team_used = mapping.team or team_used
+            workflow_used = mapping.workflow or workflow_used
+            if mapping.default_personas:
+                personas = ",".join(mapping.default_personas)
+            resolved_from_stage = True
+            print(f"[Harem Delegate] Resolved from config object: domain={domain} stage='{args.stage}'")
+            print(f"[Harem Delegate]   → team={team_used}, workflow={workflow_used}")
+        except Exception as e:
+            print(f"[Harem Delegate] Warning: Could not resolve stage '{args.stage}' from config: {e}")
+
+    # Fallback: team definition file (for teams defined in Markdown)
+    if not personas and args.team:
+        personas = _load_default_personas_for_team(args.team)
+        if personas:
+            print(f"[Harem Delegate] Loaded default personas for team '{args.team}': {personas}")
+        else:
+            print(f"[Harem Delegate] Warning: Could not auto-extract personas for team '{args.team}'. Pass --personas explicitly.")
+
+    if not personas:
+        parser.error("You must provide either --personas, --team, or --stage (that resolves via harness/config/kanban.py)")
+
+    print(f"[Harem Delegate] Task: {args.task}")
+    stage_label = args.stage or ("(resolved)" if resolved_from_stage else "(inferred)")
+    if team_used or workflow_used or args.stage:
+        print(f"[Harem Delegate] Team: {team_used or '(n/a)'} | Workflow: {workflow_used or '(n/a)'} | Stage: {stage_label}")
+    print(f"[Harem Delegate] Personas: {personas}")
+    print(f"[Harem Delegate] Target room: {domain}:{room}")
+
+    spawned = 0
+    spawns_this_call = 0
+    for persona in [p.strip() for p in personas.split(",") if p.strip()]:
+        safe_task = args.task.lower().replace(" ", "-")[:30]
+        agent_name = f"{persona}-for-{safe_task}"
+
+        # Dedup: don't spawn a duplicate of an agent that's already running.
+        if _agent_session_running(agent_name):
+            print(f"[Harem Delegate] Agent '{agent_name}' already running — skipping (no duplicate).")
+            continue
+
+        # Enforced guardrail: refuse paid/over-budget/over-concurrency spawns.
+        allowed, reason = cost_limits.can_spawn(agent_name, spawns_this_cycle=spawns_this_call)
+        if not allowed:
+            print(f"[Harem Delegate] REFUSED to spawn '{agent_name}': {reason}", file=sys.stderr)
+            continue
+
+        cmd = [
+            str(HARNESS_ROOT / "bin" / "harem"),
+            "agent",
+            "-a", agent_name,
+            "-p", persona,
+            "-d", f"{domain}:{room}",
+            "-t", args.tag,
+            "-c",   # open chat for visibility / interaction
+        ]
+        print(f"[Harem Delegate] Spawning: {' '.join(cmd)}")
+        subprocess.Popen(cmd)
+        cost_limits.record_spawn(agent_name)
+        spawned += 1
+        spawns_this_call += 1
+
+    if spawned:
+        print(f"[Harem Delegate] Delegation request sent ({spawned} agent(s)). Monitor the target room for replies.")
+    else:
+        print("[Harem Delegate] No agents spawned (all skipped/refused by dedup or guardrail).")
+
+
+if __name__ == "__main__":
+    main()
