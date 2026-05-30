@@ -221,6 +221,21 @@ Example usage is shown in the Quick Start above.
 | `herder-chat`       | The rich interactive chat UI (what you spend most time in) |
 | `herder-steer`      | Low-level: inject text into an agent's tmux pane |
 
+**Room log management.** Each room's `chat.log` is the shared bus and can grow
+without bound (a single misbehaving agent once produced a 55MB log). `domain-room`
+now self-manages it:
+
+- **Auto-rotation:** every `post` checks the log size; once it exceeds
+  `ROOM_LOG_MAX_BYTES` (default 5 MiB, set `0` to disable) the log is moved to
+  `chat.log.1` (one generation kept) and a fresh log is started. Disk per room is
+  bounded to ~2× the cap, with no cron required.
+- **Manual trim:** `domain-room compact <domain> [keep]` trims to the last `keep`
+  lines (default 5000) and backs up first. Passing `[keep]` makes it
+  non-interactive so it can run from a script/cron.
+- Readers (`domain-room watch`, `herder-chat`) detect the size shrink from
+  rotation/compaction and reset their read offset, so no messages are dropped or
+  re-fired.
+
 #### Starting & Running Agents
 
 | Command                | Purpose |

@@ -44,7 +44,7 @@ usage() {
     echo "  watch  <domain> <speaker> Long-running watcher for live agents (polls room at intervals)"
     echo "                           Supports --persona NAME, --interval, --on-message, --heartbeat"
     echo "  cleanup <domain>         Kill stray herder-chat / watcher / agent tmux sessions for this domain (use with care)"
-    echo "  compact <domain>         Trim old chat.log history (keeps last N lines + backup)"
+    echo "  compact <domain> [keep]  Trim old chat.log history (keeps last N lines + backup; default 5000, non-interactive when [keep] given)"
     echo ""
     echo "Easiest:"
     echo "  $SCRIPT_NAME chat discovery"
@@ -82,6 +82,48 @@ append_locked() {
         fi
     done
     printf '%s\n' "$line" >> "$target"
+    rmdir "$lockdir" 2>/dev/null || true
+}
+
+# Auto-rotation guard. A single misbehaving agent (e.g. the old persona-responder
+# self-trigger loop) or just normal long-lived chatter can grow chat.log without
+# bound — we once hit a 55MB log of stub self-replies. When the live log grows
+# past ROOM_LOG_MAX_BYTES we move it aside to chat.log.1 (keeping exactly one
+# previous generation for debugging) and start a fresh log. Disk is bounded to
+# ~2x the cap per room. Set ROOM_LOG_MAX_BYTES=0 to disable.
+#
+# Readers (domain-room-watch, herder-chat) detect the resulting size shrink and
+# reset their byte offset, so rotation never drops or re-fires messages.
+ROOM_LOG_MAX_BYTES="${ROOM_LOG_MAX_BYTES:-5242880}"  # 5 MiB
+
+rotate_if_needed() {
+    local log="$1"
+    [[ -f "$log" ]] || return 0
+    [[ "$ROOM_LOG_MAX_BYTES" -gt 0 ]] 2>/dev/null || return 0
+    local size
+    size=$(wc -c < "$log" 2>/dev/null | tr -d ' ')
+    [[ -n "$size" && "$size" -gt "$ROOM_LOG_MAX_BYTES" ]] || return 0
+
+    # Rotate under the same mutex as appends so we don't race a concurrent writer.
+    local lockdir="${log}.lockd"
+    local waited=0
+    while ! mkdir "$lockdir" 2>/dev/null; do
+        sleep 0.05
+        waited=$((waited + 1))
+        if [[ $waited -ge 100 ]]; then
+            break
+        fi
+    done
+    # Re-check under lock: another writer may have just rotated.
+    size=$(wc -c < "$log" 2>/dev/null | tr -d ' ')
+    if [[ -n "$size" && "$size" -gt "$ROOM_LOG_MAX_BYTES" ]]; then
+        mv -f "$log" "${log}.1"
+        {
+            echo "# ${DOMAIN} Team Room - Chat Log"
+            echo "Room created: $(date -u +%Y-%m-%dT%H:%M:%SZ) (rotated; previous log at $(basename "$log").1)"
+            echo ""
+        } > "$log"
+    fi
     rmdir "$lockdir" 2>/dev/null || true
 }
 
@@ -146,6 +188,7 @@ post_message() {
 
     TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     append_locked "$CHAT_LOG" "[$TIMESTAMP] $SPEAKER: $MESSAGE"
+    rotate_if_needed "$CHAT_LOG"
 
     echo "Posted to $DOMAIN room as $SPEAKER"
 }
@@ -303,8 +346,16 @@ compact() {
     lines=$(wc -l < "$CHAT_LOG")
     echo "Current lines: $lines"
 
-    read -r -p "Keep last how many lines? (default 5000) " keep
-    keep=${keep:-5000}
+    # Scriptable: `domain-room compact <domain> [keep]` runs unattended (cron).
+    # Falls back to an interactive prompt only when no count is given AND we
+    # have a terminal; otherwise defaults to 5000 so it never blocks.
+    local keep="$1"
+    if [[ -z "$keep" ]]; then
+        if [[ -t 0 ]]; then
+            read -r -p "Keep last how many lines? (default 5000) " keep
+        fi
+        keep=${keep:-5000}
+    fi
 
     if [[ "$lines" -le "$keep" ]]; then
         echo "Log is already under $keep lines. Nothing to do."
@@ -393,6 +444,7 @@ interactive_chat() {
 
         TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         append_locked "$CHAT_LOG" "[$TIMESTAMP] Human: $input"
+        rotate_if_needed "$CHAT_LOG"
         echo "Posted."
     done
 }
@@ -434,7 +486,7 @@ case "$CMD" in
         cleanup
         ;;
     compact)
-        compact
+        compact "$@"
         ;;
     *)
         usage

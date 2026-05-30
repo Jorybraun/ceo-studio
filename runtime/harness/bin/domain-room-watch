@@ -167,6 +167,15 @@ def main():
 
             try:
                 if chat_log.exists():
+                    # Rotation/compaction safety: if the log shrank below our
+                    # saved offset (domain-room rotated it, compact trimmed it,
+                    # or it was deleted+recreated), our offset now points past
+                    # EOF. Reset to the start so we don't silently miss every
+                    # future message. Re-reading a freshly rotated log is safe:
+                    # it only contains '#' header lines, which handlers skip.
+                    if chat_log.stat().st_size < last_offset:
+                        print("[watcher] log rotated/truncated — resetting read offset")
+                        last_offset = 0
                     with open(chat_log, "r", encoding="utf-8", errors="replace") as f:
                         f.seek(last_offset)
                         new_lines = f.readlines()

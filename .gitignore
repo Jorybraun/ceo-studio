@@ -10,3 +10,6 @@ dist/
 
 # Transient agent handoff briefs
 .voice-brief.md
+
+# Local Hermes runtime state / agent task briefs (never commit)
+.hermes/
