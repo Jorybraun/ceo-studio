@@ -12,7 +12,10 @@ const Module = require("module");
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "ceo-studio-boot-"));
 process.env.CEO_STUDIO_HOME = HOME;
-delete process.env.CEO_MODEL_PROVIDER;
+// Set to empty (not delete) so .env.local loader won't override them
+process.env.CEO_MODEL_PROVIDER = "";
+process.env.OPENAI_API_KEY = "";
+process.env.ANTHROPIC_API_KEY = "";
 // Keep voice offline + deterministic for the headless boot test. Set empty
 // (not delete) so index.js's .env.local loader won't repopulate it.
 process.env.ELEVENLABS_API_KEY = "";
@@ -55,7 +58,7 @@ const ok = (n, c) => { if (!c) { console.error("FAIL", n); process.exitCode = 1;
 
   const opened = await handlers["project:open"](null, added.id);
   ok("project:open returns context + provider", !!opened.context && !!opened.providerId);
-  ok("offline provider note present", /NullProvider/i.test(opened.providerNote || ""));
+  ok("offline provider note present", /NullProvider|API_KEY missing/i.test(opened.providerNote || ""));
 
   const status0 = await handlers["cost:status"]();
   ok("cost:status live after open", status0 && status0.maxSessionUsd > 0);

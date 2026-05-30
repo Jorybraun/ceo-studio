@@ -37,6 +37,25 @@ function setLabel(text, live) {
 // the tool definitions in main/core/convai.js (TOOLS). Each returns a STRING
 // that ElevenLabs appends to the agent's context (expects_response: true).
 const clientTools = {
+  // The one tool the voice agent uses: relay everything to the Hermes CEO and
+  // return its reply for the agent to speak. The CEO holds the brain, memory,
+  // soul, kanban, and swarm — this is just the phone line.
+  async ask_ceo({ message } = {}) {
+    const msg = (message || "").trim();
+    if (!msg) return "No message to relay.";
+    ui().appendStream?.("user", msg);
+    ui().appendStream?.("sys", "→ CEO…");
+    let r;
+    try { r = await window.ceo.askCeo(msg); }
+    catch (e) { return `The CEO is unreachable right now (${e && e.message ? e.message : "error"}).`; }
+    if (!r || !r.ok) {
+      const reason = r ? r.reason : "unknown error";
+      ui().appendStream?.("sys", `⚠ CEO: ${reason}`);
+      return `The CEO couldn't respond: ${reason}`;
+    }
+    ui().appendStream?.("agent", r.reply);
+    return r.reply;
+  },
   async list_documents() {
     const docs = await window.ceo.docsList();
     if (!docs || !docs.length) return "No documents are indexed for this project.";
@@ -69,6 +88,236 @@ const clientTools = {
     const r = await window.ceo.swarmRequest(objective || "");
     ui().appendStream?.("sys", `🐝 Swarm requested: ${objective || ""}`);
     return r && r.message ? r.message : "Swarm orchestration is not enabled yet.";
+  },
+  async read_my_code({ path } = {}) {
+    if (!path) return "No path provided. Specify like 'main/core/agent.js' or 'renderer/convai.js'.";
+    const r = await window.ceo.readMyCode(path);
+    if (!r || !r.ok) return `Could not read ${path}: ${r ? r.reason : "unknown"}.`;
+    ui().showPanel?.(path, r.text);
+    ui().appendStream?.("sys", `🔍 Reading my code: ${path}`);
+    return `Reading ${path}:\n\n${r.text.slice(0, 8000)}`;
+  },
+  async list_my_code() {
+    const r = await window.ceo.listMyCode();
+    if (!r || !r.ok) return "Could not list code structure.";
+    const structure = r.files || [];
+    ui().appendStream?.("sys", `📂 My code structure: ${structure.length} files`);
+    return `My source code structure:\n${structure.map(f => `- ${f}`).join('\n')}`;
+  },
+  async show_architecture() {
+    const r = await window.ceo.readMyCode("README.md");
+    if (!r || !r.ok) return "Could not read architecture documentation.";
+    ui().showPanel?.("README.md", r.text);
+    ui().appendStream?.("sys", `📋 Showing architecture docs`);
+    return `CEO Studio architecture:\n\n${r.text.slice(0, 8000)}`;
+  },
+  async modify_my_code({ path, old_text, new_text } = {}) {
+    if (!path || !old_text || !new_text) return "Missing required parameters: path, old_text, new_text";
+    const r = await window.ceo.modifyMyCode(path, old_text, new_text);
+    if (!r || !r.ok) return `Modification failed: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `🔧 Modified ${path} and committed to git`);
+    return `Successfully modified ${path}. Changes committed to git: ${r.commit || "done"}`;
+  },
+  async test_my_changes() {
+    const r = await window.ceo.testMyChanges();
+    if (!r || !r.ok) return `Test execution failed: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `🧪 Tests run: ${r.passed}/${r.total} passed`);
+    return `Test results: ${r.passed}/${r.total} passed${r.failed > 0 ? `, ${r.failed} failed` : ""}`;
+  },
+  async repair_agent({ task } = {}) {
+    if (!task) return "No task provided. Describe what needs to be repaired.";
+    ui().appendStream?.("sys", `🔧 Repair Agent: ${task.slice(0, 100)}...`);
+    const r = await window.ceo.repairAgent(task);
+    if (!r || !r.ok) return `Repair agent failed: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `✅ Repair completed: ${r.summary || "done"}`);
+    return `Repair agent completed: ${r.summary || "Task completed"}. Changes: ${r.changes || "none"}`;
+  },
+  async get_brain_context({ domain } = {}) {
+    const r = await window.ceo.getBrainContext(domain);
+    if (!r || !r.ok) return `Could not load brain context: ${r ? r.reason : "unknown"}`;
+    
+    const ctx = r.context;
+    let response = `Brain context loaded:\n`;
+    
+    if (ctx.recentDecisions && ctx.recentDecisions.length > 0) {
+      response += `\nRecent decisions (${ctx.recentDecisions.length}):\n`;
+      ctx.recentDecisions.slice(0, 3).forEach(d => {
+        response += `- ${d.title}: ${d.summary}\n`;
+      });
+    }
+    
+    if (ctx.recentContradictions && ctx.recentContradictions.length > 0) {
+      response += `\nKnown contradictions (${ctx.recentContradictions.length}):\n`;
+      ctx.recentContradictions.forEach(c => {
+        response += `- ${c.title}: ${c.summary}\n`;
+      });
+    }
+    
+    if (ctx.relevantArtifacts && ctx.relevantArtifacts.length > 0) {
+      response += `\nRelevant artifacts (${ctx.relevantArtifacts.length}): showing first 5\n`;
+      ctx.relevantArtifacts.slice(0, 5).forEach(a => {
+        response += `- ${a.title}: ${a.summary}\n`;
+      });
+    }
+    
+    ui().appendStream?.("sys", `🧠 Brain context loaded: ${ctx.counts.artifacts} artifacts, ${ctx.counts.decisions} decisions`);
+    return response;
+  },
+  async search_brain({ query, domain } = {}) {
+    if (!query) return "No search query provided.";
+    ui().appendStream?.("sys", `🔍 Brain search: ${query.slice(0, 50)}...`);
+    const r = await window.ceo.searchBrain(query, domain);
+    if (!r || !r.ok) return `Brain search failed: ${r ? r.reason : "unknown"}`;
+    
+    const results = r.results || [];
+    let response = `Found ${results.length} relevant items:\n`;
+    results.slice(0, 5).forEach((item, i) => {
+      response += `${i + 1}. ${item.title || item.type}: ${item.summary || "no summary"}\n`;
+    });
+    
+    ui().appendStream?.("sys", `🧠 Brain search: ${results.length} results found`);
+    return response;
+  },
+  async add_to_brain({ title, content, artifact_type = "general" } = {}) {
+    if (!title || !content) return "Both title and content are required.";
+    ui().appendStream?.("sys", `🧠 Adding to brain: ${title}`);
+    const r = await window.ceo.addToBrain(title, content, artifact_type);
+    if (!r || !r.ok) return `Failed to add to brain: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `✅ Added to brain: ${r.id || "done"}`);
+    return `Added to brain as ${artifact_type}: ${title}`;
+  },
+  async define_domain({ name, purpose, responsibilities, coreAgents } = {}) {
+    if (!name || !purpose) return "Domain name and purpose are required.";
+    ui().appendStream?.("sys", `📋 Defining domain: ${name}`);
+    const r = await window.ceo.defineDomain({
+      name,
+      purpose,
+      responsibilities: responsibilities ? responsibilities.split(",").map(s => s.trim()) : [],
+      coreAgents: coreAgents ? coreAgents.split(",").map(s => s.trim()) : []
+    });
+    if (!r || !r.ok) return `Failed to define domain: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `✅ Domain defined: ${name}`);
+    return `Domain "${name}" defined with purpose: ${purpose}`;
+  },
+  async get_domain_context({ domain } = {}) {
+    const r = await window.ceo.getDomainDescription(domain);
+    if (!r || !r.ok) return `Could not get domain context: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `📋 Domain context loaded`);
+    return r.description;
+  },
+  async learn_domain({ domain, insight } = {}) {
+    if (!insight) return "Insight is required.";
+    ui().appendStream?.("sys", `🧠 Learning about domain: ${insight.slice(0, 50)}...`);
+    const r = await window.ceo.addDomainInsight(domain, insight);
+    if (!r || !r.ok) return `Failed to record insight: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `✅ Insight recorded`);
+    return `Learned: ${insight}`;
+  },
+  async ingest_domains({} = {}) {
+    ui().appendStream?.("sys", `🔄 Re-scanning project for domains...`);
+    const r = await window.ceo.ingestDomains();
+    if (!r || !r.ok) return `Failed to ingest domains: ${r ? r.reason : "unknown"}`;
+    const ingested = r.ingested || [];
+    ui().appendStream?.("sys", `✅ Ingested ${ingested.length} domains`);
+    let response = `Ingested ${ingested.length} domains:\n`;
+    ingested.forEach(d => {
+      response += `- ${d.name}: ${d.hasContext ? 'has context' : 'no context'} (${d.source}) at ${d.relativePath}\n`;
+    });
+    return response;
+  },
+  async get_domain_path({ domain } = {}) {
+    if (!domain) return "Domain name is required.";
+    const r = await window.ceo.getDomainPath(domain);
+    if (!r || !r.ok) return `Failed to get domain path: ${r ? r.reason : "unknown"}`;
+    
+    let response = `Domain "${domain}" location:\n`;
+    if (r.relativePath) response += `Relative path: ${r.relativePath}\n`;
+    if (r.sourceType) response += `Source type: ${r.sourceType}\n`;
+    if (r.fullPath) response += `Full path: ${r.fullPath}\n`;
+    
+    ui().appendStream?.("sys", `📍 Domain path: ${r.relativePath}`);
+    return response;
+  },
+  async remember_user({ memory, category = "general" } = {}) {
+    if (!memory) return "Memory is required.";
+    ui().appendStream?.("sys", `🧠 Remembering: ${memory.slice(0, 50)}...`);
+    const r = await window.ceo.addUserMemory(memory, category);
+    if (!r || !r.ok) return `Failed to remember: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `✅ Got it, I'll remember that!`);
+    window.ceo.recordInteraction("user-memory");
+    return `I'll remember that about you: ${memory}`;
+  },
+  async remember_fun_fact({ fact } = {}) {
+    if (!fact) return "Fun fact is required.";
+    ui().appendStream?.("sys", `😄 Fun fact: ${fact.slice(0, 50)}...`);
+    const r = await window.ceo.addUserFunFact(fact);
+    if (!r || !r.ok) return `Failed to remember: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `✅ That's awesome, I'll remember it!`);
+    window.ceo.recordInteraction("fun-fact");
+    return `I'll remember that fun fact: ${fact}`;
+  },
+  async get_user_context({} = {}) {
+    const r = await window.ceo.getUserContext();
+    if (!r || !r.ok) return `Failed to get user context: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `👤 Loading what I know about you...`);
+    return `Here's what I know about you:\n${r.context}`;
+  },
+  async update_user_profile({ name, communicationStyle, workStyle } = {}) {
+    const updates = {};
+    if (name) updates.name = name;
+    if (communicationStyle) updates.communicationStyle = communicationStyle;
+    if (workStyle) updates.workStyle = workStyle;
+    
+    if (Object.keys(updates).length === 0) return "Nothing to update.";
+    
+    ui().appendStream?.("sys", `👤 Updating your profile...`);
+    const r = await window.ceo.updateUserProfile(updates);
+    if (!r || !r.ok) return `Failed to update profile: ${r ? r.reason : "unknown"}`;
+    
+    let response = "Updated your profile";
+    if (name) response += ` - I'll call you ${name} now!`;
+    ui().appendStream?.("sys", `✅ Profile updated`);
+    window.ceo.recordInteraction("profile-update");
+    return response;
+  },
+  async read_soul({} = {}) {
+    ui().appendStream?.("sys", `📖 Reading my soul...`);
+    const r = await window.ceo.getSoul();
+    if (!r || !r.ok) return `Failed to read soul: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `✅ Soul loaded`);
+    return `Here's my current soul:\n${r.soul}`;
+  },
+  async update_soul({ section, content } = {}) {
+    if (!section || !content) return "Section and content are required.";
+    ui().appendStream?.("sys", `✍️ Updating my soul: ${section}...`);
+    const r = await window.ceo.updateSoulSection(section, content);
+    if (!r || !r.ok) return `Failed to update soul: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `✅ Soul updated`);
+    return `Updated my soul section: ${section}`;
+  },
+  async add_soul_milestone({ milestone } = {}) {
+    if (!milestone) return "Milestone is required.";
+    ui().appendStream?.("sys", `🎯 Adding milestone to my soul...`);
+    const r = await window.ceo.addSoulMilestone(milestone);
+    if (!r || !r.ok) return `Failed to add milestone: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `✅ Milestone recorded`);
+    return `Recorded milestone in my soul: ${milestone}`;
+  },
+  async add_soul_memory({ memory } = {}) {
+    if (!memory) return "Memory is required.";
+    ui().appendStream?.("sys", `💭 Adding memory to my soul...`);
+    const r = await window.ceo.addSoulMemory(memory);
+    if (!r || !r.ok) return `Failed to add memory: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `✅ Memory recorded`);
+    return `Recorded memory in my soul: ${memory}`;
+  },
+  async reflect_on_soul({ reflection } = {}) {
+    if (!reflection) return "Reflection is required.";
+    ui().appendStream?.("sys", `🤔 Reflecting on my growth...`);
+    const r = await window.ceo.reflectOnSoul(reflection);
+    if (!r || !r.ok) return `Failed to reflect: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `✅ Reflection recorded`);
+    return `Reflected on my growth: ${reflection}`;
   },
 };
 

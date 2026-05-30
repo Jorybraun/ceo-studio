@@ -41,6 +41,15 @@
     </div>
     <button id="kill"
             class="text-sm bg-red-600/90 hover:bg-red-600 text-white rounded-md px-3 py-1 font-medium transition">Kill</button>
+
+    <!-- CEO (Hermes) status pill -->
+    <div id="ceo-status" title="Hermes CEO daemon"
+         class="flex items-center gap-1.5 text-xs font-mono px-2.5 py-1 rounded-md border border-neutral-700 bg-neutral-800/50 text-neutral-400">
+      <span id="ceo-dot" class="w-2 h-2 rounded-full bg-neutral-600"></span>
+      <span id="ceo-label">CEO …</span>
+    </div>
+    <button id="toggle-dashboard"
+            class="text-sm bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 rounded-md px-3 py-1 font-medium transition">Dashboard</button>
   </header>
 
   <!-- Agent presence -->
@@ -76,7 +85,81 @@
     </section>
   </main>
 
+  <!-- CEO Dashboard overlay: live view of the Hermes Kanban board, swarm, and room -->
+  <div id="dashboard" class="hidden fixed inset-0 z-40 bg-neutral-950/97 backdrop-blur-sm flex flex-col">
+    <div class="flex items-center gap-3 px-4 py-2.5 border-b border-neutral-800 bg-neutral-900/70">
+      <span class="text-sm font-semibold tracking-tight text-neutral-100">CEO Dashboard</span>
+      <select id="dash-board"
+              class="bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1 text-sm text-neutral-200 focus:outline-none focus:ring-1 focus:ring-red-500/50"></select>
+      <div id="dash-ceo" class="flex items-center gap-1.5 text-xs font-mono px-2.5 py-1 rounded-md border border-neutral-700 bg-neutral-800/50 text-neutral-400">
+        <span id="dash-ceo-dot" class="w-2 h-2 rounded-full bg-neutral-600"></span><span id="dash-ceo-label">CEO …</span>
+      </div>
+      <div id="dash-stats" class="text-xs font-mono text-neutral-400"></div>
+      <div class="flex-1"></div>
+      <span id="dash-updated" class="text-[11px] text-neutral-600 font-mono"></span>
+      <button id="dash-config-btn" class="text-sm bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 rounded-md px-3 py-1 transition">⚙ Config</button>
+      <button id="dash-refresh" class="text-sm bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 rounded-md px-3 py-1 transition">Refresh</button>
+      <button id="dash-close" class="text-sm bg-neutral-100 text-neutral-900 hover:bg-white rounded-md px-3 py-1 font-medium transition">Close</button>
+    </div>
+
+    <!-- Config panel (overlay within the dashboard) -->
+    <div id="config-panel" class="hidden absolute inset-0 z-50 bg-neutral-950/95 backdrop-blur flex items-start justify-center pt-16">
+      <div class="w-[520px] max-w-[92vw] rounded-2xl border border-neutral-800 bg-neutral-900 shadow-2xl p-5 space-y-5">
+        <div class="flex items-center">
+          <span class="text-base font-semibold text-neutral-100">CEO Config</span>
+          <div class="flex-1"></div>
+          <button id="config-close" class="text-sm text-neutral-400 hover:text-neutral-100">✕</button>
+        </div>
+
+        <!-- CEO daemon control -->
+        <div class="rounded-xl border border-neutral-800 bg-neutral-900/60 p-3.5">
+          <div class="flex items-center gap-2">
+            <span id="config-ceo-dot" class="w-2.5 h-2.5 rounded-full bg-neutral-600"></span>
+            <span id="config-ceo-label" class="text-sm text-neutral-200">CEO …</span>
+            <div class="flex-1"></div>
+            <button id="config-gw-start" class="text-xs bg-emerald-600/90 hover:bg-emerald-600 text-white rounded-md px-3 py-1 font-medium transition">Start</button>
+            <button id="config-gw-stop" class="text-xs bg-red-600/90 hover:bg-red-600 text-white rounded-md px-3 py-1 font-medium transition">Stop</button>
+          </div>
+          <div id="config-platforms" class="mt-2 text-[11px] font-mono text-neutral-500"></div>
+        </div>
+
+        <!-- Model / provider -->
+        <div class="rounded-xl border border-neutral-800 bg-neutral-900/60 p-3.5 space-y-3">
+          <div class="text-xs uppercase tracking-wider text-neutral-500">Brain — model & provider</div>
+          <div id="config-current" class="text-[12px] font-mono text-neutral-400"></div>
+          <div class="flex gap-2">
+            <label class="flex-1 text-xs text-neutral-400">Provider
+              <select id="config-provider" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-red-500/50"></select>
+            </label>
+            <label class="flex-1 text-xs text-neutral-400">Model
+              <select id="config-model" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-red-500/50"></select>
+            </label>
+          </div>
+          <div class="flex items-center gap-2">
+            <button id="config-apply" class="text-sm bg-red-600 hover:bg-red-500 text-white rounded-md px-4 py-1.5 font-medium transition">Apply</button>
+            <span id="config-msg" class="text-xs text-neutral-500"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="flex-1 flex min-h-0">
+      <!-- Kanban board -->
+      <div class="flex-1 min-w-0 flex flex-col">
+        <div class="px-3 py-1.5 text-[11px] uppercase tracking-wider text-neutral-500 border-b border-neutral-800/60">Kanban Board</div>
+        <div id="dash-kanban" class="flex-1 overflow-x-auto overflow-y-hidden flex gap-3 p-3"></div>
+      </div>
+      <!-- Right rail: swarm + room -->
+      <div class="w-[360px] shrink-0 border-l border-neutral-800 flex flex-col min-h-0">
+        <div class="px-3 py-1.5 text-[11px] uppercase tracking-wider text-neutral-500 border-b border-neutral-800/60">Swarm</div>
+        <div id="dash-swarm" class="max-h-[40%] overflow-auto p-3 space-y-2"></div>
+        <div class="px-3 py-1.5 text-[11px] uppercase tracking-wider text-neutral-500 border-y border-neutral-800/60">Room — live activity</div>
+        <div id="dash-room" class="flex-1 overflow-auto p-3 space-y-1.5 text-xs font-mono"></div>
+      </div>
+    </div>
+  </div>
+
   <script src="app.js"></script>
+  <script src="dashboard.js"></script>
   <script type="module" src="convai.js"></script>
 </body>
 </html>

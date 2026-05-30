@@ -1,16 +1,20 @@
 "use strict";
 /**
- * The Brain — per-project context & memory (M0 / L0).
+ * The Brain — per-project context & memory (M0 / L0) with semantic search.
  *
  * Implements the artifact contract from the harness BRAIN_AND_GBRAIN_ROADMAP
  * (mirrored in CEO Studio E2E_PLAN §1). Principle: record first, synthesize
  * later. The JSONL indexes make context-gathering deterministic and cheap
  * (which also keeps token cost down at L1+).
+ *
+ * ENHANCED: Now supports semantic search using Vertex AI embeddings for
+ * intelligent artifact retrieval.
  */
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { brainDir } = require("./paths");
+const { createEmbeddingsProvider } = require("./embeddings");
 
 const INDEX_FILES = [
   "artifacts", "decisions", "open_questions",
@@ -138,22 +142,128 @@ function indexProjectDocs(slug, projectPath, { maxFiles = 2000 } = {}) {
 }
 
 /** Cheap, deterministic context load for an agent session. */
-function loadContext(slug) {
+function loadContext(slug, { maxArtifacts = 10, domain = null, useSemanticSearch = false, query = null } = {}) {
   const L = initBrain(slug);
   let strategy = "";
   try { strategy = fs.readFileSync(path.join(L.root, "current_strategy.md"), "utf-8"); } catch { /* */ }
+  
+  // Load relevant artifacts based on domain and recency
+  const allArtifacts = readIndex(slug, "artifacts");
+  let relevantArtifacts = allArtifacts;
+  
+  if (domain && domain !== "All") {
+    // Filter by domain if specified
+    relevantArtifacts = allArtifacts.filter(a => 
+      !a.domain || a.domain === "All" || a.domain.toLowerCase() === domain.toLowerCase()
+    );
+  }
+  
+  // For now, use recency-based sorting (semantic search is opt-in via separate function)
+  // Sort by recency and take most relevant
+  relevantArtifacts = relevantArtifacts
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+    .slice(0, maxArtifacts);
+  
+  // Load recent decisions and contradictions for context
+  const recentDecisions = readIndex(slug, "decisions")
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+    .slice(0, 5);
+  
+  const recentContradictions = readIndex(slug, "contradictions")
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+    .slice(0, 3);
+  
   return {
     strategy,
     counts: {
-      artifacts: readIndex(slug, "artifacts").length,
+      artifacts: allArtifacts.length,
       decisions: readIndex(slug, "decisions").length,
       open_questions: readIndex(slug, "open_questions").length,
       contradictions: readIndex(slug, "contradictions").length,
     },
+    relevantArtifacts,
+    recentDecisions,
+    recentContradictions,
   };
+}
+
+/**
+ * Perform semantic search over artifacts using embeddings.
+ * @param {string} slug - Project slug
+ * @param {string} query - Search query
+ * @param {Array} artifacts - Artifacts to search through
+ * @param {number} topK - Number of results to return
+ * @returns {Array} Most relevant artifacts
+ */
+async function semanticSearchArtifacts(slug, query, artifacts, topK = 5) {
+  const embeddings = createEmbeddingsProvider();
+  
+  // Generate embedding for the query
+  const queryEmbedding = await embeddings.generateEmbeddings(query);
+  
+  // Generate embeddings for artifacts (with caching)
+  const embeddingCache = getEmbeddingCache(slug);
+  const itemsWithEmbeddings = [];
+  
+  for (const artifact of artifacts) {
+    let embedding;
+    const cacheKey = artifact.id;
+    
+    if (embeddingCache.has(cacheKey)) {
+      embedding = embeddingCache.get(cacheKey);
+    } else {
+      // Use summary + title for embedding
+      const textToEmbed = `${artifact.title} ${artifact.summary}`;
+      embedding = await embeddings.generateEmbeddings(textToEmbed);
+      embeddingCache.set(cacheKey, embedding);
+    }
+    
+    itemsWithEmbeddings.push({
+      embedding,
+      data: artifact
+    });
+  }
+  
+  // Save cache
+  setEmbeddingCache(slug, embeddingCache);
+  
+  // Find most similar
+  const similarItems = embeddings.findMostSimilar(queryEmbedding, itemsWithEmbeddings, topK);
+  
+  return similarItems.map(item => item.data);
+}
+
+/**
+ * Get embedding cache for a project.
+ */
+function getEmbeddingCache(slug) {
+  const L = layout(slug);
+  const cachePath = path.join(L.index, "embeddings_cache.json");
+  
+  try {
+    const data = fs.readFileSync(cachePath, "utf-8");
+    return new Map(JSON.parse(data));
+  } catch {
+    return new Map();
+  }
+}
+
+/**
+ * Save embedding cache for a project.
+ */
+function setEmbeddingCache(slug, cache) {
+  const L = layout(slug);
+  const cachePath = path.join(L.index, "embeddings_cache.json");
+  
+  try {
+    const data = JSON.stringify(Array.from(cache.entries()));
+    fs.writeFileSync(cachePath, data);
+  } catch (error) {
+    console.log("Failed to save embedding cache:", error.message);
+  }
 }
 
 module.exports = {
   INDEX_FILES, layout, initBrain, writeArtifact, readIndex,
-  indexProjectDocs, loadContext,
+  indexProjectDocs, loadContext, semanticSearchArtifacts,
 };

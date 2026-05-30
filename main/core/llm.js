@@ -35,14 +35,31 @@ class NullProvider extends LLMProvider {
 }
 
 class OpenAIProvider extends LLMProvider {
-  constructor({ model, apiKey }) { super({ model: model || "gpt-4o" }); this.id = "openai"; this.apiKey = apiKey; }
-  async complete({ system, messages }) {
+  constructor({ model, apiKey }) { 
+    super({ model: model || "gpt-4o" }); 
+    this.id = "openai"; 
+    this.apiKey = apiKey;
+    // Model hierarchy for different task complexities
+    this.models = {
+      simple: "gpt-4o-mini",      // Fast, cheap for simple tasks
+      standard: "gpt-4o",         // Default for most tasks
+      complex: "gpt-4o",          // Complex reasoning (could use o1-preview if available)
+    };
+  }
+  
+  selectModel(complexity = "standard") {
+    return this.models[complexity] || this.models.standard;
+  }
+  
+  async complete({ system, messages, complexity = "standard" }) {
     const t0 = Date.now();
+    const selectedModel = this.selectModel(complexity);
+    
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
       body: JSON.stringify({
-        model: this.model,
+        model: selectedModel,
         messages: [
           ...(system ? [{ role: "system", content: system }] : []),
           ...(messages || []),
@@ -56,7 +73,7 @@ class OpenAIProvider extends LLMProvider {
     return {
       text,
       usage: {
-        model: this.model,
+        model: selectedModel,
         tokensIn: u.prompt_tokens || 0,
         tokensOut: u.completion_tokens || 0,
         durationMs: Date.now() - t0,
@@ -66,9 +83,26 @@ class OpenAIProvider extends LLMProvider {
 }
 
 class AnthropicProvider extends LLMProvider {
-  constructor({ model, apiKey }) { super({ model: model || "claude-sonnet" }); this.id = "anthropic"; this.apiKey = apiKey; }
-  async complete({ system, messages }) {
+  constructor({ model, apiKey }) { 
+    super({ model: model || "claude-sonnet" }); 
+    this.id = "anthropic"; 
+    this.apiKey = apiKey;
+    // Model hierarchy for different task complexities
+    this.models = {
+      simple: "claude-haiku",      // Fast, cheap for simple tasks
+      standard: "claude-sonnet",   // Default for most tasks
+      complex: "claude-opus",      // Complex reasoning (most capable)
+    };
+  }
+  
+  selectModel(complexity = "standard") {
+    return this.models[complexity] || this.models.standard;
+  }
+  
+  async complete({ system, messages, complexity = "standard" }) {
     const t0 = Date.now();
+    const selectedModel = this.selectModel(complexity);
+    
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -77,8 +111,8 @@ class AnthropicProvider extends LLMProvider {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: this.model,
-        max_tokens: 2048,
+        model: selectedModel,
+        max_tokens: 4096, // Higher token limit for complex tasks
         system: system || undefined,
         messages: (messages || []).map((m) => ({ role: m.role, content: m.content })),
       }),
@@ -90,7 +124,7 @@ class AnthropicProvider extends LLMProvider {
     return {
       text,
       usage: {
-        model: this.model,
+        model: selectedModel,
         tokensIn: u.input_tokens || 0,
         tokensOut: u.output_tokens || 0,
         durationMs: Date.now() - t0,
