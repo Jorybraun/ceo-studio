@@ -88,6 +88,29 @@ def post_to_room(room: str, speaker: str, message: str):
         print(f"[responder] post failed: {e}", file=sys.stderr)
 
 
+def parse_line_author(line: str) -> Optional[str]:
+    """Extract '<speaker>:' author from a room line when present."""
+    head, sep, _ = line.partition(":")
+    if not sep:
+        return None
+    author = head.strip().lower()
+    return author or None
+
+
+def should_respond_to_line(line: str, my_names: set[str]) -> bool:
+    """Respond only to mentions directed at us, never to our own authored posts."""
+    line = line.rstrip("\n")
+    if not line or line.startswith("#"):
+        return False
+
+    author = parse_line_author(line)
+    if author and author in my_names:
+        return False
+
+    lower = line.lower()
+    return any(f"@{n}" in lower or f" {n}:" in lower for n in my_names if n)
+
+
 def generate_reply(agent_id: str, display_name: str, persona_name: str, persona_text: str, mission: str, incoming: str, room: str) -> str:
     """
     Generates a reply that gets posted visibly in the room as this agent.
@@ -195,10 +218,7 @@ def main():
 
                     for line in new_lines:
                         line = line.rstrip("\n")
-                        if not line or line.startswith("#"):
-                            continue
-                        lower = line.lower()
-                        if any(f"@{n}" in lower or f" {n}:" in lower for n in my_names if n):
+                        if should_respond_to_line(line, my_names):
                             # Very naive: treat the whole line as the incoming stimulus
                             incoming = line
                             print(f"[room mention] {incoming[:120]}...")
