@@ -47,3 +47,16 @@ the same mistake keeps getting made.
 
 - `npm test` (core + boot + voice; no key needed).
 - Confirm the CEO relay: `hermes chat -q "say hi" -Q --yolo --accept-hooks`.
+
+## Implementation Honesty
+
+- **NEVER mock something to pass a test** - Implement real functionality
+- **NEVER cheat on completion** - Only mark done when actually implemented
+- **NEVER lie about what's done** - Be honest about real vs planned vs mocked
+- **ALWAYS distinguish between:**
+  - Infrastructure that works (HTTP servers, communication, logging)
+  - Mocked responses (fake agent responses, simulated execution)
+  - Planned features (documentation, design documents)
+  - Implemented features (actual working code)
+- **ALWAYS be explicit about what's real vs simulated**
+- **NO fake implementations that just return mock responses**

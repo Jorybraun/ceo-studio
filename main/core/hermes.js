@@ -33,6 +33,13 @@ function bin() {
 function profile() {
   return process.env.HERMES_PROFILE || "";
 }
+function profilesDir() {
+  return path.join(home(), "profiles");
+}
+function profileConfigPath(profileId = profile()) {
+  const id = String(profileId || "").trim();
+  return id ? path.join(profilesDir(), id, "config.yaml") : path.join(home(), "config.yaml");
+}
 function boardsDir() {
   return path.join(home(), "kanban", "boards");
 }
@@ -145,6 +152,26 @@ function currentBoard() {
   return boards.length ? boards[0].slug : null;
 }
 
+/**
+ * Filter boards for a specific domain. Returns boards relevant to the domain:
+ * - If domain has a specific kanban board, return that + main project board
+ * - Otherwise, return all boards (for "All" domains or unmapped domains)
+ */
+function filterBoardsForDomain(domainName, allBoards) {
+  if (!domainName || domainName === "All") {
+    return allBoards; // Show all boards when "All" domains selected
+  }
+  
+  // If no boards provided, get all boards
+  const boards = allBoards || listBoards();
+  if (!boards.length) return [];
+  
+  // For now, return all boards since domain-to-board mapping
+  // is handled at a higher level (in main process with domain context)
+  // This function can be enhanced later to do direct filtering
+  return boards;
+}
+
 /** Full board: tasks grouped by status, ordered by priority. */
 function getBoard(slug) {
   if (!slug) slug = currentBoard();
@@ -163,6 +190,20 @@ function getBoard(slug) {
     (columns[t.status] = columns[t.status] || []).push(t);
   }
   return { ok: true, slug, columns, total: rows.length };
+}
+
+/** Full detail for a single task: body + recent comments. For the planner. */
+function getTask(slug, id) {
+  if (!slug) slug = currentBoard();
+  if (!slug || !id) return { ok: false, reason: "board + task id required" };
+  const rows = _query(slug,
+    `SELECT id,title,body,status,assignee,priority,created_at,last_failure_error
+     FROM tasks WHERE id='${String(id).replace(/'/g, "''")}' LIMIT 1;`);
+  if (!rows.length) return { ok: false, reason: "task not found" };
+  const comments = _query(slug,
+    `SELECT author,body,created_at FROM task_comments
+     WHERE task_id='${String(id).replace(/'/g, "''")}' ORDER BY created_at DESC LIMIT 10;`);
+  return { ok: true, slug, task: rows[0], comments };
 }
 
 /** Per-status + per-assignee counts. */
@@ -224,9 +265,14 @@ const PROVIDER_BASE = {
 const PROVIDER_MODELS = { "xai-oauth": ["grok-4.3", "grok-4"] };
 
 /** Run a quick (non-model) hermes CLI command and capture output. */
-function _run(args, timeout = 15000) {
+function _profileArgs(profileId = profile()) {
+  const prof = String(profileId || "").trim();
+  return prof ? ["-p", prof] : [];
+}
+
+function _run(args, timeout = 15000, profileId = profile()) {
   try {
-    return { ok: true, out: execFileSync(bin(), args, { encoding: "utf-8", timeout, maxBuffer: 4 * 1024 * 1024 }) };
+    return { ok: true, out: execFileSync(bin(), [..._profileArgs(profileId), ...args], { encoding: "utf-8", timeout, maxBuffer: 4 * 1024 * 1024 }) };
   } catch (e) {
     return { ok: false, reason: String((e.stderr || e.message || "")).slice(0, 300) };
   }
@@ -252,12 +298,42 @@ function codexModels() {
 }
 
 /** Parse the active model/provider/base_url from `hermes config show`. */
-function currentModel() {
-  const r = _run(["config", "show"]);
+function currentModel(profileId = profile()) {
+  const r = _run(["config", "show"], 15000, profileId);
   if (!r.ok) return {};
   const line = (r.out.match(/Model:\s*\{[^}]*\}/) || [])[0] || r.out;
   const grab = (k) => (line.match(new RegExp(`'${k}':\\s*'([^']*)'`)) || [])[1] || null;
   return { default: grab("default"), provider: grab("provider"), base_url: grab("base_url") };
+}
+
+function currentPersonality(profileId = profile()) {
+  const r = _run(["config", "show"], 15000, profileId);
+  if (!r.ok) return null;
+  return (r.out.match(/Personality:\s*([^\n]+)/) || [])[1]?.trim() || null;
+}
+
+function availablePersonalities(profileId = profile()) {
+  const defaults = ["helpful", "concise", "technical", "creative", "teacher"];
+  try {
+    const text = fs.readFileSync(profileConfigPath(profileId), "utf-8");
+    const names = [];
+    const lines = text.split(/\r?\n/);
+    let inPersonalities = false;
+    for (const line of lines) {
+      if (/^\s{2}personalities:\s*$/.test(line)) {
+        inPersonalities = true;
+        continue;
+      }
+      if (inPersonalities) {
+        if (/^\S/.test(line) || /^\s{0,2}[a-zA-Z0-9_-]+:\s*/.test(line)) break;
+        const m = line.match(/^\s{4}([A-Za-z0-9_-]+):/);
+        if (m) names.push(m[1]);
+      }
+    }
+    return [...new Set([...names, ...defaults])];
+  } catch {
+    return defaults;
+  }
 }
 
 /** Everything the Config panel needs to render. */
@@ -267,18 +343,76 @@ function getConfig() {
   for (const p of providers) {
     models[p] = p === "openai-codex" ? codexModels() : (PROVIDER_MODELS[p] || []);
   }
-  return { ok: true, model: currentModel(), providers, models, ceo: ceoStatus() };
+  const activeProfile = profile();
+  return {
+    ok: true,
+    model: currentModel(activeProfile),
+    personality: currentPersonality(activeProfile),
+    personalities: availablePersonalities(activeProfile),
+    providers,
+    models,
+    profiles: listProfiles(),
+    activeProfile,
+    ceo: ceoStatus(),
+  };
+}
+
+/** Available Hermes profiles. Empty id means the default CEO profile. */
+function listProfiles() {
+  const decorate = (p) => ({
+    ...p,
+    model: currentModel(p.id),
+    personality: currentPersonality(p.id),
+    personalities: availablePersonalities(p.id),
+  });
+  const profiles = [decorate({ id: "", name: "Default Hermes CEO", path: home(), active: profile() === "" })];
+  try {
+    for (const entry of fs.readdirSync(profilesDir(), { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const id = entry.name;
+      profiles.push(decorate({
+        id,
+        name: id.replace(/[-_]+/g, " ").replace(/\b\w/g, (m) => m.toUpperCase()),
+        path: path.join(profilesDir(), id),
+        active: profile() === id,
+      }));
+    }
+  } catch { /* profiles are optional */ }
+  return profiles;
+}
+
+/** Switch the conversational CEO profile for this app process. */
+function setProfile(profileId = "") {
+  const next = String(profileId || "").trim();
+  if (next) {
+    const dir = path.join(profilesDir(), next);
+    if (!fs.existsSync(dir)) return { ok: false, reason: `Hermes profile not found: ${next}` };
+    process.env.HERMES_PROFILE = next;
+  } else {
+    delete process.env.HERMES_PROFILE;
+  }
+  _sessionId = null;
+  return { ok: true, activeProfile: profile(), profiles: listProfiles(), ceo: ceoStatus() };
 }
 
 /** Switch the active provider/model (sets the matching base_url too). */
-function setModel({ provider, model } = {}) {
+function setModel({ provider, model, profileId = profile() } = {}) {
   if (!provider) return { ok: false, reason: "provider required" };
-  const r1 = _run(["config", "set", "model.provider", provider]);
+  const r1 = _run(["config", "set", "model.provider", provider], 15000, profileId);
   if (!r1.ok) return r1;
-  if (model) { const r2 = _run(["config", "set", "model.default", model]); if (!r2.ok) return r2; }
+  if (model) { const r2 = _run(["config", "set", "model.default", model], 15000, profileId); if (!r2.ok) return r2; }
   const base = PROVIDER_BASE[provider];
-  if (base) _run(["config", "set", "model.base_url", base]);
-  return { ok: true, model: currentModel() };
+  if (base) _run(["config", "set", "model.base_url", base], 15000, profileId);
+  return { ok: true, model: currentModel(profileId), profileId };
+}
+
+function setPersonality({ personality, profileId = profile() } = {}) {
+  if (!personality) return { ok: false, reason: "personality required" };
+  const allowed = new Set(availablePersonalities(profileId));
+  if (!allowed.has(personality)) return { ok: false, reason: `unknown personality: ${personality}` };
+  const r = _run(["config", "set", "display.personality", personality], 15000, profileId);
+  if (!r.ok) return r;
+  return { ok: true, personality: currentPersonality(profileId), personalities: availablePersonalities(profileId), profileId };
 }
 
 /** Start the CEO gateway (detached so it outlives this call). */
@@ -301,6 +435,106 @@ function gatewayStop() { return _run(["gateway", "stop"]); }
 // capture its id from the -Q footer; subsequent asks --resume that id so the
 // CEO keeps context across turns. Held in memory for the main-process lifetime.
 let _sessionId = null;
+
+// Task focus: when a user clicks a task in the dashboard, we store it here
+// so the CEO knows what we're talking about. Held in memory for the main-process lifetime.
+let _focusedTask = null;
+
+/**
+ * Focus the CEO's attention on a specific task. When the user clicks a task
+ * in the dashboard, we call this so subsequent CEO conversations include context.
+ */
+function focusTask(taskInfo) {
+  _focusedTask = taskInfo;
+  return { ok: true, focusedTask: _focusedTask };
+}
+
+/**
+ * Add a new task to the kanban board. Uses the Hermes CLI to create the task.
+ */
+function addTask({ board, status, title, body, assignee, persona }) {
+  if (!installed()) return { ok: false, reason: "Hermes CLI not found" };
+  if (!board) board = currentBoard();
+  if (!board) return { ok: false, reason: "No board specified" };
+  if (!title) return { ok: false, reason: "Task title is required" };
+
+  try {
+    const args = ["kanban", ...(board ? ["--board", board] : []), "create", title];
+    const finalBody = body || (persona ? `**Persona:** ${persona}` : "");
+    if (finalBody) args.push("--body", finalBody);
+    if (assignee) args.push("--assignee", assignee);
+    if (status === "triage" || status === "planning") args.push("--triage");
+    if (status === "blocked" || status === "running") args.push("--initial-status", status);
+
+    const result = _run(args, 30000);
+    if (!result.ok) return { ok: false, reason: result.reason };
+
+    return { ok: true, message: "Task created successfully" };
+  } catch (e) {
+    return { ok: false, reason: `Failed to create task: ${e.message}` };
+  }
+}
+
+function _kanban(board, args, timeout = 30000) {
+  return _run(["kanban", ...(board ? ["--board", board] : []), ...args], timeout);
+}
+
+function assignees({ board } = {}) {
+  const r = _kanban(board || currentBoard(), ["assignees", "--json"], 15000);
+  if (!r.ok) return r;
+  try {
+    const parsed = JSON.parse(r.out || "[]");
+    return { ok: true, assignees: Array.isArray(parsed) ? parsed : [] };
+  } catch {
+    return { ok: true, assignees: [] };
+  }
+}
+
+function assignTask({ board, taskId, assignee, reclaim = false, reason = "reassigned from CEO Studio" } = {}) {
+  if (!taskId) return { ok: false, reason: "task id required" };
+  const profile = assignee || "none";
+  const args = reclaim
+    ? ["reassign", "--reclaim", "--reason", reason, taskId, profile]
+    : ["assign", taskId, profile];
+  return _kanban(board || currentBoard(), args, 30000);
+}
+
+function taskAction({ board, taskId, action, reason } = {}) {
+  if (!taskId) return { ok: false, reason: "task id required" };
+  const why = reason || "updated from CEO Studio";
+  switch (action) {
+    case "promote": return _kanban(board || currentBoard(), ["promote", taskId, why], 30000);
+    case "block": return _kanban(board || currentBoard(), ["block", taskId, why], 30000);
+    case "unblock": return _kanban(board || currentBoard(), ["unblock", "--reason", why, taskId], 30000);
+    case "specify": return _kanban(board || currentBoard(), ["specify", taskId], 120000);
+    case "decompose": return _kanban(board || currentBoard(), ["decompose", taskId], 120000);
+    default: return { ok: false, reason: `unsupported task action: ${action}` };
+  }
+}
+
+function dispatch({ board, max = 1, dryRun = false } = {}) {
+  const args = ["dispatch", "--max", String(Math.max(1, Number(max) || 1))];
+  if (dryRun) args.push("--dry-run");
+  return _kanban(board || currentBoard(), args, 60000);
+}
+
+function taskLog({ board, taskId } = {}) {
+  if (!taskId) return { ok: false, reason: "task id required" };
+  const r = _kanban(board || currentBoard(), ["log", taskId], 15000);
+  if (!r.ok) return r;
+  return { ok: true, out: r.out || "" };
+}
+
+/** Append a durable Kanban comment to a task. */
+function addComment({ board, taskId, body, author = "CEO Studio" }) {
+  if (!installed()) return { ok: false, reason: "Hermes CLI not found" };
+  if (!board) board = currentBoard();
+  if (!board) return { ok: false, reason: "No board specified" };
+  if (!taskId) return { ok: false, reason: "Task id is required" };
+  if (!body) return { ok: false, reason: "Comment body is required" };
+  const args = ["kanban", "comment", "--board", board, "--author", author, taskId, body];
+  return _run(args, 30000);
+}
 
 /** One `hermes chat -q` invocation. Resolves with {ok, reply, sessionId, raw, sessionMiss, reason}. */
 function _runChat(msg, resume, timeoutMs) {
@@ -338,22 +572,88 @@ function _runChat(msg, resume, timeoutMs) {
 }
 
 /**
+ * Streaming variant of _runChat: invokes `hermes chat` and calls onDelta(text)
+ * for each stdout chunk as it arrives. Resolves with the same shape as _runChat
+ * once the process closes. Used by the AGUI server to stream TEXT_MESSAGE_CONTENT.
+ */
+function _streamChat(msg, resume, timeoutMs, onDelta) {
+  return new Promise((resolve) => {
+    const prof = profile();
+    const args = [...(prof ? ["-p", prof] : []), "chat", "-q", msg, "-Q", "--yolo", "--accept-hooks"];
+    if (resume) args.push("--resume", resume);
+    let out = "", err = "", done = false, child;
+    try {
+      child = spawn(bin(), args, { env: process.env });
+    } catch (e) {
+      return resolve({ ok: false, reason: `Failed to reach CEO: ${e.message}` });
+    }
+    const timer = setTimeout(() => {
+      if (done) return; done = true;
+      try { child.kill("SIGKILL"); } catch { /* ignore */ }
+      resolve({ ok: false, reason: "CEO timed out", partial: _clean(out) });
+    }, timeoutMs);
+    child.stdout.on("data", (d) => {
+      const s = d.toString();
+      out += s;
+      try { onDelta && onDelta(s); } catch { /* renderer-side concern */ }
+    });
+    child.stderr.on("data", (d) => { err += d.toString(); });
+    child.on("error", (e) => {
+      if (done) return; done = true; clearTimeout(timer);
+      resolve({ ok: false, reason: `Failed to reach CEO: ${e.message}` });
+    });
+    child.on("close", (code) => {
+      if (done) return; done = true; clearTimeout(timer);
+      const combined = out + "\n" + err;
+      const sessionMiss = /No session found/i.test(combined);
+      const sessionId = _extractSession(combined);
+      const text = _clean(out);
+      if (code !== 0 && !text) return resolve({ ok: false, reason: _clean(err) || `CEO exited ${code}`, sessionId, sessionMiss });
+      resolve({ ok: true, reply: text, sessionId, sessionMiss });
+    });
+  });
+}
+
+/**
+ * Streaming relay used by the AGUI server. Keeps the same rolling session as
+ * ask() (shared _sessionId), prepends focused-task context, and forwards raw
+ * stdout deltas via onDelta. Resolves { ok, reply, session } on completion.
+ */
+async function askStream(message, { timeoutMs = 180000, onDelta } = {}) {
+  if (!installed()) return { ok: false, reason: "Hermes CLI not found" };
+  let msg = String(message || "").trim();
+  if (!msg) return { ok: false, reason: "Empty message" };
+  if (_focusedTask) {
+    msg = `[Context: We're discussing task "${_focusedTask.taskTitle}" (ID: ${_focusedTask.taskId}, status: ${_focusedTask.taskStatus}, board: ${_focusedTask.board})]\n\n${msg}`;
+  }
+  let res = await _streamChat(msg, _sessionId, timeoutMs, onDelta);
+  if (_sessionId && res.sessionMiss) {
+    _sessionId = null;
+    res = await _streamChat(msg, null, timeoutMs, onDelta);
+  }
+  if (res.sessionId) _sessionId = res.sessionId;
+  if (!res.ok) return { ok: false, reason: _friendly(res.reason), raw: res.reason, partial: res.partial };
+  return { ok: true, reply: res.reply, session: _sessionId };
+}
+
+/**
  * Relay a message to the live Hermes CEO and return its reply. Keeps a single
  * rolling session so context persists. This is what the voice agent calls —
  * the voice is just a face; Hermes thinks.
  */
 async function ask(message, { timeoutMs = 180000 } = {}) {
-  console.log("[hermes.ask] Called with:", message);
   if (!installed()) return { ok: false, reason: "Hermes CLI not found" };
-  const msg = String(message || "").trim();
+  let msg = String(message || "").trim();
   if (!msg) return { ok: false, reason: "Empty message" };
 
-  console.log("[hermes.ask] Calling _runChat...");
+  // If there's a focused task, prepend context about it
+  if (_focusedTask) {
+    msg = `[Context: We're discussing task "${_focusedTask.taskTitle}" (ID: ${_focusedTask.taskId}, status: ${_focusedTask.taskStatus}, board: ${_focusedTask.board})]\n\n${msg}`;
+  }
+
   let res = await _runChat(msg, _sessionId, timeoutMs);
-  console.log("[hermes.ask] _runChat returned:", res);
   // Stored session vanished (restart, gc) → start fresh once.
   if (_sessionId && res.sessionMiss) {
-    console.log("[hermes.ask] Session miss, retrying...");
     _sessionId = null;
     res = await _runChat(msg, null, timeoutMs);
   }
@@ -388,7 +688,9 @@ function _clean(s) {
 module.exports = {
   home, bin, profile, installed,
   ceoStatus, ensureUp,
-  listBoards, currentBoard, getBoard, getStats, getSwarm, getRoom,
-  getConfig, setModel, gatewayStart, gatewayStop,
-  ask,
+  listBoards, currentBoard, filterBoardsForDomain, getBoard, getTask, getStats, getSwarm, getRoom,
+  getConfig, setModel, listProfiles, setProfile, gatewayStart, gatewayStop,
+  setPersonality,
+  focusTask, addTask, assignTask, taskAction, dispatch, taskLog, assignees, addComment,
+  ask, askStream,
 };

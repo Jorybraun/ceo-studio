@@ -8,6 +8,15 @@
 
 .agent-circle { box-shadow: 0 0 24px 4px rgba(239, 68, 68, 0.35); }
 
+#panel1.panel-fullscreen {
+  position: fixed;
+  inset: 12px;
+  z-index: 60;
+  background: rgba(10, 10, 10, 0.98);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+}
+#file-pane.hidden { display: none !important; }
+
 #panel1 h1, #panel1 h2, #panel1 h3 { font-weight: 600; margin: .4em 0; color: #f5f5f5; }
 #panel1 a { color: #93c5fd; }
 #panel1 code { color: #fca5a5; }

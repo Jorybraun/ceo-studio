@@ -8,7 +8,7 @@
  * this via IPC only.
  */
 const { app, BrowserWindow, ipcMain, dialog, session: electronSession } = require("electron");
-const { execSync } = require("child_process");
+const { execFileSync, execSync, spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 
@@ -19,10 +19,14 @@ loadEnv();
 
 const projects = require("./core/projects");
 const brain = require("./core/brain");
+const gbrain = require("./core/gbrain");
 const domains = require("./core/domains");
 const user = require("./core/user");
 const soul = require("./core/soul");
 const hermes = require("./core/hermes");
+const aguiServer = require("./core/agui-server");
+const jobs = require("./core/jobs");
+const ticketPlanner = require("./core/ticket-planner");
 const { CostMeter } = require("./core/cost");
 const { createProvider } = require("./core/llm");
 const { DocumentAgent } = require("./core/agent");
@@ -39,6 +43,173 @@ const session = {
   agent: null,
 };
 
+// --- GBrain HTTP server ---
+let gbrainProcess = null;
+const GBRAIN_PORT = 8001; // Use 8001 since 8000 is taken by graph-visual
+
+function startGBrainServer() {
+  if (gbrainProcess) {
+    console.log("[gbrain] server already running");
+    return;
+  }
+
+  console.log("[gbrain] starting HTTP server on port", GBRAIN_PORT);
+  
+  // Load Google API key for embeddings (from PIPE-OS .env)
+  const pipeEnvPath = path.join(process.env.HOME, "Code", "PIPE", "PIPE-OS", ".env");
+  let googleApiKey = "";
+  try {
+    if (fs.existsSync(pipeEnvPath)) {
+      const envContent = fs.readFileSync(pipeEnvPath, "utf-8");
+      const match = envContent.match(/^VERTEX_API_KEY=(.+)$/m);
+      if (match) {
+        googleApiKey = match[1].trim().replace(/"/g, "");
+        console.log("[gbrain] loaded Google API key from PIPE-OS .env");
+      }
+    }
+  } catch (e) {
+    console.warn("[gbrain] failed to load Google API key:", e.message);
+  }
+
+  const env = { ...process.env };
+  if (googleApiKey) {
+    env.GOOGLE_GENERATIVE_AI_API_KEY = googleApiKey;
+  }
+  // Unset DATABASE_URL to avoid conflicts (like serve-mcp.sh does)
+  delete env.DATABASE_URL;
+  // Add bun to PATH
+  env.PATH = `${process.env.HOME}/.bun/bin:${env.PATH || ""}`;
+  
+  try {
+    gbrainProcess = spawn("gbrain", [
+      "serve",
+      "--http",
+      "--port", String(GBRAIN_PORT),
+      "--bind", "0.0.0.0",
+      "--public-url", `http://localhost:${GBRAIN_PORT}`
+    ], {
+      stdio: "ignore",
+      detached: false,
+      env,
+      cwd: process.env.HOME
+    });
+
+    gbrainProcess.on("error", (err) => {
+      console.error("[gbrain] failed to start:", err.message);
+      gbrainProcess = null;
+    });
+
+    gbrainProcess.on("exit", (code, signal) => {
+      console.log(`[gbrain] server exited (code: ${code}, signal: ${signal})`);
+      gbrainProcess = null;
+    });
+
+    // Set environment variable for CEO Studio's GBrain bridge
+    process.env.GBRAIN_URL = `http://localhost:${GBRAIN_PORT}`;
+    console.log("[gbrain] GBRAIN_URL set to", process.env.GBRAIN_URL);
+    console.log("[gbrain] process started with PID:", gbrainProcess.pid);
+  } catch (e) {
+    console.error("[gbrain] spawn error:", e.message);
+    gbrainProcess = null;
+  }
+}
+
+function stopGBrainServer() {
+  if (gbrainProcess) {
+    console.log("[gbrain] stopping server");
+    gbrainProcess.kill("SIGTERM");
+    gbrainProcess = null;
+  }
+}
+
+function rememberProjectDomain(domainName, source = "manual") {
+  if (!session.project || !domainName) return;
+  const exists = (session.project.domains || []).some((d) => d.name.toLowerCase() === domainName.toLowerCase());
+  if (!exists) session.project.domains = [...(session.project.domains || []), { name: domainName, source }];
+  try {
+    const reg = projects.loadRegistry();
+    const idx = reg.projects.findIndex((p) => p.id === session.project.id);
+    if (idx >= 0) {
+      reg.projects[idx] = { ...reg.projects[idx], domains: session.project.domains };
+      projects.saveRegistry(reg);
+    }
+  } catch { /* registry persistence is best-effort */ }
+}
+
+function safeProjectPath(relPath) {
+  if (!session.project) return null;
+  const root = path.resolve(session.project.path);
+  const resolved = path.resolve(root, String(relPath || ""));
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) return null;
+  return { root, resolved };
+}
+
+function projectTree({ domain = session.domain, maxEntries = 600 } = {}) {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  const SKIP = new Set(["node_modules", ".git", "dist", "build", ".next", "__pycache__", ".venv", "venv", ".worktrees"]);
+  const TEXTY = /\.(md|mdx|txt|json|yaml|yml|js|ts|jsx|tsx|css|html|py|sh|sql)$/i;
+  const root = path.resolve(session.project.path);
+  let base = root;
+  let prefix = "";
+  if (domain && domain !== "All") {
+    const d = domains.getDomain(session.project.slug, domain);
+    if (d && d.relativePath) {
+      const safe = safeProjectPath(d.relativePath);
+      if (safe && fs.existsSync(safe.resolved)) {
+        base = safe.resolved;
+        prefix = d.relativePath;
+      }
+    }
+  }
+  let count = 0;
+  const walk = (dir, relBase = "") => {
+    if (count >= maxEntries) return [];
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
+    return entries
+      .filter((e) => !e.name.startsWith(".") || e.name === ".env.example")
+      .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
+      .flatMap((e) => {
+        if (count >= maxEntries) return [];
+        const rel = path.join(relBase, e.name);
+        const projectRel = prefix ? path.join(prefix, rel) : rel;
+        if (e.isDirectory()) {
+          if (SKIP.has(e.name)) return [];
+          count++;
+          return [{ type: "dir", name: e.name, path: projectRel, children: walk(path.join(dir, e.name), rel) }];
+        }
+        if (!e.isFile() || !TEXTY.test(e.name)) return [];
+        count++;
+        return [{ type: "file", name: e.name, path: projectRel }];
+      });
+  };
+  return { ok: true, domain: domain || "All", root: prefix || ".", tree: walk(base), truncated: count >= maxEntries };
+}
+
+async function processTicketPackJob(jobId, project = session.project) {
+  if (!project) return null;
+  const job = jobs.update(project.slug, jobId, { status: "running", error: null });
+  if (!job) return null;
+  try {
+    const board = job.input.board || hermes.currentBoard();
+    const taskId = job.input.ticketId;
+    const detail = hermes.getTask(board, taskId);
+    if (!detail || !detail.ok) throw new Error(detail ? detail.reason : "Could not load ticket");
+    const output = ticketPlanner.prepareTicketPack({
+      slug: project.slug,
+      project,
+      ticket: detail.task,
+      domain: job.domain || session.domain || "All",
+      job,
+    });
+    output.board = board;
+    output.comments = detail.comments || [];
+    return jobs.update(project.slug, jobId, { status: "done", output });
+  } catch (e) {
+    return jobs.update(project.slug, jobId, { status: "failed", error: e.message });
+  }
+}
+
 function openProjectSession(projectId) {
   const project = projects.getProject(projectId);
   if (!project) throw new Error(`Unknown project id: ${projectId}`);
@@ -47,7 +218,8 @@ function openProjectSession(projectId) {
   
   // Ingest domains from project structure
   try {
-    const ingested = domains.ingestDomainsFromProject(project.slug, project.path);
+    const availableBoards = hermes.listBoards().map(b => b.slug);
+    const ingested = domains.ingestDomainsFromProject(project.slug, project.path, availableBoards);
     console.log(`Ingested ${ingested.length} domains from project structure`);
     ingested.forEach(d => {
       console.log(`  - ${d.name}: ${d.hasContext ? 'has context' : 'no context'} (${d.source})`);
@@ -121,7 +293,45 @@ ipcMain.handle("domain:set", async (_e, domain) => {
 ipcMain.handle("domain:define", (_e, domainDef) => {
   if (!session.project) return { ok: false, reason: "No project open" };
   try {
-    const definition = domains.defineDomain(session.project.slug, domainDef);
+    const cleanName = String(domainDef.name || "").trim();
+    if (!cleanName) return { ok: false, reason: "Domain name required" };
+    if (/[\\/]/.test(cleanName)) return { ok: false, reason: "Domain name cannot contain path separators" };
+    let relativePath = domainDef.relativePath ? String(domainDef.relativePath).trim() : null;
+    if (relativePath && !safeProjectPath(relativePath)) return { ok: false, reason: "Domain path is outside the project" };
+    const responsibilities = Array.isArray(domainDef.responsibilities)
+      ? domainDef.responsibilities
+      : String(domainDef.responsibilities || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+    const coreAgents = Array.isArray(domainDef.coreAgents)
+      ? domainDef.coreAgents
+      : String(domainDef.coreAgents || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+    if (domainDef.createScaffold) {
+      relativePath = relativePath || path.join("domains", cleanName.toLowerCase().replace(/\s+/g, "-"));
+      const safe = safeProjectPath(relativePath);
+      if (!safe) return { ok: false, reason: "Domain path is outside the project" };
+      fs.mkdirSync(safe.resolved, { recursive: true });
+      const agentsPath = path.join(safe.resolved, "AGENTS.md");
+      if (!fs.existsSync(agentsPath)) {
+        fs.writeFileSync(agentsPath,
+          `# ${cleanName}\n\n` +
+          `**Purpose**: ${domainDef.purpose || ""}\n\n` +
+          `**Overarching Goal**: ${domainDef.overarchingGoal || domainDef.currentState || ""}\n\n` +
+          `## Responsibilities\n\n` +
+          `${responsibilities.map((r) => `- ${r}`).join("\n") || "- TBD"}\n\n` +
+          `## Team Agents\n\n` +
+          `${coreAgents.map((a) => `- ${a}`).join("\n") || "- TBD"}\n`,
+          "utf-8");
+      }
+    }
+    const definition = domains.defineDomain(session.project.slug, {
+      ...domainDef,
+      name: cleanName,
+      responsibilities,
+      coreAgents,
+      relativePath,
+      sourcePath: relativePath ? path.join(session.project.path, relativePath) : domainDef.sourcePath,
+      sourceType: domainDef.sourceType || (relativePath ? "manual-scaffold" : "manual"),
+    });
+    rememberProjectDomain(definition.name, definition.sourceType);
     return { ok: true, definition };
   } catch (e) {
     return { ok: false, reason: e.message };
@@ -171,7 +381,8 @@ ipcMain.handle("domain:get_description", (_e, domainName) => {
 ipcMain.handle("domain:ingest", () => {
   if (!session.project) return { ok: false, reason: "No project open" };
   try {
-    const ingested = domains.ingestDomainsFromProject(session.project.slug, session.project.path);
+    const availableBoards = hermes.listBoards().map(b => b.slug);
+    const ingested = domains.ingestDomainsFromProject(session.project.slug, session.project.path, availableBoards);
     return { ok: true, ingested };
   } catch (e) {
     return { ok: false, reason: e.message };
@@ -322,9 +533,440 @@ ipcMain.handle("soul:get_summary", () => {
 
 // --- IPC: Hermes CEO bridge (kanban board, swarm, room, relay) ---
 ipcMain.handle("hermes:status", () => hermes.ceoStatus());
-ipcMain.handle("hermes:ensure_up", () => hermes.ensureUp());
+ipcMain.handle("hermes:ensure_up", async () => {
+  // The AGUI bridge is the CEO's face — bring it up alongside the CEO.
+  try { await aguiServer.start(); } catch (e) { console.warn("[agui] start failed:", e && e.message); }
+  return hermes.ensureUp();
+});
 ipcMain.handle("hermes:boards", () => ({ ok: true, boards: hermes.listBoards(), current: hermes.currentBoard() }));
+ipcMain.handle("hermes:boards_for_domain", (_e, domainName) => {
+  const allBoards = hermes.listBoards();
+  let filteredBoards = allBoards;
+  
+  // If a specific domain is selected (not "All"), filter boards
+  if (domainName && domainName !== "All" && session.project) {
+    const allDomains = domains.getAllDomains(session.project.slug);
+    const selectedDomain = allDomains.find(d => d.name === domainName);
+    
+    if (selectedDomain && selectedDomain.kanbanBoard) {
+      // Domain has a specific board - show that + main project board
+      const domainBoard = allBoards.find(b => b.slug === selectedDomain.kanbanBoard);
+      const mainBoard = allBoards.find(b => b.slug === session.project.slug) ||
+        (session.project.slug === "ceo-studio" ? allBoards.find(b => b.slug === "ceo-studio") : null);
+      
+      filteredBoards = [];
+      if (domainBoard) filteredBoards.push(domainBoard);
+      if (mainBoard && (!domainBoard || mainBoard.slug !== domainBoard.slug)) {
+        filteredBoards.push(mainBoard);
+      }
+    } else {
+      // A selected domain without an explicit board should not accidentally
+      // bind to the first unrelated board. Fall back to the project/global
+      // board only; the user can map a domain board later.
+      const mainBoard = allBoards.find(b => b.slug === session.project.slug) ||
+        (session.project.slug === "ceo-studio" ? allBoards.find(b => b.slug === "ceo-studio") : null);
+      filteredBoards = mainBoard ? [mainBoard] : [];
+    }
+  }
+  
+  return { 
+    ok: true, 
+    boards: filteredBoards, 
+    current: hermes.currentBoard(),
+    domain: domainName 
+  };
+});
+
+// --- Agent Registry ---
+function harnessRegistryPath() {
+  return path.join(session.project?.path || process.cwd(), "runtime", "harness", "agents", "registry.py");
+}
+
+function tmuxAlive(sessionName) {
+  if (!sessionName) return false;
+  try {
+    execFileSync("tmux", ["has-session", "-t", `=${sessionName}`], { stdio: "ignore", timeout: 1500 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function loadHarnessRegistryAgents() {
+  const harnessPath = harnessRegistryPath();
+  if (!fs.existsSync(harnessPath)) return [];
+  try {
+    const raw = execFileSync("python3", [harnessPath, "list", "--format", "json"], {
+      encoding: "utf8",
+      timeout: 5000,
+      cwd: path.dirname(harnessPath),
+    });
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    console.warn("[agents] failed to parse harness registry:", e.message);
+    return [];
+  }
+}
+
+function listHarnessPersonas() {
+  const root = path.dirname(path.dirname(harnessRegistryPath()));
+  const dirs = [
+    path.join(root, "agents", "personas"),
+    path.join(root, "personas"),
+  ];
+  const found = new Map();
+  const walk = (dir) => {
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const p = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(p);
+      else if (entry.isFile() && entry.name.endsWith(".md")) {
+        const id = path.basename(entry.name, ".md");
+        if (!found.has(id)) {
+          found.set(id, {
+            id,
+            name: id.replace(/[-_]+/g, " ").replace(/\b\w/g, (m) => m.toUpperCase()),
+            path: p,
+            category: path.basename(path.dirname(p)),
+          });
+        }
+      }
+    }
+  };
+  for (const dir of dirs) walk(dir);
+  return [...found.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function setHarnessAgentPersona(agentId, personaId) {
+  const id = String(agentId || "");
+  const persona = String(personaId || "");
+  if (!id) return { ok: false, reason: "agent id required" };
+  if (!persona) return { ok: false, reason: "persona required" };
+  const registryPath = harnessRegistryPath();
+  if (!fs.existsSync(registryPath)) return { ok: false, reason: "harness registry not found" };
+  const personas = new Set(listHarnessPersonas().map((p) => p.id));
+  if (!personas.has(persona)) return { ok: false, reason: `persona not found: ${persona}` };
+  const before = fs.readFileSync(registryPath, "utf8");
+  const blockRe = new RegExp(`("${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\s*:\\s*\\{[\\s\\S]*?\\n    \\})`);
+  const match = before.match(blockRe);
+  if (!match) return { ok: false, reason: `agent not found in registry: ${id}` };
+  const nextBlock = match[1].includes('"persona":')
+    ? match[1].replace(/"persona":\s*"[^"]*"/, `"persona": "${persona}"`)
+    : match[1].replace(/\n    "canonical_room":/, `\n        "persona": "${persona}",\n        "canonical_room":`);
+  fs.writeFileSync(registryPath, before.replace(match[1], nextBlock), "utf8");
+  return { ok: true, agentId: id, persona };
+}
+
+function createHarnessPersona({ id, name, brief } = {}) {
+  const cleanId = String(id || name || "").trim().toLowerCase().replace(/[\s_]+/g, "-").replace(/[^a-z0-9.-]/g, "");
+  if (!cleanId) return { ok: false, reason: "persona name required" };
+  const root = path.dirname(path.dirname(harnessRegistryPath()));
+  const dir = path.join(root, "personas", "general");
+  const personaPath = path.join(dir, `${cleanId}.md`);
+  if (!personaPath.startsWith(root + path.sep)) return { ok: false, reason: "invalid persona path" };
+  if (fs.existsSync(personaPath)) return { ok: false, reason: `persona already exists: ${cleanId}` };
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(personaPath, [
+    `# ${name || cleanId}`,
+    "",
+    "## Mission",
+    "",
+    brief || "Define what this persona is responsible for.",
+    "",
+    "## Operating Style",
+    "",
+    "- Produce clear plans, tradeoffs, and acceptance criteria.",
+    "- Surface uncertainty instead of pretending.",
+    "- Keep work visible in the relevant domain room.",
+  ].join("\n"), "utf8");
+  return { ok: true, persona: { id: cleanId, name: name || cleanId, path: personaPath, category: "general" } };
+}
+
+function knownTerminalAgent(agentId) {
+  const id = String(agentId || "");
+  const agent = loadHarnessRegistryAgents().find((a) => a.id === id);
+  if (!agent || !agent.tmux_session) return null;
+  const windowName = agent.tmux_window || "main";
+  return {
+    id: agent.id,
+    display_name: agent.display_name || agent.id,
+    tmux_session: agent.tmux_session,
+    tmux_window: windowName,
+    target: `${agent.tmux_session}:${windowName}`,
+  };
+}
+
+ipcMain.handle("agents:list", () => {
+  const agents = [];
+  
+  // 1. Hermes CEO (always present)
+  const hermesStatus = hermes.ceoStatus();
+  agents.push({
+    id: "hermes-ceo",
+    display_name: "Hermes CEO",
+    role: "Project CEO / Orchestrator",
+    type: "hermes",
+    status: hermesStatus.up ? "online" : "offline",
+    capabilities: ["orchestration", "planning", "delegation", "kanban_management"],
+    mission: "Strategic CEO agent that manages the project via Hermes Kanban",
+    room: "main",
+    launch_mode: "hermes_profile",
+    provider: hermesStatus.profile || "default",
+    enabled: true,
+    api_cost: "Funded (codex)",
+    personas: ["ceo-orchestrator"],
+    skills: ["herder-swarm-control", "herder-messaging"],
+  });
+  
+  // 2. Devin subagent profiles
+  agents.push({
+    id: "devin-explore",
+    display_name: "Devin Explorer",
+    role: "Codebase exploration & research",
+    type: "devin",
+    status: "available",
+    capabilities: ["codebase_exploration", "research", "read_only"],
+    mission: "Read-only subagent for exploring codebases and understanding architecture",
+    launch_mode: "subagent",
+    profile: "subagent_explore",
+    enabled: true,
+    api_cost: "Uses same model as main session",
+    personas: ["researcher"],
+    skills: ["codebase-navigation", "architecture-analysis"],
+  });
+  
+  agents.push({
+    id: "devin-general",
+    display_name: "Devin General",
+    role: "General purpose agent",
+    type: "devin",
+    status: "available",
+    capabilities: ["read", "write", "edit", "command_execution"],
+    mission: "General-purpose subagent with full tool access for autonomous tasks",
+    launch_mode: "subagent",
+    profile: "subagent_general",
+    enabled: true,
+    api_cost: "Uses same model as main session",
+    personas: ["generalist"],
+    skills: ["file-operations", "command-execution", "git-operations"],
+  });
+  
+  // 3. Try to load harness agents if available
+  try {
+    for (const a of loadHarnessRegistryAgents()) {
+      const running = tmuxAlive(a.tmux_session);
+      agents.push({
+        id: a.id,
+        display_name: a.display_name || a.id,
+        role: a.role || a.role_title_in_room || "Harness agent",
+        type: a.launch_mode === "hermes_profile" ? "hermes-profile" : (a.type || "harness"),
+        status: running ? "online" : (a.launch_mode === "disabled" || !a.enabled ? "offline" : "external"),
+        capabilities: a.capabilities || [],
+        mission: a.mission || "",
+        launch_mode: a.launch_mode || "external",
+        profile: a.profile || "",
+        room: a.canonical_room || a.default_room || "",
+        enabled: a.enabled !== false,
+        api_cost: a.api_cost || "",
+        personas: [a.persona].filter(Boolean),
+        skills: a.skills || [],
+        terminal: {
+          available: !!a.tmux_session,
+          alive: running,
+          session: a.tmux_session || "",
+          window: a.tmux_window || "main",
+        },
+      });
+    }
+  } catch (e) {
+    // Harness not available, skip
+  }
+  
+  return { ok: true, agents };
+});
+
+ipcMain.handle("agents:terminal_snapshot", (_e, agentId) => {
+  const agent = knownTerminalAgent(agentId);
+  if (!agent) return { ok: false, reason: "agent has no known tmux terminal" };
+  if (!tmuxAlive(agent.tmux_session)) return { ok: false, reason: `tmux session not running: ${agent.tmux_session}`, agent };
+  try {
+    const output = execFileSync("tmux", ["capture-pane", "-p", "-S", "-240", "-t", agent.target], {
+      encoding: "utf8",
+      timeout: 2000,
+    });
+    return { ok: true, agent, output };
+  } catch (e) {
+    return { ok: false, reason: e.message, agent };
+  }
+});
+
+ipcMain.handle("agents:terminal_send", (_e, { agentId, text } = {}) => {
+  const agent = knownTerminalAgent(agentId);
+  const value = String(text || "");
+  if (!agent) return { ok: false, reason: "agent has no known tmux terminal" };
+  if (!value.trim()) return { ok: false, reason: "text required" };
+  if (!tmuxAlive(agent.tmux_session)) return { ok: false, reason: `tmux session not running: ${agent.tmux_session}`, agent };
+  try {
+    execFileSync("tmux", ["send-keys", "-t", agent.target, "-l", value], { stdio: "ignore", timeout: 2000 });
+    execFileSync("tmux", ["send-keys", "-t", agent.target, "Enter"], { stdio: "ignore", timeout: 2000 });
+    return { ok: true, agent };
+  } catch (e) {
+    return { ok: false, reason: e.message, agent };
+  }
+});
+
+ipcMain.handle("agents:set_persona", (_e, { agentId, personaId } = {}) => setHarnessAgentPersona(agentId, personaId));
+ipcMain.handle("personas:create", (_e, persona = {}) => createHarnessPersona(persona));
+
+// --- Personas & Skills ---
+ipcMain.handle("personas:list", () => {
+  const builtin = [
+    {
+      id: "ceo-orchestrator",
+      name: "CEO Orchestrator",
+      description: "Top-level strategic orchestrator for project management",
+      responsibilities: ["Strategic planning", "Task decomposition", "Resource allocation"],
+      typical_agents: ["hermes-ceo", "kanban-orchestrator"],
+    },
+    {
+      id: "swarm-facilitator",
+      name: "Swarm Facilitator",
+      description: "Coordinates swarm of specialist agents in domain rooms",
+      responsibilities: ["Agent coordination", "Communication hub", "Swarm visibility"],
+      typical_agents: ["swarm-facilitator"],
+    },
+    {
+      id: "architect",
+      name: "Systems Architect",
+      description: "Owns technical decisions, data models, and system boundaries",
+      responsibilities: ["Technical specifications", "ADR writing", "Interface contracts"],
+      typical_agents: ["grok-builder"],
+    },
+    {
+      id: "researcher",
+      name: "Deep Researcher",
+      description: "Specializes in research, evidence gathering, and synthesis",
+      responsibilities: ["Research briefs", "Evidence mapping", "Uncertainty analysis"],
+      typical_agents: ["devin-explore", "grok-research"],
+    },
+    {
+      id: "builder",
+      name: "Builder",
+      description: "General implementer and executor of technical tasks",
+      responsibilities: ["Implementation", "Code review", "Testing"],
+      typical_agents: ["grok-builder", "devin-general"],
+    },
+    {
+      id: "planner",
+      name: "Planner",
+      description: "Creates detailed plans and specifications",
+      responsibilities: ["Task planning", "Specification writing", "Breakdown"],
+      typical_agents: ["kanban-orchestrator"],
+    },
+    {
+      id: "generalist",
+      name: "Generalist",
+      description: "Flexible agent capable of various tasks",
+      responsibilities: ["General tasks", "Ad-hoc work", "Support"],
+      typical_agents: ["devin-general"],
+    },
+  ];
+  
+  const merged = new Map(builtin.map((p) => [p.id, p]));
+  for (const p of listHarnessPersonas()) {
+    merged.set(p.id, {
+      ...p,
+      description: `Harness persona file (${p.category})`,
+      responsibilities: [],
+      typical_agents: [],
+      source: "harness",
+    });
+  }
+  return { ok: true, personas: [...merged.values()] };
+});
+
+ipcMain.handle("skills:list", () => {
+  const skills = [
+    {
+      id: "herder-swarm-control",
+      name: "Herder Swarm Control",
+      description: "Control and coordinate agent swarms via herder",
+      category: "coordination",
+    },
+    {
+      id: "herder-messaging",
+      name: "Herder Messaging",
+      description: "Structured messaging between agents",
+      category: "communication",
+    },
+    {
+      id: "herder-session-management",
+      name: "Herder Session Management",
+      description: "Manage agent sessions and lifecycle",
+      category: "coordination",
+    },
+    {
+      id: "kanban-management",
+      name: "Kanban Management",
+      description: "Manage kanban boards and tasks",
+      category: "coordination",
+    },
+    {
+      id: "codebase-navigation",
+      name: "Codebase Navigation",
+      description: "Navigate and understand codebase structure",
+      category: "analysis",
+    },
+    {
+      id: "architecture-analysis",
+      name: "Architecture Analysis",
+      description: "Analyze system architecture and patterns",
+      category: "analysis",
+    },
+    {
+      id: "implementation",
+      name: "Implementation",
+      description: "Write and implement code",
+      category: "development",
+    },
+    {
+      id: "planning",
+      name: "Planning",
+      description: "Create detailed plans and specifications",
+      category: "planning",
+    },
+    {
+      id: "code_review",
+      name: "Code Review",
+      description: "Review and analyze code quality",
+      category: "development",
+    },
+    {
+      id: "file-operations",
+      name: "File Operations",
+      description: "Read, write, and edit files",
+      category: "development",
+    },
+    {
+      id: "command-execution",
+      name: "Command Execution",
+      description: "Execute shell commands",
+      category: "development",
+    },
+    {
+      id: "git-operations",
+      name: "Git Operations",
+      description: "Git version control operations",
+      category: "development",
+    },
+  ];
+  
+  return { ok: true, skills };
+});
 ipcMain.handle("hermes:board", (_e, slug) => hermes.getBoard(slug));
+ipcMain.handle("hermes:task_detail", (_e, slug, id) => hermes.getTask(slug, id));
 ipcMain.handle("hermes:stats", (_e, slug) => hermes.getStats(slug));
 ipcMain.handle("hermes:swarm", (_e, slug) => hermes.getSwarm(slug));
 ipcMain.handle("hermes:room", (_e, slug, limit) => hermes.getRoom(slug, limit));
@@ -337,9 +979,67 @@ ipcMain.handle("hermes:ask", async (_e, message) => {
 });
 // Config panel: read config + authed providers/models, switch model, gateway control
 ipcMain.handle("hermes:config", () => hermes.getConfig());
-ipcMain.handle("hermes:set_model", (_e, provider, model) => hermes.setModel({ provider, model }));
-ipcMain.handle("hermes:gateway_start", () => hermes.gatewayStart());
+ipcMain.handle("hermes:set_model", (_e, provider, model, profileId) => hermes.setModel({ provider, model, profileId }));
+ipcMain.handle("hermes:set_personality", (_e, personality, profileId) => hermes.setPersonality({ personality, profileId }));
+ipcMain.handle("hermes:set_profile", (_e, profileId) => hermes.setProfile(profileId));
+ipcMain.handle("hermes:gateway_start", async () => {
+  // Starting the CEO should also bring up its AGUI face (idempotent).
+  try { await aguiServer.start(); } catch (e) { console.warn("[agui] start failed:", e && e.message); }
+  return hermes.gatewayStart();
+});
 ipcMain.handle("hermes:gateway_stop", () => hermes.gatewayStop());
+ipcMain.handle("hermes:focus_task", (_e, taskInfo) => hermes.focusTask(taskInfo));
+ipcMain.handle("hermes:add_task", (_e, taskInfo) => hermes.addTask(taskInfo));
+ipcMain.handle("hermes:assign_task", (_e, taskInfo) => hermes.assignTask(taskInfo));
+ipcMain.handle("hermes:task_action", (_e, actionInfo) => hermes.taskAction(actionInfo));
+ipcMain.handle("hermes:dispatch", (_e, dispatchInfo) => hermes.dispatch(dispatchInfo));
+ipcMain.handle("hermes:task_log", (_e, logInfo) => hermes.taskLog(logInfo));
+ipcMain.handle("hermes:assignees", (_e, board) => hermes.assignees({ board }));
+ipcMain.handle("hermes:comment_task", (_e, commentInfo) => hermes.addComment(commentInfo));
+// AGUI: the local AG-UI server URL the renderer's HttpAgent connects to.
+ipcMain.handle("agui:url", () => aguiServer.url());
+
+// --- IPC: local agent job queue ---
+ipcMain.handle("jobs:create_ticket_pack", async (_e, { board, ticketId, domain, instructions } = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  if (!ticketId) return { ok: false, reason: "ticketId required" };
+  const job = jobs.create(session.project.slug, {
+    type: "ticket_context_pack",
+    domain: domain || session.domain || "All",
+    requestedBy: "voice",
+    input: { board: board || hermes.currentBoard(), ticketId, instructions: instructions || "" },
+  });
+  const project = session.project;
+  setImmediate(() => { processTicketPackJob(job.id, project).catch(() => {}); });
+  return { ok: true, job };
+});
+
+ipcMain.handle("jobs:get", (_e, id) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  const job = jobs.get(session.project.slug, id);
+  return job ? { ok: true, job } : { ok: false, reason: "job not found" };
+});
+
+ipcMain.handle("jobs:list", () => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return { ok: true, jobs: jobs.list(session.project.slug) };
+});
+
+ipcMain.handle("jobs:apply_ticket_comment", (_e, id) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  const job = jobs.get(session.project.slug, id);
+  if (!job) return { ok: false, reason: "job not found" };
+  if (job.status !== "done" || !job.output || !job.output.comment) return { ok: false, reason: "job has no completed comment output" };
+  const r = hermes.addComment({
+    board: job.output.board || job.input.board,
+    taskId: job.input.ticketId,
+    body: job.output.comment,
+    author: "CEO Studio Voice",
+  });
+  if (!r.ok) return r;
+  jobs.update(session.project.slug, id, { output: { ...job.output, commentAppliedAt: new Date().toISOString() } });
+  return { ok: true };
+});
 
 // --- IPC: brain ---
 ipcMain.handle("brain:context", () => {
@@ -406,6 +1106,30 @@ ipcMain.handle("brain:add", (_e, title, content, artifactType = "general") => {
   }
 });
 
+// --- IPC: GBrain bridge ---
+ipcMain.handle("gbrain:status", () => gbrain.status());
+
+ipcMain.handle("gbrain:query", async (_e, query, opts = {}) => {
+  const project = session.project ? { slug: session.project.slug, name: session.project.name, path: session.project.path } : null;
+  return gbrain.query({
+    query,
+    project,
+    domain: opts.domain || session.domain || "All",
+    filters: opts.filters || {},
+  });
+});
+
+ipcMain.handle("gbrain:ingest", async (_e, artifact = {}) => {
+  const project = session.project ? { slug: session.project.slug, name: session.project.name, path: session.project.path } : null;
+  return gbrain.ingest({
+    title: artifact.title,
+    content: artifact.content,
+    project,
+    domain: artifact.domain || session.domain || "All",
+    metadata: artifact.metadata || {},
+  });
+});
+
 // --- IPC: cost guardrail (live meter + kill switch) ---
 ipcMain.handle("cost:status", () => (session.cost ? session.cost.status() : null));
 ipcMain.handle("cost:kill", () => { if (session.cost) session.cost.kill(); return session.cost?.status(); });
@@ -417,14 +1141,11 @@ ipcMain.handle("cost:resume", () => { if (session.cost) session.cost.resume(); r
 // brain the voice path uses. (The old DocumentAgent/OpenAI provider path is kept
 // only for the autonomous doc-edit feature, not the conversational CEO.)
 ipcMain.handle("agent:ask", async (_e, prompt) => {
-  console.log("[agent:ask] Called with prompt:", prompt);
   // Honor the local kill switch / cost guardrail before reaching the CEO.
   if (session.cost && !session.cost.canProceed().ok) {
     return { text: "⛔ Halted by cost guardrail.", halted: true, cost: session.cost.status() };
   }
-  console.log("[agent:ask] Calling hermes.ask...");
   const r = await hermes.ask(prompt);
-  console.log("[agent:ask] hermes.ask returned:", r);
   const cost = session.cost ? session.cost.status() : null;
   if (!r.ok) return { text: r.reason || "CEO unavailable.", error: true, cost };
   return { text: r.reply, cost, halted: false };
@@ -458,16 +1179,19 @@ ipcMain.handle("voice:speak", async (_e, text) => {
 
 ipcMain.handle("voice:listen", async (_e, { audioBase64, mime } = {}) => {
   if (!voice.available()) return { ok: false, reason: "voice disabled (no ELEVENLABS_API_KEY)" };
-  if (!session.cost) return { ok: false, reason: "open a project first" };
-  const gate = session.cost.canProceed();
-  if (!gate.ok) return { ok: false, halted: true, reason: gate.reason, cost: session.cost.status() };
+  // Dictation (speech → text into the chat box) must work even before a project
+  // is opened. Only cost-gate + meter the STT when a project/cost meter exists.
+  if (session.cost) {
+    const gate = session.cost.canProceed();
+    if (!gate.ok) return { ok: false, halted: true, reason: gate.reason, cost: session.cost.status() };
+  }
   try {
     const buf = Buffer.from(String(audioBase64 || ""), "base64");
     const r = await voice.stt(buf, { mime });
-    session.cost.recordVoiceUsage({ kind: "stt", seconds: r.seconds, durationMs: r.durationMs });
-    return { ok: true, text: r.text, seconds: r.seconds, cost: session.cost.status() };
+    if (session.cost) session.cost.recordVoiceUsage({ kind: "stt", seconds: r.seconds, durationMs: r.durationMs });
+    return { ok: true, text: r.text, seconds: r.seconds, cost: session.cost ? session.cost.status() : null };
   } catch (e) {
-    return { ok: false, reason: e.message, cost: session.cost.status() };
+    return { ok: false, reason: e.message, cost: session.cost ? session.cost.status() : null };
   }
 });
 
@@ -505,10 +1229,13 @@ ipcMain.handle("docs:list", () => {
     .map((a) => ({ path: a.title, summary: a.summary }));
 });
 
+ipcMain.handle("docs:tree", (_e, domain) => projectTree({ domain }));
+
 ipcMain.handle("docs:read", (_e, relPath) => {
   if (!session.project) return { ok: false, reason: "open a project first" };
-  const root = path.resolve(session.project.path);
-  const resolved = path.resolve(root, String(relPath || ""));
+  const safe = safeProjectPath(relPath);
+  if (!safe) return { ok: false, reason: "path is outside the project" };
+  const { root, resolved } = safe;
   // Guard against path traversal outside the mounted project.
   if (resolved !== root && !resolved.startsWith(root + path.sep))
     return { ok: false, reason: "path is outside the project" };
@@ -770,7 +1497,12 @@ if (!gotLock) {
       mainWin.focus && mainWin.focus();
     }
   });
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    // GBrain is accessed via the local CLI bridge. Do not start
+    // `gbrain serve --http` here: that is an MCP server, not a REST API.
+    // Start the AGUI server (wraps Hermes → AG-UI event stream) before the
+    // window loads so the renderer can connect on init.
+    try { await aguiServer.start(); } catch (e) { console.warn("[agui] start failed:", e && e.message); }
     mainWin = createWindow();
     // The cockpit is up, so the CEO should be too: ensure the Hermes gateway
     // (which also runs the Kanban dispatcher → the swarm) is running.
@@ -781,6 +1513,11 @@ if (!gotLock) {
   });
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin") app.quit();
+  });
+  
+  app.on("before-quit", () => {
+    // Clean up GBrain server when quitting
+    stopGBrainServer();
   });
 }
 

@@ -1,5 +1,3 @@
-version: '3.8'
-
 # Project CEO Harness - Multi-Project 24/7 Deployment
 #
 # This compose supports running the harness against MULTIPLE projects at once.
@@ -60,16 +58,29 @@ services:
       - ceo-network
     command: ["python", "/app/entrypoint.py"]
 
-  # Shared brain (you can also run separate brains per profile if desired)
+  # Shared brain: real GBrain HTTP MCP server.
+  # Upstream does not publish garrytan/gbrain:latest; build from source and run
+  # `gbrain serve --http` instead.
   brain:
     profiles: ["pipe", "new"]
-    image: garrytan/gbrain:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.gbrain
     container_name: gbrain
     restart: unless-stopped
+    environment:
+      - GBRAIN_PORT=8000
+      - GBRAIN_BIND=0.0.0.0
+      - GBRAIN_PUBLIC_URL=http://localhost:8000
     volumes:
       - brain_data:/data
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:8000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     networks:
       - ceo-network
 

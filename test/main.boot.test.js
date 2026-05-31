@@ -47,10 +47,14 @@ const ok = (n, c) => { if (!c) { console.error("FAIL", n); process.exitCode = 1;
 
 (async () => {
   const expected = ["projects:list", "projects:add", "project:open", "domain:set",
+    "domain:define", "domain:get_all",
     "brain:context", "cost:status", "cost:kill", "cost:resume", "agent:ask",
+    "gbrain:status", "gbrain:query", "gbrain:ingest",
     "voice:available", "voice:speak", "voice:listen",
     "convai:status", "convai:start",
-    "docs:list", "docs:read", "swarm:request"];
+    "docs:list", "docs:tree", "docs:read",
+    "jobs:create_ticket_pack", "jobs:get", "jobs:list", "jobs:apply_ticket_comment",
+    "swarm:request"];
   ok("all IPC handlers registered", expected.every((c) => typeof handlers[c] === "function"));
 
   const added = await handlers["projects:add"]();
@@ -62,6 +66,9 @@ const ok = (n, c) => { if (!c) { console.error("FAIL", n); process.exitCode = 1;
 
   const status0 = await handlers["cost:status"]();
   ok("cost:status live after open", status0 && status0.maxSessionUsd > 0);
+
+  const gbStatus = await handlers["gbrain:status"]();
+  ok("gbrain:status reports unavailable when unconfigured", gbStatus && gbStatus.available === false);
 
   const reply = await handlers["agent:ask"](null, "what is the strategy?");
   ok("agent:ask returns text + cost", typeof reply.text === "string" && !!reply.cost);
@@ -83,10 +90,19 @@ const ok = (n, c) => { if (!c) { console.error("FAIL", n); process.exitCode = 1;
   // Document tools (back the voice agent's client tools) work on the open project.
   const docs = await handlers["docs:list"]();
   ok("docs:list returns indexed docs", Array.isArray(docs) && docs.length >= 1);
+  const tree = await handlers["docs:tree"](null, "All");
+  ok("docs:tree returns a file tree", tree && tree.ok === true && Array.isArray(tree.tree));
   const readOk = await handlers["docs:read"](null, "README.md");
   ok("docs:read reads a project file", readOk && readOk.ok === true && /strategy/i.test(readOk.text));
   const escape = await handlers["docs:read"](null, "../../../etc/hosts");
   ok("docs:read blocks path traversal", escape && escape.ok === false);
+  const domain = await handlers["domain:define"](null, {
+    name: "Ops",
+    purpose: "Operational planning",
+    createScaffold: true,
+    relativePath: "domains/ops",
+  });
+  ok("domain:define creates a scaffolded domain", domain && domain.ok === true && fs.existsSync(path.join(sampleProject, "domains", "ops", "AGENTS.md")));
   const swarm = await handlers["swarm:request"](null, "research the market");
   ok("swarm:request responds honestly (not enabled)", swarm && swarm.ok === true && swarm.enabled === false);
 

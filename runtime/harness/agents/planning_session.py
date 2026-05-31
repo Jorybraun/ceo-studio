@@ -23,18 +23,22 @@ Example:
 from __future__ import annotations
 
 import subprocess
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .herder_agent import HerderAgent, AgentMessage
+from . import agent_adapter
 from . import registry as agent_registry
 
 
 @dataclass
 class SessionParticipant:
-    agent: HerderAgent
+    agent_id: str
+    provider: str = "devin"
+    model: str | None = None
+    dispatched: bool = False
     role_in_session: str | None = None   # e.g. "lead researcher", "implementer"
 
 
@@ -64,12 +68,10 @@ class PlanningSession:
             agent_def = agent_registry.get_agent(pid)
             if not agent_def:
                 raise ValueError(f"Agent '{pid}' not found in registry")
-            agent = HerderAgent(agent_def, room=self.room)
-            self.participants[pid] = SessionParticipant(agent=agent)
+            self.participants[pid] = SessionParticipant(agent_id=pid)
 
-        # The facilitator (usually the Chat Orchestrator)
-        fac_def = agent_registry.get_agent(facilitator)
-        self.facilitator = HerderAgent(fac_def, room=self.room) if fac_def else None
+        # The facilitator is now room-post based (adapter path), kept for API compatibility.
+        self.facilitator = facilitator
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -82,29 +84,16 @@ class PlanningSession:
         # Ensure room exists
         self._ensure_room()
 
-        # Start facilitator first
-        if self.facilitator:
-            self.facilitator.start(wait_for_presence=True)
-            print(f"  - Facilitator '{self.facilitator_name}' started")
-
-        # Start participants
+        # Participants are lazily dispatched in run_discussion via agent_adapter.
         for pid, p in self.participants.items():
-            p.agent.start(wait_for_presence=True)
-            print(f"  - Participant '{pid}' started in room '{self.room}'")
+            print(f"  - Participant '{pid}' prepared in room '{self.room}'")
 
         print("[PlanningSession] All agents are live in the room.")
 
     def stop(self) -> None:
         """Stop all participants (and optionally the facilitator)."""
         print(f"[PlanningSession] Stopping session '{self.name}'")
-        for pid, p in self.participants.items():
-            p.agent.stop()
-            print(f"  - Stopped {pid}")
-
-        if self.facilitator:
-            # Usually don't kill the main facilitator, but allow it
-            # self.facilitator.stop()
-            pass
+        # Adapter-backed sessions are persisted per (room,agent); no process stop needed here.
 
     # ------------------------------------------------------------------
     # Communication helpers for the session
@@ -112,39 +101,25 @@ class PlanningSession:
 
     def post_as_facilitator(self, message: str) -> None:
         """Post a message from the facilitator into the session room."""
-        if self.facilitator:
-            self.facilitator.send_via_room(message, speaker="Swarm Facilitator")
-        else:
-            # Fallback to raw post
-            cmd = [
-                str(Path(__file__).parent.parent / "bin" / "domain-room"),
-                "post",
-                self.room,
-                "Swarm Facilitator",
-                message,
-            ]
-            subprocess.run(cmd, capture_output=True)
+        agent_adapter.post_to_room(self.room, "Swarm Facilitator", message)
 
     def send_structured(self, from_agent: str, to_agent: str, content: str, msg_type: str = "task") -> bool:
-        """Send a structured AgentMessage between two participants in this session."""
-        sender = self.participants.get(from_agent) or self.facilitator
-        if not sender:
+        """Send a structured message record into the room bus."""
+        if from_agent not in self.participants and from_agent != self.facilitator_name:
             raise ValueError(f"Sender '{from_agent}' not part of this session")
+        payload = {
+            "type": "AGENT_MESSAGE",
+            "from": from_agent,
+            "to": to_agent,
+            "msg_type": msg_type,
+            "content": content,
+            "metadata": {"session": self.name, "room": self.room},
+        }
+        agent_adapter.post_to_room(self.room, from_agent, f"[AGENT_MSG] {json.dumps(payload, ensure_ascii=False)}")
+        return True
 
-        return sender.agent.send_message(
-            recipient=to_agent,
-            content=content,
-            msg_type=msg_type,
-            metadata={"session": self.name, "room": self.room}
-        )
-
-    def get_session_messages_for(self, agent_name: str) -> list[AgentMessage]:
-        """Get messages addressed to a specific participant in this session."""
-        agent = self.participants.get(agent_name)
-        if agent:
-            return agent.agent.get_messages_for_me()
-        if agent_name == self.facilitator_name and self.facilitator:
-            return self.facilitator.get_messages_for_me()
+    def get_session_messages_for(self, agent_name: str) -> list[dict[str, Any]]:
+        """Compatibility shim: structured mailbox is deprecated under adapter mode."""
         return []
 
     # ------------------------------------------------------------------
@@ -192,19 +167,31 @@ class PlanningSession:
             self.post_as_facilitator(round_prompt)
 
             for pid, p in self.participants.items():
-                if not p.agent.is_running():
-                    print(f"  [skip] {pid} not running")
-                    continue
-
                 print(f"  Triggering reaction from {pid}...")
                 try:
-                    p.agent.load_persona()
-                    for skill in ["herder-swarm-control", "herder-messaging", "pipe-os-management"]:
-                        try:
-                            p.agent.load_skill(skill)
-                        except Exception:
-                            pass
-                    p.agent.react_to_messages()
+                    prompt = (
+                        f"You are participant '{pid}' in planning session '{self.name}'.\n"
+                        f"Topic: {topic}\n"
+                        f"Round {round_num}/{rounds}\n\n"
+                        f"Current shared brief:\n{brief_text}\n\n"
+                        "Provide concrete evidence, risks, contradictions, and proposals. "
+                        "If proposing work, include first slice and sizing."
+                    )
+                    if not p.dispatched:
+                        agent_adapter.dispatch(
+                            provider_name=p.provider,
+                            agent=p.agent_id,
+                            room=self.room,
+                            task=prompt,
+                            model=p.model,
+                        )
+                        p.dispatched = True
+                    else:
+                        agent_adapter.tell(
+                            agent=p.agent_id,
+                            room=self.room,
+                            message=prompt,
+                        )
                     transcript.append(f"[{pid}] contributed in round {round_num}")
                 except Exception as e:
                     print(f"    Error with {pid}: {e}")
@@ -241,11 +228,7 @@ class PlanningSession:
                     f"Rough proposals surfaced: {len(proposals)} (review in session log).\n"
                     "Please turn the strongest outputs into formal Kanban items."
                 )
-                post_cmd = [
-                    str(Path(__file__).parent.parent / "bin" / "domain-room"),
-                    "post", main_room, "Swarm Facilitator", handoff
-                ]
-                subprocess.run(post_cmd, capture_output=True)
+                agent_adapter.post_to_room(main_room, "Swarm Facilitator", handoff)
             except Exception as e:
                 print(f"Could not post handoff to main room: {e}")
 

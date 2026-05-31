@@ -5,11 +5,19 @@
   "description": "Agnostic desktop app + cost-guarded agent runtime for an AI Project CEO. M0 foundation.",
   "main": "main/index.js",
   "scripts": {
-    "start": "electron .",
-    "test": "node test/core.test.js && node test/main.boot.test.js && node test/voice.test.js",
-    "check": "node --check main/index.js && node --check main/preload.js && node --check main/core/voice.js && node --check main/core/convai.js && node --check main/core/env.js && node --check renderer/app.js && node --check --input-type=module < renderer/convai.js"
+    "start": "npm run build:agui && electron .",
+    "build:agui": "esbuild renderer/agui/client.src.js --bundle --format=iife --platform=browser --target=chrome120 --outfile=renderer/agui/client.bundle.js",
+    "test": "node test/core.test.js && node test/main.boot.test.js && node test/voice.test.js && node test/agui.test.js",
+    "check": "node --check main/index.js && node --check main/preload.js && node --check main/core/voice.js && node --check main/core/convai.js && node --check main/core/env.js && node --check main/core/agui-server.js && node --check main/core/jobs.js && node --check main/core/ticket-planner.js && node --check main/core/gbrain.js && node --check renderer/app.js && node --check --input-type=module < renderer/convai.js"
   },
   "devDependencies": {
-    "electron": "^30.0.0"
+    "electron": "^30.0.0",
+    "esbuild": "^0.28.0"
+  },
+  "dependencies": {
+    "@ag-ui/client": "^0.0.54",
+    "@ag-ui/core": "^0.0.54",
+    "@google/adk": "^1.1.0",
+    "@google/adk-devtools": "^1.1.0"
   }
 }

@@ -20,6 +20,8 @@ const brain = require("../main/core/brain");
 const { CostMeter } = require("../main/core/cost");
 const { createProvider, NullProvider } = require("../main/core/llm");
 const { DocumentAgent } = require("../main/core/agent");
+const jobs = require("../main/core/jobs");
+const ticketPlanner = require("../main/core/ticket-planner");
 
 let passed = 0;
 function ok(name, cond) {
@@ -55,6 +57,32 @@ ok("writeArtifact returns id + contract fields", !!art.id && art.type === "contr
 ok("contradiction lands in its index", brain.readIndex(added.slug, "contradictions").length === 1);
 const ctx = brain.loadContext(added.slug);
 ok("loadContext reports artifact count", ctx.counts.artifacts === 2);
+
+// --- local job queue + deterministic ticket planning pack ---
+const queued = jobs.create(added.slug, {
+  type: "ticket_context_pack",
+  domain: "engineering",
+  input: { ticketId: "t_test1234" },
+});
+ok("jobs.create persists queued work", queued.id && jobs.get(added.slug, queued.id).status === "queued");
+jobs.update(added.slug, queued.id, { status: "running" });
+ok("jobs.update changes status", jobs.get(added.slug, queued.id).status === "running");
+const pack = ticketPlanner.prepareTicketPack({
+  slug: added.slug,
+  project: added,
+  domain: "engineering",
+  job: queued,
+  ticket: {
+    id: "t_test1234",
+    title: "Dogfood — CEO Studio manages itself",
+    body: "Open the CEO_STUDIO folder as a project.",
+    status: "todo",
+    assignee: null,
+  },
+});
+ok("ticket planner finds gaps for thin tickets", pack.gaps.length >= 3);
+ok("ticket planner emits AGUI panel", pack.panel && Array.isArray(pack.panel.components));
+ok("ticket planner emits Kanban comment draft", /planning pack/i.test(pack.comment));
 
 // --- cost guardrail (the non-negotiable) ---
 const meter = new CostMeter(added.slug, { maxSessionUsd: 0.01, maxDayUsd: 1 });

@@ -40,6 +40,7 @@ function defineDomain(slug, domainDef) {
   const definition = {
     name: domainDef.name,
     purpose: domainDef.purpose || "",
+    overarchingGoal: domainDef.overarchingGoal || domainDef.currentState || "",
     responsibilities: domainDef.responsibilities || [],
     coreAgents: domainDef.coreAgents || [],
     currentState: domainDef.currentState || "",
@@ -53,6 +54,8 @@ function defineDomain(slug, domainDef) {
     sourcePath: domainDef.sourcePath || null,
     sourceType: domainDef.sourceType || null,
     relativePath: domainDef.relativePath || null,
+    // Kanban board association (optional - if null, uses main project board)
+    kanbanBoard: domainDef.kanbanBoard || null,
   };
   
   fs.writeFileSync(domainFile, JSON.stringify(definition, null, 2));
@@ -144,7 +147,11 @@ function getDomainDescription(slug, domainName) {
     description += ` (${domain.sourceType})`;
   }
   
-  if (domain.responsibilities.length > 0) {
+  if (domain.overarchingGoal) {
+    description += `\nOverarching goal: ${domain.overarchingGoal}`;
+  }
+  
+  if ((domain.responsibilities || []).length > 0) {
     description += `\nResponsibilities: ${domain.responsibilities.slice(0, 3).join(", ")}`;
   }
   
@@ -152,11 +159,15 @@ function getDomainDescription(slug, domainName) {
     description += `\nCurrent state: ${domain.currentState}`;
   }
   
-  if (domain.priorities.length > 0) {
+  if ((domain.priorities || []).length > 0) {
     description += `\nTop priorities: ${domain.priorities.slice(0, 2).join(", ")}`;
   }
   
-  if (domain.learnedInsights.length > 0) {
+  if ((domain.coreAgents || []).length > 0) {
+    description += `\nCore agents: ${domain.coreAgents.join(", ")}`;
+  }
+  
+  if ((domain.learnedInsights || []).length > 0) {
     const recentInsights = domain.learnedInsights.slice(-3);
     description += `\nRecent learned insights: ${recentInsights.map(i => i.insight).join("; ")}`;
   }
@@ -351,9 +362,41 @@ function parseTeamDefinition(definitionPath) {
 }
 
 /**
+ * Auto-detect kanban board for a domain based on naming patterns.
+ */
+function detectDomainBoard(domainName, availableBoards) {
+  if (!availableBoards || !availableBoards.length) return null;
+  
+  // Pattern 1: exact match (domain name == board name)
+  if (availableBoards.includes(domainName)) {
+    return domainName;
+  }
+  
+  // Pattern 2: domain-board pattern (e.g., "discovery-board")
+  const domainBoardPattern = `${domainName}-board`;
+  if (availableBoards.includes(domainBoardPattern)) {
+    return domainBoardPattern;
+  }
+  
+  // Pattern 3: domain_kanban pattern (e.g., "discovery_kanban")
+  const domainKanbanPattern = `${domainName}_kanban`;
+  if (availableBoards.includes(domainKanbanPattern)) {
+    return domainKanbanPattern;
+  }
+  
+  // Pattern 4: board-domain pattern (e.g., "board-discovery")
+  const boardDomainPattern = `board-${domainName}`;
+  if (availableBoards.includes(boardDomainPattern)) {
+    return boardDomainPattern;
+  }
+  
+  return null; // No auto-detected board
+}
+
+/**
  * Ingest domain context from project structure into domain definitions.
  */
-function ingestDomainsFromProject(slug, projectPath) {
+function ingestDomainsFromProject(slug, projectPath, availableBoards = []) {
   const detectedDomains = detectDomainsFromProject(projectPath);
   const ingested = [];
   
@@ -361,6 +404,7 @@ function ingestDomainsFromProject(slug, projectPath) {
     let purpose = "";
     let responsibilities = [];
     let currentState = "";
+    let overarchingGoal = "";
     let priorities = [];
     let interfaces = [];
     
@@ -428,6 +472,9 @@ function ingestDomainsFromProject(slug, projectPath) {
     // Calculate relative path from project root
     const relativePath = path.relative(projectPath, detected.path);
     
+    // Auto-detect kanban board association
+    const detectedBoard = detectDomainBoard(detected.name, availableBoards);
+    
     // Create or update domain definition
     const existing = getDomain(slug, detected.name);
     const definition = defineDomain(slug, {
@@ -435,6 +482,7 @@ function ingestDomainsFromProject(slug, projectPath) {
       purpose,
       responsibilities,
       currentState,
+      overarchingGoal: existing?.overarchingGoal || overarchingGoal || currentState,
       priorities,
       interfaces,
       coreAgents: existing?.coreAgents || [],
@@ -444,6 +492,9 @@ function ingestDomainsFromProject(slug, projectPath) {
       sourcePath: detected.path,
       sourceType: detected.source,
       relativePath: relativePath,
+      // Kanban board (preserve existing if set; otherwise use a domain board
+      // when present, then the mounted project's board if Hermes has one).
+      kanbanBoard: existing?.kanbanBoard || detectedBoard || (availableBoards.includes(slug) ? slug : null),
     });
     
     ingested.push({
@@ -472,5 +523,6 @@ module.exports = {
   parseAgentsMD,
   parseDomainOverview,
   parseTeamDefinition,
-  ingestDomainsFromProject
+  ingestDomainsFromProject,
+  detectDomainBoard
 };

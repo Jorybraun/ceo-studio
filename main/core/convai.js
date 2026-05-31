@@ -26,19 +26,27 @@ const API_BASE = "https://api.elevenlabs.io/v1";
 
 // Bump when the agent config (prompt/tools/behavior) below changes, so existing
 // agents get PATCHed into sync instead of serving a stale config.
-const CONFIG_VERSION = 19;
+const CONFIG_VERSION = 22;
 
-// The voice agent is a THIN RELAY to the Hermes CEO — not its own agent.
-// It has exactly one tool: ask_ceo. Everything the user says goes to Hermes
-// (which holds the brain, memory, soul, kanban, and swarm), and the agent
-// speaks back the CEO's reply.
-const TOOLS = [
+// The CEO (Hermes) thinks for a while on real turns — a cold `hermes chat`
+// floor of ~6s, and 15–60s+ for substantive/long-session answers. ElevenLabs
+// client tools default to a 20s response timeout and ABORT the call past it,
+// which is why the voice agent and the CEO "couldn't talk". Use the max the
+// API allows (120s) so the relay reply lands before ElevenLabs gives up.
+const ASK_CEO_TIMEOUT_SECS = 120;
+
+const ASK_CEO_TOOL =
   {
     type: "client",
     name: "ask_ceo",
     description:
-      "Relay the user's message to the CEO (Hermes) and return its reply. The CEO has the project memory, the Kanban board, and the agent swarm, and can dispatch work. For ANYTHING the user says or asks, call this with their message and then speak back the CEO's answer. You never answer on your own.",
+      "Send a concise, intentional request or briefing to the CEO (Hermes) and return its reply. Use when the user wants a strategic decision, ticket prioritization, swarm/delegation, or a final handoff after you have gathered context.",
     expects_response: true,
+    // The CEO can take up to ~2 min on heavy turns; don't abort early.
+    response_timeout_secs: ASK_CEO_TIMEOUT_SECS,
+    // Keep the user from interrupting the brief filler while the CEO thinks,
+    // so the tool call isn't cancelled mid-flight.
+    force_pre_tool_speech: true,
     parameters: {
       type: "object",
       required: ["message"],
@@ -46,11 +54,10 @@ const TOOLS = [
         message: { type: "string", description: "The user's message, verbatim." },
       },
     },
-  },
-];
+  };
 
-// Legacy client tools — no longer attached to the agent now that the voice is
-// a thin relay to the Hermes CEO. Kept for reference / possible reuse.
+// Broad client tools the cockpit agent can use. Some high-risk self-modifying
+// tools are filtered out below; voice should inspect and hand off, not patch code.
 const _LEGACY_TOOLS = [
   {
     type: "client",
@@ -198,17 +205,89 @@ const _LEGACY_TOOLS = [
   {
     type: "client",
     name: "define_domain",
-    description: "Define a domain with its purpose, responsibilities, and context. This gives you real understanding of what each domain means. Use when a domain needs to be created or when you need to understand what a domain is about.",
+    description: "Define a domain with its meaning, long-running goal, responsibilities, board mapping, project path, and team agents. When the user asks to create a domain, interview only for missing essentials, then call this tool.",
     expects_response: true,
     parameters: {
       type: "object", required: ["name", "purpose"],
       properties: {
         name: { type: "string", description: "Domain name (kebab-case, e.g., discovery, engineering)." },
         purpose: { type: "string", description: "What this domain does and why it exists." },
-        responsibilities: { type: "string", description: "Key responsibilities (comma-separated)." },
-        coreAgents: { type: "string", description: "Core agents needed (comma-separated)." },
+        overarchingGoal: { type: "string", description: "The long-running outcome this domain is trying to make true." },
+        responsibilities: { type: "string", description: "Key responsibilities (comma-separated or newline-separated)." },
+        coreAgents: { type: "string", description: "Core agent ids/profiles needed on the domain team (comma-separated)." },
+        kanbanBoard: { type: "string", description: "Hermes Kanban board slug for this domain, if known." },
+        relativePath: { type: "string", description: "Project-relative folder for the domain scaffold, e.g. domains/discovery." },
+        createScaffold: { type: "boolean", description: "Whether to create the domain scaffold folder and AGENTS.md. Defaults to true." },
       },
     },
+  },
+  {
+    type: "client",
+    name: "open_domain_wizard",
+    description: "Open and optionally prefill the visible Studio domain creation form so the user can review/edit before saving.",
+    expects_response: true,
+    parameters: {
+      type: "object", required: [],
+      properties: {
+        name: { type: "string", description: "Draft domain name." },
+        purpose: { type: "string", description: "Draft domain purpose." },
+        overarchingGoal: { type: "string", description: "Draft long-running goal." },
+        responsibilities: { type: "string", description: "Draft responsibilities, comma or newline separated." },
+        coreAgents: { type: "string", description: "Draft team agent ids/profiles, comma separated." },
+        kanbanBoard: { type: "string", description: "Draft board slug." },
+        relativePath: { type: "string", description: "Draft project-relative scaffold path." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "open_task_wizard",
+    description: "Open and optionally prefill the visible Studio task creation form so the user can review/edit before saving.",
+    expects_response: true,
+    parameters: {
+      type: "object", required: [],
+      properties: {
+        board: { type: "string", description: "Hermes Kanban board slug." },
+        title: { type: "string", description: "Draft task title." },
+        body: { type: "string", description: "Draft planning brief." },
+        status: { type: "string", description: "Draft lane/status, usually triage, todo, or ready." },
+        assignee: { type: "string", description: "Draft owner/agent profile." },
+        persona: { type: "string", description: "Draft persona id." },
+        skills: { type: "string", description: "Draft skill ids, comma separated." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "create_task",
+    description: "Create a real Hermes Kanban task directly after the user has confirmed the title, brief, owner, persona, and skills.",
+    expects_response: true,
+    parameters: {
+      type: "object", required: ["title"],
+      properties: {
+        board: { type: "string", description: "Hermes Kanban board slug. Defaults to current domain board/current board." },
+        title: { type: "string", description: "Task title." },
+        body: { type: "string", description: "Planning brief / body." },
+        status: { type: "string", description: "Lane/status, usually triage, todo, or ready." },
+        assignee: { type: "string", description: "Owner/agent profile." },
+        persona: { type: "string", description: "Persona id." },
+        skills: { type: "string", description: "Skill ids, comma separated." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "list_personas",
+    description: "List available personas the user can attach to agents or tasks.",
+    expects_response: true,
+    parameters: { type: "object", required: [], properties: {} },
+  },
+  {
+    type: "client",
+    name: "list_skills",
+    description: "List available skills/capabilities the user can attach to tasks or use for team planning.",
+    expects_response: true,
+    parameters: { type: "object", required: [], properties: {} },
   },
   {
     type: "client",
@@ -367,6 +446,199 @@ const _LEGACY_TOOLS = [
   },
 ];
 
+const COCKPIT_TOOLS = [
+  {
+    type: "client",
+    name: "get_current_context",
+    description: "Get the active project, active domain, selected file, and current panel context from CEO Studio.",
+    expects_response: true,
+    parameters: { type: "object", required: [], properties: {} },
+  },
+  {
+    type: "client",
+    name: "list_domains",
+    description: "List configured domains with purpose and location. Use before switching or creating domains.",
+    expects_response: true,
+    parameters: { type: "object", required: [], properties: {} },
+  },
+  {
+    type: "client",
+    name: "list_project_files",
+    description: "List the project file tree, optionally scoped to a domain. Use to find documents or source files to render in the left panel.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: [],
+      properties: {
+        domain: { type: "string", description: "Optional domain name. Defaults to the active domain." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "read_project_file",
+    description: "Read and display a project file in the left panel. Use exact paths from list_project_files.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["path"],
+      properties: {
+        path: { type: "string", description: "Project-relative file path." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "render_panel",
+    description: "Render structured AG-UI content in the left panel: headings, markdown, lists, tables, callouts, code, mermaid diagrams, cards, and dividers.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["title", "components"],
+      properties: {
+        title: { type: "string", description: "Panel title." },
+        components: { type: "array", description: "AG-UI component list. Each item needs a type and props for that component." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "list_tickets",
+    description: "List Kanban tickets from the active Hermes board, grouped by status.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: [],
+      properties: {
+        board: { type: "string", description: "Optional board slug; defaults to ceo-studio/current board." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "show_ticket",
+    description: "Load a Kanban ticket body/comments and render it in the left panel for discussion.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["id"],
+      properties: {
+        id: { type: "string", description: "Ticket id." },
+        board: { type: "string", description: "Optional board slug." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "prepare_ticket_context",
+    description: "Queue the Document Agent to prepare a richer planning pack for a thin ticket, including gaps, acceptance criteria, subtasks, context files, brain artifacts, and a renderable AG-UI panel.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["ticketId"],
+      properties: {
+        ticketId: { type: "string", description: "Ticket id, e.g. t_c873dea3." },
+        board: { type: "string", description: "Optional board slug." },
+        domain: { type: "string", description: "Optional domain name. Defaults to active domain." },
+        instructions: { type: "string", description: "Optional extra instructions for preparing the pack." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "get_agent_job",
+    description: "Check a queued agent job and render its result if complete.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["jobId"],
+      properties: {
+        jobId: { type: "string", description: "Job id returned by prepare_ticket_context." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "apply_ticket_comment",
+    description: "Post a completed ticket planning pack back to the Kanban ticket as a durable comment.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["jobId"],
+      properties: {
+        jobId: { type: "string", description: "Completed job id." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "tell_ceo",
+    description: "Send the user's distilled intent, selected domain, ticket/file context, and your recommendation to the CEO for action or decision.",
+    expects_response: true,
+    response_timeout_secs: ASK_CEO_TIMEOUT_SECS,
+    force_pre_tool_speech: true,
+    parameters: {
+      type: "object",
+      required: ["briefing"],
+      properties: {
+        briefing: { type: "string", description: "Concise handoff to the CEO, including domain, files/tickets, ask, and recommendation." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "gbrain_status",
+    description: "Check whether the external GBrain service is configured and reachable. Use before GBrain queries.",
+    expects_response: true,
+    parameters: { type: "object", required: [], properties: {} },
+  },
+  {
+    type: "client",
+    name: "gbrain_query",
+    description: "Query the external GBrain long-term memory/synthesis backend for project/domain context. Use for historical decisions, founder judgment, long-term goals, and synthesis-heavy context.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["query"],
+      properties: {
+        query: { type: "string", description: "Natural language question for GBrain." },
+        domain: { type: "string", description: "Optional domain; defaults to active domain." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "gbrain_ingest",
+    description: "Ingest an important conversation artifact, ticket planning pack, decision, or synthesis into external GBrain. Always keep local brain artifacts too.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["title", "content"],
+      properties: {
+        title: { type: "string", description: "Artifact title." },
+        content: { type: "string", description: "Artifact content." },
+        domain: { type: "string", description: "Optional domain; defaults to active domain." },
+      },
+    },
+  },
+];
+
+const TOOLS = [
+  ASK_CEO_TOOL,
+  ...COCKPIT_TOOLS,
+  ..._LEGACY_TOOLS.filter((t) => ![
+    "modify_my_code",
+    "test_my_changes",
+    "repair_agent",
+    "remember_fun_fact",
+    "read_soul",
+    "update_soul",
+    "add_soul_milestone",
+    "add_soul_memory",
+    "reflect_on_soul",
+  ].includes(t.name)),
+];
+
 function cfg(env = process.env) {
   const maxMin = Number(env.CEO_CONVAI_MAX_MINUTES);
   const maxTokens = Number(env.CEO_CONVAI_MAX_TOKENS);
@@ -420,12 +692,13 @@ function _conversationConfig(env = process.env, { projectName, currentDomain = "
     : domainPrompts.default;
     
   const prompt = [
-    `You are the VOICE of the CEO (Hermes) for ${who}. You are a phone line to the CEO, not the CEO yourself and not a separate assistant.`,
-    "YOUR ONE JOB: For everything the user says — questions, requests, commands, chit-chat — call the ask_ceo tool with their message, then speak back the CEO's reply naturally and conversationally.",
-    "You have NO knowledge of your own and NO other tools. Never answer from your own knowledge. The CEO has the memory, the Kanban board, the domains, and the agent swarm — it decides and acts; you just relay and voice.",
-    "While ask_ceo is running you may say a brief filler like 'one sec' or 'let me check'. When its reply comes back, speak it — trim it for voice if it's long, but don't add facts of your own.",
-    "If ask_ceo returns an error or the CEO is unreachable, tell the user briefly and plainly (e.g. 'the CEO's offline right now' or read the error). Don't invent an answer.",
-    "Be concise and natural. Stop immediately when the user speaks.",
+    `You are CEO Studio's live voice cockpit agent for ${who}. You are useful in conversation: you can inspect domains, tickets, files, and brain context; render the left panel; and then hand distilled requests to the CEO or document agent when that is the right next step.`,
+    `Current domain: ${currentDomain || "All"}. ${domainInstruction}`,
+    "Do not forward every utterance to the CEO. First understand the user's intent. For casual clarification, answer directly. For domain/ticket/file work, gather the smallest useful context with tools, render useful artifacts in the left panel, and keep the user in the loop.",
+    "Routing: use ticket tools for Kanban/ticket/board questions; use project file tools for documents and code; use local brain tools for immediate project memory; use GBrain tools for long-term memory, founder-judgment patterns, historical decisions, and synthesis-heavy context; use define_domain/list_domains/set_domain for domain setup; use ask_document_agent for document-specific analysis; use tell_ceo or ask_ceo only for strategic decisions, delegation, prioritization, or final handoff.",
+    "When the user asks to create or set up a domain, ask only for missing essentials, then call define_domain and set_domain. If a visual summary helps, call render_panel.",
+    "When discussing a file or ticket, prefer showing it in the left panel before reasoning about it. Mention concrete file paths or ticket ids.",
+    "Voice style: concise, direct, collaborative. Stop immediately when the user speaks. Do not invent unavailable facts; use tools or say what is missing.",
   ].join(" ");
   return {
     agent: {

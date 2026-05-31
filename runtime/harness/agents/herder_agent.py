@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass, asdict
@@ -26,7 +27,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import registry as agent_registry
-from .reactor import AgentReactor, create_simple_reactor
 
 
 @dataclass
@@ -147,8 +147,9 @@ class HerderAgent:
         self._loaded_persona_name: str | None = None
         self._loaded_skills: dict[str, str] = {}
 
-        # Reactor (for autonomous mode)
-        self.reactor: AgentReactor | None = None
+        # Reactor loop state (for autonomous mode)
+        self._reactor_thread: threading.Thread | None = None
+        self._reactor_stop = threading.Event()
 
     @classmethod
     def from_registry(cls, name: str, room: str = "discovery") -> "HerderAgent":
@@ -547,14 +548,33 @@ class HerderAgent:
     # Reactor support (dual-mode: controlled vs more autonomous)
     # ------------------------------------------------------------------
 
-    def attach_reactor(self, reactor: AgentReactor | None = None) -> AgentReactor:
-        """Attach (or create) a reactor to this agent."""
-        if reactor is None:
-            reactor = create_simple_reactor(self)
-        self.reactor = reactor
-        return reactor
+    def attach_reactor(self, reactor: Any | None = None) -> "HerderAgent":
+        """Backward-compatible no-op: reactor behavior is now built in."""
+        return self
 
-    def start_reactor(self, background: bool = False, poll_interval: float = 5.0) -> AgentReactor:
+    def _reactor_loop(self, poll_interval: float = 5.0) -> None:
+        consecutive_errors = 0
+        max_consecutive_errors = 10
+        max_backoff = 300.0
+        while not self._reactor_stop.is_set():
+            try:
+                self.react_to_messages()
+                consecutive_errors = 0
+                self._reactor_stop.wait(poll_interval)
+            except Exception as e:
+                consecutive_errors += 1
+                backoff = min(poll_interval * (2 ** consecutive_errors), max_backoff)
+                print(
+                    f"[Reactor] Error in reactor for {self.name} "
+                    f"(attempt {consecutive_errors}/{max_consecutive_errors}): {e}. "
+                    f"Backing off {backoff:.0f}s"
+                )
+                if consecutive_errors >= max_consecutive_errors:
+                    print(f"[Reactor] Too many consecutive errors for {self.name}; stopping loop.")
+                    return
+                self._reactor_stop.wait(backoff)
+
+    def start_reactor(self, background: bool = False, poll_interval: float = 5.0) -> "HerderAgent":
         """
         Start a reactor for this agent.
 
@@ -564,15 +584,26 @@ class HerderAgent:
         - background=True: Run in a daemon thread. This moves the agent toward
           more independent operation (path B).
         """
-        if self.reactor is None:
-            self.attach_reactor()
+        if self._reactor_thread and self._reactor_thread.is_alive():
+            return self
 
-        self.reactor.start(background=background, poll_interval=poll_interval)
-        return self.reactor
+        self._reactor_stop.clear()
+        if background:
+            self._reactor_thread = threading.Thread(
+                target=self._reactor_loop, args=(poll_interval,), daemon=True
+            )
+            self._reactor_thread.start()
+            print(f"[Reactor] Started background reactor for {self.name}")
+            return self
+
+        self._reactor_loop(poll_interval)
+        return self
 
     def stop_reactor(self) -> None:
-        if self.reactor:
-            self.reactor.stop()
+        self._reactor_stop.set()
+        if self._reactor_thread and self._reactor_thread.is_alive():
+            self._reactor_thread.join(timeout=2)
+        print(f"[Reactor] Stopped reactor for {self.name}")
 
     def serve(self, background: bool = False, auto_load_skill: str | None = "herder-swarm-control") -> None:
         """

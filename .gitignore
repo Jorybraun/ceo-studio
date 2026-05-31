@@ -3,6 +3,9 @@ dist/
 .DS_Store
 *.log
 
+# Generated AGUI client bundle (built by `npm run build:agui`)
+renderer/agui/client.bundle.js
+
 # Secrets / local env (never commit)
 .env
 .env.local

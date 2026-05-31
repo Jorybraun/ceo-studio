@@ -1,0 +1,20 @@
+FROM oven/bun:1
+
+ENV GBRAIN_PORT=8000 \
+    GBRAIN_BIND=0.0.0.0 \
+    GBRAIN_PUBLIC_URL=http://localhost:8000 \
+    HOME=/data
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt
+RUN git clone https://github.com/garrytan/gbrain.git /opt/gbrain
+WORKDIR /opt/gbrain
+RUN bun install && bun link
+
+VOLUME ["/data"]
+EXPOSE 8000
+
+CMD ["sh", "-lc", "gbrain serve --http --port ${GBRAIN_PORT:-8000} --bind ${GBRAIN_BIND:-0.0.0.0} --public-url ${GBRAIN_PUBLIC_URL:-http://localhost:8000}"]

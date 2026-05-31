@@ -12,9 +12,9 @@
 import { Conversation } from "https://esm.sh/@elevenlabs/client@1.9.0";
 
 const ui = () => window.ceoUI || {};
-const btn = document.getElementById("live-call");
-const label = document.getElementById("live-call-label");
-const icon = document.getElementById("live-call-icon");
+const hdrBtn = document.getElementById("header-voice");
+const hdrLabel = document.getElementById("header-voice-label");
+const hdrIcon = document.getElementById("header-voice-icon");
 
 let conversation = null;
 let active = false;
@@ -24,22 +24,180 @@ let countdownTimer = null;
 let available = false;
 
 function setLabel(text, live) {
-  if (label) label.textContent = text;
-  if (icon) icon.textContent = live ? "⏹️" : "🎙️";
-  if (btn) {
-    btn.classList.toggle("bg-red-600", !!live);
-    btn.classList.toggle("border-red-500", !!live);
-    btn.classList.toggle("bg-neutral-800", !live);
+  if (hdrLabel) hdrLabel.textContent = live ? "End" : "Voice";
+  if (hdrIcon) hdrIcon.textContent = live ? "⏹️" : "🎙️";
+  if (hdrBtn) {
+    hdrBtn.classList.toggle("bg-red-600", !!live);
+    hdrBtn.classList.toggle("border-red-500", !!live);
+    hdrBtn.classList.toggle("bg-neutral-800", !live);
   }
+}
+
+async function currentBoardSlug(preferred) {
+  if (preferred) return preferred;
+  try {
+    const r = await window.ceo.ceoBoards();
+    return (r && (r.current || (r.boards && r.boards[0] && r.boards[0].slug))) || "ceo-studio";
+  } catch {
+    return "ceo-studio";
+  }
+}
+
+function flattenTree(nodes, depth = 0, out = []) {
+  for (const n of nodes || []) {
+    out.push(`${"  ".repeat(depth)}${n.type === "dir" ? "/" : ""}${n.path}`);
+    if (n.children) flattenTree(n.children, depth + 1, out);
+    if (out.length >= 120) break;
+  }
+  return out;
 }
 
 // Client tools the live agent can invoke mid-conversation. Names MUST match
 // the tool definitions in main/core/convai.js (TOOLS). Each returns a STRING
 // that ElevenLabs appends to the agent's context (expects_response: true).
 const clientTools = {
-  // The one tool the voice agent uses: relay everything to the Hermes CEO and
-  // return its reply for the agent to speak. The CEO holds the brain, memory,
-  // soul, kanban, and swarm — this is just the phone line.
+  async get_current_context() {
+    const ctx = ui().getContext?.() || {};
+    return JSON.stringify(ctx, null, 2);
+  },
+  async list_domains() {
+    const r = await window.ceo.getAllDomains();
+    if (!r || !r.ok) return `Could not list domains: ${r ? r.reason : "unknown"}`;
+    const domains = r.domains || [];
+    if (!domains.length) return "No domains are configured yet.";
+    return domains.map((d) => {
+      const loc = d.relativePath ? ` (${d.relativePath})` : "";
+      return `- ${d.name}${loc}: ${d.purpose || "no purpose set"}`;
+    }).join("\n");
+  },
+  async list_project_files({ domain } = {}) {
+    const r = await window.ceo.docsTree(domain);
+    if (!r || !r.ok) return `Could not list files: ${r ? r.reason : "unknown"}`;
+    return `Files for ${r.domain || "project"} rooted at ${r.root || "."}${r.truncated ? " (truncated)" : ""}:\n` +
+      flattenTree(r.tree).join("\n");
+  },
+  async read_project_file({ path } = {}) {
+    if (!path) return "No path provided.";
+    const r = await window.ceo.docsRead(path);
+    if (!r || !r.ok) return `Could not read ${path}: ${r ? r.reason : "unknown"}`;
+    ui().showPanel?.(path, r.text);
+    ui().appendStream?.("sys", `Showing ${path}`);
+    return `Displayed ${path}. Contents:\n\n${r.text.slice(0, 9000)}`;
+  },
+  async render_panel({ title, components } = {}) {
+    const normalized = (Array.isArray(components) ? components : [])
+      .filter((c) => c && typeof c === "object" && c.type)
+      .map((c) => c.props ? c : ({ type: c.type, props: Object.fromEntries(Object.entries(c).filter(([k]) => k !== "type")) }));
+    const panel = { title: title || "", components: normalized };
+    ui().showAgui?.(panel);
+    return `Rendered panel${panel.title ? `: ${panel.title}` : ""}.`;
+  },
+  async list_tickets({ board } = {}) {
+    const slug = await currentBoardSlug(board);
+    const r = await window.ceo.ceoBoard(slug);
+    if (!r || !r.ok) return `Could not load board ${slug}: ${r ? r.reason : "unknown"}`;
+    const lines = [];
+    for (const [status, tasks] of Object.entries(r.columns || {})) {
+      lines.push(`${status}:`);
+      for (const t of tasks.slice(0, 20)) lines.push(`- ${t.id} [${t.assignee || "unassigned"}] ${t.title}`);
+    }
+    return lines.join("\n") || `Board ${slug} has no tickets.`;
+  },
+  async show_ticket({ id, board } = {}) {
+    if (!id) return "No ticket id provided.";
+    const slug = await currentBoardSlug(board);
+    const r = await window.ceo.ceoTaskDetail(slug, id);
+    if (!r || !r.ok) return `Could not load ticket ${id}: ${r ? r.reason : "unknown"}`;
+    const task = r.task || {};
+    const comments = (r.comments || []).map((c) => `- ${c.author || "comment"}: ${c.body || ""}`).join("\n");
+    const md = [
+      `Status: ${task.status || "unknown"}`,
+      `Assignee: ${task.assignee || "unassigned"}`,
+      "",
+      task.body || "(no description)",
+      comments ? `\n## Comments\n\n${comments}` : "",
+    ].join("\n");
+    ui().showPanel?.(`${task.id || id}: ${task.title || "Ticket"}`, md);
+    ui().appendStream?.("sys", `Showing ticket ${id}`);
+    return `Displayed ticket ${id}: ${task.title || ""}\n\n${md.slice(0, 9000)}`;
+  },
+  async prepare_ticket_context({ ticketId, board, domain, instructions } = {}) {
+    if (!ticketId) return "No ticket id provided.";
+    const slug = await currentBoardSlug(board);
+    const r = await window.ceo.jobCreateTicketPack({
+      board: slug,
+      ticketId,
+      domain: domain || ui().getContext?.().domain,
+      instructions,
+    });
+    if (!r || !r.ok) return `Could not queue ticket planning pack: ${r ? r.reason : "unknown"}`;
+    const jobId = r.job.id;
+    ui().appendStream?.("sys", `Queued planning pack ${jobId} for ${ticketId}`);
+    for (let i = 0; i < 12; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const got = await window.ceo.jobGet(jobId);
+      const job = got && got.job;
+      if (job && job.status === "done") {
+        if (job.output && job.output.panel) ui().showAgui?.(job.output.panel);
+        return `${job.output.summary}\n\nJob: ${jobId}\n\nGaps:\n${(job.output.gaps || []).map((g) => `- ${g}`).join("\n")}\n\nSuggested acceptance criteria:\n${(job.output.acceptanceCriteria || []).map((a) => `- ${a}`).join("\n")}\n\nAsk me to apply this as a ticket comment if you want it saved to Kanban.`;
+      }
+      if (job && job.status === "failed") return `Planning pack ${jobId} failed: ${job.error || "unknown error"}`;
+    }
+    return `Planning pack queued as ${jobId}. It is still running; ask me to check job ${jobId}.`;
+  },
+  async get_agent_job({ jobId } = {}) {
+    if (!jobId) return "No job id provided.";
+    const r = await window.ceo.jobGet(jobId);
+    if (!r || !r.ok) return `Could not get job ${jobId}: ${r ? r.reason : "unknown"}`;
+    const job = r.job;
+    if (job.status === "done" && job.output && job.output.panel) ui().showAgui?.(job.output.panel);
+    return `Job ${job.id}: ${job.status}${job.error ? ` (${job.error})` : ""}` +
+      (job.output ? `\n${job.output.summary || ""}` : "");
+  },
+  async apply_ticket_comment({ jobId } = {}) {
+    if (!jobId) return "No job id provided.";
+    const r = await window.ceo.jobApplyTicketComment(jobId);
+    if (!r || !r.ok) return `Could not apply ticket comment: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `Applied planning pack ${jobId} as a Kanban comment`);
+    return `Applied planning pack ${jobId} as a Kanban comment.`;
+  },
+  async gbrain_status() {
+    const r = await window.ceo.gbrainStatus();
+    if (!r || !r.ok) return `Could not check GBrain: ${r ? r.reason : "unknown"}`;
+    if (!r.available) return `GBrain is not available: ${r.reason || "not reachable"}`;
+    return `GBrain is available at ${r.url || "configured endpoint"}.`;
+  },
+  async gbrain_query({ query, domain } = {}) {
+    if (!query) return "No GBrain query provided.";
+    const r = await window.ceo.gbrainQuery(query, { domain: domain || ui().getContext?.().domain });
+    if (!r || !r.ok) return `GBrain query failed: ${r ? r.reason : "unknown"}. I can still use the local project brain.`;
+    const text = typeof r.result === "string" ? r.result : JSON.stringify(r.result, null, 2);
+    ui().appendStream?.("sys", `GBrain query: ${query.slice(0, 80)}`);
+    return `GBrain result from ${r.endpoint || "endpoint"}:\n${text.slice(0, 9000)}`;
+  },
+  async gbrain_ingest({ title, content, domain } = {}) {
+    if (!title || !content) return "Title and content are required for GBrain ingest.";
+    const local = await window.ceo.addToBrain(title, content, "insight");
+    const r = await window.ceo.gbrainIngest({
+      title,
+      content,
+      domain: domain || ui().getContext?.().domain,
+      metadata: { source: "voice-agent", localBrainArtifactId: local && local.id },
+    });
+    if (!r || !r.ok) return `Saved locally${local && local.id ? ` as ${local.id}` : ""}, but GBrain ingest failed: ${r ? r.reason : "unknown"}`;
+    return `Saved locally${local && local.id ? ` as ${local.id}` : ""} and ingested into GBrain via ${r.endpoint || "endpoint"}.`;
+  },
+  async tell_ceo({ briefing } = {}) {
+    const msg = (briefing || "").trim();
+    if (!msg) return "No briefing provided.";
+    ui().appendStream?.("sys", "Voice handoff → CEO...");
+    let r;
+    try { r = await window.ceo.askCeo(msg); }
+    catch (e) { return `The CEO is unreachable right now (${e && e.message ? e.message : "error"}).`; }
+    if (!r || !r.ok) return `The CEO couldn't respond: ${r ? r.reason : "unknown error"}`;
+    ui().appendStream?.("agent", r.reply);
+    return r.reply;
+  },
   async ask_ceo({ message } = {}) {
     const msg = (message || "").trim();
     if (!msg) return "No message to relay.";
@@ -186,18 +344,100 @@ const clientTools = {
     ui().appendStream?.("sys", `✅ Added to brain: ${r.id || "done"}`);
     return `Added to brain as ${artifact_type}: ${title}`;
   },
-  async define_domain({ name, purpose, responsibilities, coreAgents } = {}) {
+  async define_domain({
+    name,
+    purpose,
+    overarchingGoal,
+    responsibilities,
+    coreAgents,
+    kanbanBoard,
+    relativePath,
+    createScaffold = true,
+  } = {}) {
     if (!name || !purpose) return "Domain name and purpose are required.";
     ui().appendStream?.("sys", `📋 Defining domain: ${name}`);
+    const cleanName = String(name).trim();
+    const respList = Array.isArray(responsibilities)
+      ? responsibilities
+      : String(responsibilities || "").split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+    const agentList = Array.isArray(coreAgents)
+      ? coreAgents
+      : String(coreAgents || "").split(/[,\n]/).map(s => s.trim()).filter(Boolean);
     const r = await window.ceo.defineDomain({
-      name,
+      name: cleanName,
       purpose,
-      responsibilities: responsibilities ? responsibilities.split(",").map(s => s.trim()) : [],
-      coreAgents: coreAgents ? coreAgents.split(",").map(s => s.trim()) : []
+      overarchingGoal: overarchingGoal || "",
+      currentState: overarchingGoal || "",
+      priorities: overarchingGoal ? [overarchingGoal] : [],
+      activeEpics: overarchingGoal ? [overarchingGoal] : [],
+      responsibilities: respList,
+      coreAgents: agentList,
+      kanbanBoard: kanbanBoard || null,
+      createScaffold: !!createScaffold,
+      relativePath: relativePath || `domains/${cleanName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`,
     });
     if (!r || !r.ok) return `Failed to define domain: ${r ? r.reason : "unknown"}`;
+    await ui().setDomainUI?.(r.definition.name);
+    ui().showPanel?.(r.definition.name, [
+      `Purpose: ${r.definition.purpose || "not set"}`,
+      "",
+      `Goal: ${r.definition.overarchingGoal || "not set"}`,
+      "",
+      `Board: ${r.definition.kanbanBoard || "not mapped"}`,
+      "",
+      `Team: ${(r.definition.coreAgents || []).join(", ") || "not assigned"}`,
+      "",
+      "Use the task board below as the navigation surface for planning.",
+    ].join("\n"));
     ui().appendStream?.("sys", `✅ Domain defined: ${name}`);
-    return `Domain "${name}" defined with purpose: ${purpose}`;
+    return `Domain "${r.definition.name}" defined. Purpose: ${purpose}. Goal: ${r.definition.overarchingGoal || "not set"}. Team: ${(r.definition.coreAgents || []).join(", ") || "not assigned"}.`;
+  },
+  async open_domain_wizard({
+    name,
+    purpose,
+    overarchingGoal,
+    responsibilities,
+    coreAgents,
+    kanbanBoard,
+    relativePath,
+  } = {}) {
+    const respList = Array.isArray(responsibilities)
+      ? responsibilities
+      : String(responsibilities || "").split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+    const agentList = Array.isArray(coreAgents)
+      ? coreAgents
+      : String(coreAgents || "").split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+    await ui().openDomainWizard?.({ name, purpose, overarchingGoal, responsibilities: respList, coreAgents: agentList, kanbanBoard, relativePath });
+    return "Opened the domain creation form with the available draft fields. Ask the user to review it and press Create domain, or gather missing details first.";
+  },
+  async open_task_wizard({ board, title, body, status, assignee, persona, skills } = {}) {
+    const skillList = Array.isArray(skills)
+      ? skills
+      : String(skills || "").split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+    await ui().openTaskWizard?.(board || null, { title, body, status, assignee, persona, skills: skillList });
+    return "Opened the task creation form with the draft routing, persona, and skills. Ask the user to review it and press Create task unless they explicitly asked you to create it directly.";
+  },
+  async create_task({ board, title, body, status, assignee, persona, skills } = {}) {
+    if (!title) return "Task title is required.";
+    const skillList = Array.isArray(skills)
+      ? skills
+      : String(skills || "").split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+    const r = await ui().createTask?.({ board, title, body, status, assignee, persona, skills: skillList });
+    if (!r || !r.ok) return `Failed to create task: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `✅ Task created: ${title}`);
+    return `Created task "${title}"${assignee ? ` assigned to ${assignee}` : ""}${persona ? ` with persona ${persona}` : ""}.`;
+  },
+  async list_personas() {
+    const r = await window.ceo.listPersonas();
+    if (!r || !r.ok) return `Could not list personas: ${r ? r.reason : "unknown"}`;
+    const personas = r.personas || [];
+    return personas.map((p) => `- ${p.id}: ${p.name || p.id}${p.description ? ` — ${p.description}` : ""}`).join("\n") || "No personas registered.";
+  },
+  async list_skills() {
+    const r = await window.ceo.listSkills();
+    if (!r || !r.ok) return `Could not list skills: ${r ? r.reason : "unknown"}`;
+    const skills = r.skills || [];
+    return skills.map((s) => `- ${s.id}: ${s.name || s.id}${s.category ? ` (${s.category})` : ""}${s.description ? ` — ${s.description}` : ""}`).join("\n") || "No skills registered.";
   },
   async get_domain_context({ domain } = {}) {
     const r = await window.ceo.getDomainDescription(domain);
@@ -335,7 +575,7 @@ async function start() {
     await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (e) {
     ui().setVoiceStatus?.(`Mic unavailable: ${e.message}`);
-    setLabel("Start live voice", false);
+    setLabel("Voice", false);
     starting = false;
     return;
   }
@@ -344,7 +584,7 @@ async function start() {
   const res = await window.ceo.convaiStart();
   if (!res || !res.ok) {
     ui().setVoiceStatus?.(`Live voice error: ${res ? res.reason : "unknown"}`);
-    setLabel("Start live voice", false);
+    setLabel("Voice", false);
     starting = false;
     return;
   }
@@ -386,7 +626,7 @@ async function start() {
     starting = false;
   } catch (e) {
     ui().setVoiceStatus?.(`Could not start live voice: ${e.message}`);
-    setLabel("Start live voice", false);
+    setLabel("Voice", false);
     cleanup("start-failed");
   }
 }
@@ -420,7 +660,7 @@ function cleanup(reason) {
   starting = false;
   clearTimeout(endTimer);
   clearInterval(countdownTimer);
-  setLabel("Start live voice", false);
+  setLabel("Voice", false);
   ui().setAgentState?.("idle");
   if (reason !== undefined) ui().setVoiceStatus?.(reason ? `Live voice ended (${reason}).` : "");
 }
@@ -430,15 +670,15 @@ function toggle() { if (active) stop("ended by user"); else start(); }
 // Expose to app.js (kill switch / cost guardrail call stop()).
 window.CEOConvai = { toggle, stop, isActive: () => active };
 
-if (btn) btn.addEventListener("click", toggle);
+if (hdrBtn) hdrBtn.addEventListener("click", toggle);
 
-// Probe availability; disable the control if no key is configured.
+// Probe availability; disable the controls if no key is configured.
 (async () => {
   try {
     const st = await window.ceo.convaiStatus();
     available = !!(st && st.available);
     if (!available) {
-      if (btn) btn.disabled = true;
+      if (hdrBtn) hdrBtn.disabled = true;
       ui().setVoiceStatus?.(st && st.note ? st.note : "Live voice disabled (no ELEVENLABS_API_KEY).");
     }
   } catch { /* live voice optional */ }
