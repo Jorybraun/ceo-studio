@@ -242,6 +242,22 @@ ok("resume restores", (meter2.resume(), meter2.canProceed().ok === true));
 const m3 = new CostMeter(added.slug, { maxSessionUsd: 100, maxDayUsd: 100 });
 ok("day spend persisted across instances", m3.status().dayUsd > 0);
 
+// --- agent registry: dynamic providers + generic command passthrough ---
+const registry = require("../main/core/registry");
+const provs = registry.listProviders();
+ok("listProviders includes claude", provs.includes("claude"));
+ok("listProviders includes generic command", provs.includes("command"));
+
+const regProj = fs.mkdtempSync(path.join(os.tmpdir(), "registry-proj-"));
+const created = registry.createAgent(regProj, {
+  name: "Claude Worker", provider: "command",
+  command: "claude -p --output-format text {prompt}", persona: null,
+});
+ok("createAgent with command provider succeeds", created.ok === true);
+const back = registry.read(regProj).agents.find((a) => a.id === created.agent.id);
+ok("command template persisted + read back", back && back.command === "claude -p --output-format text {prompt}");
+ok("command agent reports command provider", back && back.provider === "command");
+
 // --- provider (offline default) + agent cost-gating ---
 const { provider } = createProvider({});
 ok("default provider is NullProvider (offline)", provider instanceof NullProvider);

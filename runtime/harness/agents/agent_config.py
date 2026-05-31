@@ -76,6 +76,9 @@ def load_config() -> dict:
                     "model": spec.get("model"),
                     "capabilities": spec.get("capabilities", []) or [],
                     "description": spec.get("description", ""),
+                    # Generic command provider: CLI template + cost hint.
+                    "command": spec.get("command"),
+                    "paid": spec.get("paid"),
                 }
         for name, ids in (data.get("teams", {}) or {}).items():
             if name not in teams and isinstance(ids, list):

@@ -1146,6 +1146,10 @@ function openAgentModal(agentId) {
           <input id="am-model" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100" value="${editing && editing.model ? esc(editing.model) : ""}" placeholder="e.g. grok-build" />
         </label>
       </div>
+      <label id="am-command-row" class="block text-xs text-neutral-400" style="display:none">Command template
+        <input id="am-command" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 font-mono" value="${editing && editing.command ? esc(editing.command) : ""}" placeholder="claude -p --output-format text {prompt}" />
+        <span class="text-[10px] text-neutral-600">Any CLI. Placeholders: {prompt} {model} {workdir} {agent} {session_id}.</span>
+      </label>
       <label class="block text-xs text-neutral-400">Persona / role
         <select id="am-persona" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100">${personaOpts}</select>
       </label>
@@ -1168,6 +1172,12 @@ function openAgentModal(agentId) {
   document.body.appendChild(wrap);
   wrap.addEventListener("click", (e) => { if (e.target === wrap) closeAgentModal(); });
   document.getElementById("agent-modal-close").addEventListener("click", closeAgentModal);
+  // Show the command template only for the generic "command" provider.
+  const provSel = document.getElementById("am-provider");
+  const cmdRow = document.getElementById("am-command-row");
+  const syncCmdRow = () => { cmdRow.style.display = provSel.value === "command" ? "block" : "none"; };
+  provSel.addEventListener("change", syncCmdRow);
+  syncCmdRow();
   document.getElementById("am-save").addEventListener("click", () => saveAgentModal(editing ? editing.id : null));
   const del = document.getElementById("am-delete");
   if (del) del.addEventListener("click", () => deleteAgentFromModal(editing.id));
@@ -1180,6 +1190,7 @@ async function saveAgentModal(existingId) {
     name: val("am-name").trim(),
     provider: val("am-provider") || "echo",
     model: val("am-model").trim() || null,
+    command: val("am-command").trim() || null,
     persona: val("am-persona") || null,
     capabilities: val("am-caps").split(",").map((s) => s.trim()).filter(Boolean),
     memory_key: val("am-mem").trim() || null,

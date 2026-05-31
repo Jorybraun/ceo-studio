@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from .base import AgentProvider, ProviderResult
+from .claude_provider import ClaudeProvider
+from .command_provider import CommandProvider
 from .devin_provider import DevinProvider
 from .echo_provider import EchoProvider
 from .grok_provider import GrokProvider
 
 _PROVIDERS = {
+    "claude": ClaudeProvider,
+    "command": CommandProvider,
     "devin": DevinProvider,
     "echo": EchoProvider,
     "grok": GrokProvider,

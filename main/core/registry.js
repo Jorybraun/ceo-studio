@@ -67,6 +67,8 @@ function normalizeAgent(spec) {
     name: spec.name || spec.id || id,
     provider: spec.provider || "echo",
     model: spec.model || null,
+    // CLI template for the generic "command" provider (use-anything seam).
+    command: spec.command ? String(spec.command).trim() : null,
     persona: spec.persona || null,
     capabilities: Array.isArray(spec.capabilities) ? spec.capabilities
       : String(spec.capabilities || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean),
@@ -137,6 +139,7 @@ function _save(p, data) {
 function _persistAgent(arr, agent) {
   const slim = { id: agent.id, name: agent.name, provider: agent.provider };
   if (agent.model) slim.model = agent.model;
+  if (agent.command) slim.command = agent.command;
   if (agent.persona) slim.persona = agent.persona;
   if (agent.capabilities && agent.capabilities.length) slim.capabilities = agent.capabilities;
   if (agent.description) slim.description = agent.description;
@@ -243,9 +246,16 @@ function listPersonas(projectPath) {
   return [...found.values()].sort((a, b) => a.id.toLowerCase().localeCompare(b.id.toLowerCase()));
 }
 
-/** Providers the cockpit can assign as an agent's brain. */
+/**
+ * Providers the cockpit can assign as an agent's brain. Mirrors the harness
+ * provider registry (runtime/harness/agents/providers/__init__.py). Kept as a
+ * plain JS list on purpose: macOS GUI apps don't inherit the shell PATH, so we
+ * don't shell out to python just to enumerate providers. `command` is the
+ * generic "use anything" provider — any CLI via an agent's `command` template.
+ */
+const PROVIDERS = ["echo", "grok", "devin", "claude", "command"];
 function listProviders() {
-  return ["echo", "grok", "devin"];
+  return [...PROVIDERS];
 }
 
 module.exports = {

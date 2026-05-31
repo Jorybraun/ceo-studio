@@ -220,12 +220,27 @@ AGENTS: dict[str, dict[str, Any]] = {
 # launch-agent / herder / domain-room, without hand-editing this file.
 # ---------------------------------------------------------------------------
 
-# provider -> (launch_mode, command run in the tmux main window)
+# provider -> (launch_mode, command run in the tmux main window). New CLI-backed
+# providers slot in here by name; the generic "command" provider takes its
+# command from the agent's own `command` field (see below).
 _PROVIDER_LAUNCH = {
     "grok": ("external", "grok"),
     "devin": ("external", "devin"),
+    "claude": ("external", "claude"),
     "echo": ("watcher_only", ""),
 }
+
+
+def _launch_for(provider: str, spec: dict) -> tuple[str, str]:
+    """Resolve (launch_mode, tmux command) for an agent's provider.
+
+    The generic "command" provider runs the agent's declared `command`
+    template; known CLI providers use the static map; anything else is tried as
+    an external command of its own name so a new backend works without editing
+    this file."""
+    if provider == "command":
+        return "external", str(spec.get("command") or "").strip()
+    return _PROVIDER_LAUNCH.get(provider, ("external", provider))
 
 
 def _declarative_agents() -> dict[str, dict[str, Any]]:
@@ -245,7 +260,7 @@ def _declarative_agents() -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for aid, spec in (cfg.get("agents") or {}).items():
         provider = str(spec.get("provider") or "echo")
-        mode, command = _PROVIDER_LAUNCH.get(provider, ("external", ""))
+        mode, command = _launch_for(provider, spec)
         room = str(spec.get("room") or "discovery")
         out[aid] = {
             "id": aid,
