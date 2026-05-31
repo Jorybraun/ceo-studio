@@ -16,3 +16,13 @@ renderer/agui/client.bundle.js
 
 # Local Hermes runtime state / agent task briefs (never commit)
 .hermes/
+
+# Python virtualenvs (e.g. harness a2a-sdk venv)
+.venv/
+**/__pycache__/
+
+# Harness room data (durable chat logs / per-room state)
+runtime/harness/brain/rooms/
+
+# Harness runtime session / guardrail ledger state
+runtime/harness/agent-tmux/

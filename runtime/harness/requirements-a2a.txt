@@ -1,0 +1,10 @@
+# A2A meeting/serve dependencies for bin/agent (serve, meeting).
+# Install into the harness venv:
+#   python3 -m venv runtime/harness/.venv
+#   runtime/harness/.venv/bin/pip install -r runtime/harness/requirements-a2a.txt
+#
+# Pinned 2026-05-31 (verified working on Python 3.14). a2a-sdk is the official
+# Agent2Agent protocol SDK (google-a2a); the rest are its HTTP server/client deps.
+a2a-sdk[http-server]==1.1.0
+uvicorn==0.48.0
+httpx==0.28.1

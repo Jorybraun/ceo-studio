@@ -251,6 +251,38 @@ now self-manages it:
 | `list-personas`   | See everything available in your `personas/` folder |
 | `list-teams`      | See defined teams (used with `--team` / `--stage` delegation) |
 
+#### A2A Agents & Meetings (`bin/agent`)
+
+`bin/agent` is the generic, provider-backed adapter. Beyond `dispatch` / `tell` /
+`sessions` / `providers`, it speaks the real **Agent2Agent (A2A) protocol** so any
+CLI agent can be wrapped and orchestrated uniformly:
+
+| Subcommand        | Purpose |
+|-------------------|---------|
+| `serve`           | Run a real A2A HTTP server that wraps ONE agent (any provider) with a discoverable Agent Card. The agent's "brain" is just its provider CLI behind the standard protocol. |
+| `meeting`         | Stand up invited members as A2A servers and run an **agenda-driven, relevance-gated** meeting. Members contribute or reply `PASS`; the facilitator synthesizes requirements into the room + `requirements.md`. |
+
+```bash
+# Serve one agent as an A2A endpoint (foreground)
+./bin/agent serve --agent architect --provider devin --persona architect --room discovery
+
+# Run a requirements meeting (free dry run with echo; real brains with devin/grok)
+./bin/agent meeting --room discovery \
+  --members "ba:echo:ba,arch:echo:architect,pm:echo:pm" \
+  --agenda "Define requirements for X" \
+  --criteria "What a good outcome looks like"
+```
+
+Notes:
+- Every A2A exchange is still mirrored into the human-visible **domain room** (the
+  `chat.log` bus) via the existing `agent_adapter`, and paid providers stay behind
+  the cost guardrail (`CEO_ALLOW_PAID=1` to allow non-interactive paid turns).
+- Personas resolve per-project via `agents/personas.py` (see `$CEO_PERSONAS_DIR`,
+  `<workspace>/personas`, then the shipped `personas/`).
+- **Dependency:** `serve`/`meeting` need `a2a-sdk` in `runtime/harness/.venv`
+  (`python3 -m venv .venv && .venv/bin/pip install 'a2a-sdk[http-server]' uvicorn httpx`).
+  `bin/agent` auto-re-execs into that venv when needed.
+
 ### Tool Discipline
 
 Keep the surface small. Prefer extending `harem` or `herder-chat` over creating new standalone scripts.
