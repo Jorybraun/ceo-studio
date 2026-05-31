@@ -1212,8 +1212,10 @@ function setAgentSurfaceTab(tab) {
   const on = (b) => { b.classList.add("bg-neutral-700", "text-neutral-100"); b.classList.remove("text-neutral-400"); };
   const off = (b) => { b.classList.remove("bg-neutral-700", "text-neutral-100"); b.classList.add("text-neutral-400"); };
   if (tt && tl) { if (tab === "terminal") { on(tt); off(tl); } else { on(tl); off(tt); } }
+  // The input posts to the agent's room, so keep it available on both tabs
+  // (it pairs naturally with the Logs/room transcript view).
   const inputRow = document.getElementById("as-input-row");
-  if (inputRow) inputRow.classList.toggle("hidden", tab !== "terminal");
+  if (inputRow) inputRow.classList.remove("hidden");
   pollAgentSurface();
   if (agentTermTimer) clearInterval(agentTermTimer);
   agentTermTimer = setInterval(pollAgentSurface, tab === "terminal" ? 1500 : 3000);
@@ -1235,12 +1237,16 @@ async function pollAgentSurface() {
       if (dot) dot.className = "w-2 h-2 rounded-full bg-neutral-600";
     }
   } else {
-    let r = {};
-    try { r = await window.ceo.meetingRoom(selectedAgentRoom); } catch { r = {}; }
-    const feed = (r && r.feed) || [];
-    out.textContent = feed.length
-      ? feed.map((e) => `[${e.speaker}] ${e.body}`).join("\n\n")
-      : `No activity in room "${selectedAgentRoom}" yet.`;
+    if (!selectedAgentRoom) {
+      out.textContent = "Send a message below to talk to this agent — it posts into the agent's A2A room and the transcript appears here.\n\nNote: agents on the \"echo\" brain only show presence; convene a meeting to get a real response.";
+    } else {
+      let r = {};
+      try { r = await window.ceo.meetingRoom(selectedAgentRoom); } catch { r = {}; }
+      const feed = (r && r.feed) || [];
+      out.textContent = feed.length
+        ? feed.map((e) => `[${e.speaker}] ${e.body}`).join("\n\n")
+        : `No activity in room "${selectedAgentRoom}" yet.`;
+    }
   }
   out.scrollTop = out.scrollHeight;
 }
@@ -1272,8 +1278,12 @@ async function sendAgentKeys() {
   const text = input.value;
   if (!text.trim()) return;
   input.value = "";
-  await window.ceo.registryTerminalSend(selectedAgentId, text);
-  setTimeout(pollAgentSurface, 300);
+  // Talk to the agent by posting into its A2A room (the real channel), not by
+  // typing into a watcher pane. Then show the room transcript in Logs.
+  const r = await window.ceo.registryMessage(selectedAgentId, text, "CEO");
+  if (r && r.room) selectedAgentRoom = r.room;
+  setAgentSurfaceTab("logs");
+  setTimeout(pollAgentSurface, 400);
 }
 
 // Agent surface buttons live in panel2 (outside the left panelContent that the rest of

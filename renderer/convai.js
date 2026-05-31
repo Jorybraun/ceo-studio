@@ -313,11 +313,14 @@ const clientTools = {
     const reg = await window.ceo.registryList();
     const a = ((reg && reg.agents) || []).find((x) => x.id === agent || x.name === agent);
     if (!a) return `No agent "${agent}" in the registry. Call list_agents to see who's available.`;
-    if (!a.tmux_session) return `${a.name || a.id} is not mounted, so it has no live session to receive messages. Mount it from the Team panel first.`;
-    const r = await window.ceo.registryTerminalSend(a.id, message);
-    ui().appendStream?.("sys", `→ ${a.name || a.id}: ${message.slice(0, 80)}`);
-    if (!r || !r.ok) return `Could not deliver to ${a.name || a.id}: ${r ? r.reason : "unknown"}`;
-    return `Delivered to ${a.name || a.id}'s live session. Watch its terminal/room for the response.`;
+    const r = await window.ceo.registryMessage(a.id, message, "CEO");
+    if (!r || !r.ok) return `Could not post to ${a.name || a.id}'s room: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `→ ${a.name || a.id} (room ${r.room}): ${message.slice(0, 70)}`);
+    const brainless = !a.provider || a.provider === "echo";
+    if (brainless) {
+      return `Posted to ${a.name || a.id}'s room "${r.room}" as CEO. Heads up: ${a.name || a.id} runs the "echo" provider (no real brain), so it won't reply on its own — convene a meeting with start_meeting to get a substantive response.`;
+    }
+    return `Posted to ${a.name || a.id}'s room "${r.room}" as CEO. ${a.tmux_session ? "It is live and will pick it up." : "Mount it (mount_agent) so it can see and act on the message."}`;
   },
   async start_meeting({ room, agenda, criteria, members, team } = {}) {
     if (!agenda) return "An agenda is required to convene the team.";
@@ -605,6 +608,7 @@ const clientTools = {
     owner,
     persona,
     reference,
+    goalId,
   } = {}) {
     const slug = await currentBoardSlug(board);
     const activeDomain = domain || ui().getContext?.().domain || "All";
@@ -621,6 +625,7 @@ const clientTools = {
       owner,
       persona,
       reference,
+      goalId,
       requestedBy: "voice-agent",
     });
     if (!r || !r.ok) {
@@ -644,6 +649,7 @@ const clientTools = {
     acceptanceCriteria,
     owner,
     persona,
+    goalId,
   } = {}) {
     const slug = await currentBoardSlug(board);
     const activeDomain = domain || ui().getContext?.().domain || "All";
@@ -660,6 +666,7 @@ const clientTools = {
       acceptanceCriteria,
       owner,
       persona,
+      goalId,
       requestedBy: "voice-agent",
     });
     if (!r || !r.ok) {
@@ -691,6 +698,7 @@ const clientTools = {
     owner,
     persona,
     status,
+    goalId,
   } = {}) {
     if (!parentId || !title) return "Parent id and title are required.";
     const slug = await currentBoardSlug(board);
@@ -707,12 +715,67 @@ const clientTools = {
       owner,
       persona,
       status,
+      goalId,
       requestedBy: "voice-agent",
     });
     if (!r || !r.ok) return `Could not create child task: ${r ? r.reason : "unknown"}`;
     ui().showPanel?.(title, r.body);
     ui().appendStream?.("sys", `Created linked child task${r.task && r.task.taskId ? ` ${r.task.taskId}` : ""} for ${parentId}`);
     return `Created child task "${title}" linked to ${parentKind} ${parentId}${r.task && r.task.taskId ? ` as ${r.task.taskId}` : ""}.`;
+  },
+  async list_goals({ layer, status = "active", domain } = {}) {
+    const r = await window.ceo.listGoals({
+      layer,
+      status,
+      domain: domain || ui().getContext?.().domain,
+    });
+    if (!r || !r.ok) return `Could not list goals: ${r ? r.reason : "unknown"}`;
+    const goals = r.goals || [];
+    const lines = goals.map((g) => `- ${g.id} [${g.layer}/${g.status}] ${g.title}${g.domain ? ` (${g.domain})` : ""}`).join("\n") || "- none";
+    return `Goals:\n${lines}`;
+  },
+  async set_goal({ id, layer, title, outcome, domain, status, horizonStart, horizonEnd, roadmapRef, parentGoalId, successCriteria } = {}) {
+    const r = await window.ceo.upsertGoal({
+      id,
+      layer,
+      title,
+      outcome,
+      domain: domain || ui().getContext?.().domain || "All",
+      status,
+      horizonStart,
+      horizonEnd,
+      roadmapRef,
+      parentGoalId,
+      successCriteria,
+    });
+    if (!r || !r.ok) return `Could not save goal: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `Saved ${r.goal.layer} goal: ${r.goal.title}`);
+    return `Saved goal ${r.goal.id}: [${r.goal.layer}] ${r.goal.title}.`;
+  },
+  async link_work_to_goal({ goalId, workKind = "task", workId, board, title, relationship = "supports" } = {}) {
+    if (!goalId || !workId) return "Goal id and work id are required.";
+    const r = await window.ceo.linkWorkToGoal({ goalId, workKind, workId, board, title, relationship });
+    if (!r || !r.ok) return `Could not link work to goal: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `Linked ${workKind} ${workId} to goal ${goalId}`);
+    return `Linked ${workKind} ${workId} to goal ${goalId}.`;
+  },
+  async review_goals({ board, layer, domain, dryRun = false } = {}) {
+    const slug = board || await currentBoardSlug();
+    const r = await window.ceo.reviewGoals({
+      board: slug,
+      layer,
+      domain: domain || ui().getContext?.().domain,
+      dryRun: !!dryRun,
+    });
+    if (!r || !r.ok) return `Could not review goals: ${r ? r.reason : "unknown"}`;
+    if (r.review && r.review.markdown) ui().showPanel?.(`Goal review: ${r.review.layer}`, r.review.markdown);
+    ui().appendStream?.("sys", `Goal review ${r.review && r.review.id ? r.review.id : ""}${r.artifactId ? ` saved as ${r.artifactId}` : ""}`);
+    return [
+      `Reviewed ${r.review.goalReviews.length} goal(s) for ${r.review.layer}.`,
+      `Orphaned blocked: ${r.review.orphanedBlocked.length}.`,
+      `Unaligned active: ${r.review.unalignedActive.length}.`,
+      r.artifactId ? `Saved artifact: ${r.artifactId}.` : "Dry run only.",
+    ].join(" ");
   },
   async record_brief_asset({ parentKind = "brief", parentId, assetKind, assetId, title, path, summary } = {}) {
     if (!parentId) return "Parent id is required.";
@@ -758,6 +821,74 @@ const clientTools = {
       `Blocked analysis for ${r.board}: ${r.blocked} blocked, ${r.analyzed} analyzed, ${r.skipped} skipped${r.dryRun ? " (dry run)" : ""}.`,
       lines.join("\n"),
     ].filter(Boolean).join("\n");
+  },
+  async autonomy_status() {
+    const r = await window.ceo.autonomyStatus();
+    if (!r || !r.ok) return `Could not read autonomy status: ${r ? r.reason : "unknown"}`;
+    const p = r.policy || {};
+    return [
+      `Autonomy is ${r.running ? "running" : "stopped"}; policy is ${p.enabled ? "enabled" : "disabled"} in ${p.mode || "propose"} mode.`,
+      `Interval: ${p.intervalMinutes} min; cooldown: ${p.cooldownMinutes} min.`,
+      `Reviews: ${(p.reviewLayers || []).join(", ") || "none"}; blocked analysis: ${p.analyzeBlocked ? "on" : "off"}.`,
+      `Automatic work creation: ${p.allowCreateWork ? "policy flag enabled, still requires planner/CEO action" : "disabled"}.`,
+      r.state && r.state.lastRunAt ? `Last run: ${r.state.lastRunAt}.` : "No run recorded yet.",
+    ].join("\n");
+  },
+  async configure_autonomy({
+    enabled,
+    intervalMinutes,
+    cooldownMinutes,
+    reviewLayers,
+    writeReviews,
+    analyzeBlocked,
+    allowBoardComments,
+    allowCreateWork,
+    maxBlockedPerRun,
+  } = {}) {
+    const patch = {};
+    for (const [k, v] of Object.entries({ enabled, intervalMinutes, cooldownMinutes, writeReviews, analyzeBlocked, allowBoardComments, allowCreateWork, maxBlockedPerRun })) {
+      if (v !== undefined) patch[k] = v;
+    }
+    if (reviewLayers !== undefined) patch.reviewLayers = Array.isArray(reviewLayers)
+      ? reviewLayers
+      : String(reviewLayers || "").split(",").map((x) => x.trim()).filter(Boolean);
+    const r = await window.ceo.autonomyConfigure(patch);
+    if (!r || !r.ok) return `Could not configure autonomy: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `Autonomy policy updated (${r.policy.mode})`);
+    return `Autonomy policy updated. Enabled: ${r.policy.enabled}. Mode: ${r.policy.mode}. Running: ${r.running ? "yes" : "no"}.`;
+  },
+  async run_autonomy_cycle({ board, domain, force = true } = {}) {
+    const slug = board || await currentBoardSlug();
+    const r = await window.ceo.autonomyRunCycle({
+      board: slug,
+      domain: domain || ui().getContext?.().domain,
+      force: !!force,
+    });
+    if (!r || !r.ok) return `Could not run autonomy cycle: ${r ? r.reason : "unknown"}`;
+    if (r.skipped) return `Autonomy cycle skipped: ${r.reason}.`;
+    ui().appendStream?.("sys", `Autonomy cycle: ${r.proposedActions.length} proposal(s)`);
+    return [
+      `Autonomy cycle complete in ${r.mode} mode.`,
+      `Reviews: ${(r.reviews || []).filter((x) => x && x.ok).length}.`,
+      `Blocked: ${r.blocked && r.blocked.ok ? `${r.blocked.analyzed} analyzed, ${r.blocked.skipped} skipped` : "not run"}.`,
+      `Proposed actions: ${(r.proposedActions || []).length}.`,
+      r.creationPolicy,
+    ].join(" ");
+  },
+  async start_autonomy({ intervalMinutes, board } = {}) {
+    const r = await window.ceo.autonomyStart({
+      board,
+      policy: intervalMinutes ? { intervalMinutes } : {},
+    });
+    if (!r || !r.ok) return `Could not start autonomy: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `Autonomy started (${r.policy.intervalMinutes} min interval)`);
+    return `Started autonomy cycle. Interval: ${r.policy.intervalMinutes} minutes. Mode: ${r.policy.mode}.`;
+  },
+  async stop_autonomy() {
+    const r = await window.ceo.autonomyStop();
+    if (!r || !r.ok) return `Could not stop autonomy: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", "Autonomy stopped");
+    return "Stopped scheduled autonomy.";
   },
   async list_personas() {
     const r = await window.ceo.listPersonas();

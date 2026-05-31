@@ -24,7 +24,15 @@ const domains = require("./core/domains");
 const user = require("./core/user");
 const soul = require("./core/soul");
 const hermes = require("./core/hermes");
+const domainBoard = require("./core/domain-board");
+const autonomy = require("./core/autonomy");
+const autonomyLoop = require("./core/autonomy-loop");
+const provenance = require("./core/provenance");
+const goals = require("./core/goals");
+const goalReview = require("./core/goal-review");
 const meetings = require("./core/meetings");
+const registry = require("./core/registry");
+const mount = require("./core/mount");
 const aguiServer = require("./core/agui-server");
 const jobs = require("./core/jobs");
 const ticketPlanner = require("./core/ticket-planner");
@@ -43,6 +51,23 @@ const session = {
   providerNote: null,
   agent: null,
 };
+
+let autonomyTimer = null;
+
+function stopAutonomyTimer() {
+  if (autonomyTimer) clearInterval(autonomyTimer);
+  autonomyTimer = null;
+}
+
+function autonomyStatus() {
+  if (!session.project) return { ok: false, reason: "open a project first", running: false };
+  return {
+    ok: true,
+    running: !!autonomyTimer,
+    policy: autonomyLoop.getPolicy(session.project.slug),
+    state: autonomyLoop.getState(session.project.slug),
+  };
+}
 
 // --- GBrain HTTP server ---
 let gbrainProcess = null;
@@ -997,8 +1022,173 @@ ipcMain.handle("hermes:dispatch", (_e, dispatchInfo) => hermes.dispatch(dispatch
 ipcMain.handle("hermes:task_log", (_e, logInfo) => hermes.taskLog(logInfo));
 ipcMain.handle("hermes:assignees", (_e, board) => hermes.assignees({ board }));
 ipcMain.handle("hermes:comment_task", (_e, commentInfo) => hermes.addComment(commentInfo));
+function boardForDomain(explicitBoard, domainName) {
+  if (explicitBoard) return explicitBoard;
+  if (!session.project || !domainName || domainName === "All") return null;
+  const domain = domains.getDomain(session.project.slug, domainName);
+  return domain && domain.kanbanBoard ? domain.kanbanBoard : null;
+}
+ipcMain.handle("domain_board:create_brief", (_e, brief = {}) =>
+  domainBoard.createBrief({
+    ...brief,
+    domain: brief.domain || session.domain || "All",
+    board: boardForDomain(brief.board, brief.domain || session.domain || "All"),
+    source: brief.source || "CEO Studio voice/planner intake",
+  }, { projectSlug: session.project && session.project.slug }));
+ipcMain.handle("domain_board:create_bug", (_e, bug = {}) =>
+  domainBoard.createBug({
+    ...bug,
+    domain: bug.domain || session.domain || "All",
+    board: boardForDomain(bug.board, bug.domain || session.domain || "All"),
+    source: bug.source || "CEO Studio voice/planner intake",
+  }, { projectSlug: session.project && session.project.slug }));
+ipcMain.handle("domain_board:create_child_task", (_e, task = {}) =>
+  domainBoard.createChildTask({
+    ...task,
+    board: boardForDomain(task.board, task.domain || session.domain || "All"),
+    requestedBy: task.requestedBy || "voice/planner",
+  }, { projectSlug: session.project && session.project.slug }));
+ipcMain.handle("domain_board:record_asset", (_e, asset = {}) =>
+  domainBoard.recordAsset({
+    ...asset,
+    requestedBy: asset.requestedBy || "voice/planner",
+  }, { projectSlug: session.project && session.project.slug }));
+ipcMain.handle("domain_board:decompose_brief", (_e, info = {}) =>
+  domainBoard.decomposeBrief(info, { projectSlug: session.project && session.project.slug }));
+ipcMain.handle("provenance:graph", (_e, parentId) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return provenance.graph(session.project.slug, parentId);
+});
+ipcMain.handle("goals:list", (_e, filters = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return goals.summary(session.project.slug, filters || {});
+});
+ipcMain.handle("goals:upsert", (_e, goal = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return goals.upsert(session.project.slug, goal || {});
+});
+ipcMain.handle("goals:link_work", (_e, link = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return goals.linkWork(session.project.slug, link || {});
+});
+ipcMain.handle("goals:review", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  const domainName = info.domain || session.domain || "All";
+  return goalReview.run({
+    projectSlug: session.project.slug,
+    board: boardForDomain(info.board, domainName) || info.board,
+    layer: info.layer,
+    domain: domainName,
+    dryRun: !!info.dryRun,
+  });
+});
+ipcMain.handle("autonomy:analyze_blocked", (_e, info = {}) => {
+  const domainName = info.domain || session.domain || "All";
+  return autonomy.analyzeBlocked({
+    board: boardForDomain(info.board, domainName) || info.board,
+    projectSlug: session.project && session.project.slug,
+    dryRun: !!info.dryRun,
+    limit: info.limit,
+  });
+});
+ipcMain.handle("autonomy:status", () => autonomyStatus());
+ipcMain.handle("autonomy:configure", (_e, patch = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  const result = autonomyLoop.setPolicy(session.project.slug, patch || {});
+  if (autonomyTimer) {
+    stopAutonomyTimer();
+    const ms = Math.max(1, result.policy.intervalMinutes) * 60 * 1000;
+    autonomyTimer = setInterval(() => {
+      const domainName = session.domain || "All";
+      autonomyLoop.runCycle({
+        projectSlug: session.project.slug,
+        board: boardForDomain(null, domainName) || hermes.currentBoard(),
+        domain: domainName,
+      });
+    }, ms);
+    if (autonomyTimer.unref) autonomyTimer.unref();
+  }
+  return { ...result, running: !!autonomyTimer };
+});
+ipcMain.handle("autonomy:run_cycle", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  const domainName = info.domain || session.domain || "All";
+  return autonomyLoop.runCycle({
+    projectSlug: session.project.slug,
+    board: boardForDomain(info.board, domainName) || info.board || hermes.currentBoard(),
+    domain: domainName,
+    force: !!info.force,
+  });
+});
+ipcMain.handle("autonomy:start", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  const configured = autonomyLoop.setPolicy(session.project.slug, { ...(info.policy || {}), enabled: true });
+  stopAutonomyTimer();
+  const ms = Math.max(1, configured.policy.intervalMinutes) * 60 * 1000;
+  autonomyTimer = setInterval(() => {
+    const domainName = session.domain || "All";
+    autonomyLoop.runCycle({
+      projectSlug: session.project.slug,
+      board: boardForDomain(info.board, domainName) || info.board || hermes.currentBoard(),
+      domain: domainName,
+    });
+  }, ms);
+  if (autonomyTimer.unref) autonomyTimer.unref();
+  return { ok: true, running: true, policy: configured.policy };
+});
+ipcMain.handle("autonomy:stop", () => {
+  stopAutonomyTimer();
+  if (session.project) autonomyLoop.setPolicy(session.project.slug, { enabled: false });
+  return { ok: true, running: false };
+});
 // AGUI: the local AG-UI server URL the renderer's HttpAgent connects to.
 ipcMain.handle("agui:url", () => aguiServer.url());
+
+// --- Agent registry (single source of truth: agents.json, read/written in Node) ---
+const _projPath = () => (session.project && session.project.path) || null;
+ipcMain.handle("registry:list", () => registry.read(_projPath()));
+ipcMain.handle("registry:personas", () => ({ ok: true, personas: registry.listPersonas(_projPath()) }));
+ipcMain.handle("registry:providers", () => ({ ok: true, providers: registry.listProviders() }));
+ipcMain.handle("registry:create_agent", (_e, spec = {}) => registry.createAgent(_projPath(), spec));
+ipcMain.handle("registry:update_agent", (_e, { id, updates } = {}) => registry.updateAgent(_projPath(), id, updates || {}));
+ipcMain.handle("registry:delete_agent", (_e, id) => registry.deleteAgent(_projPath(), id));
+ipcMain.handle("registry:save_team", (_e, { name, members } = {}) => registry.saveTeam(_projPath(), name, members || []));
+ipcMain.handle("registry:delete_team", (_e, name) => registry.deleteTeam(_projPath(), name));
+
+// Mount/unmount an agent into a live tmux session (provider CLI + A2A watcher).
+ipcMain.handle("registry:mount", (_e, id) => {
+  const r = mount.mount(_projPath(), id);
+  if (r && r.ok) registry.updateAgent(_projPath(), id, { tmux_session: r.session, tmux_window: r.window });
+  return r;
+});
+ipcMain.handle("registry:unmount", (_e, id) => {
+  const r = mount.unmount(_projPath(), id);
+  if (r && r.ok) registry.updateAgent(_projPath(), id, { tmux_session: null });
+  return r;
+});
+ipcMain.handle("registry:alive", (_e, id) => {
+  const a = registry.read(_projPath()).agents.find((x) => x.id === id);
+  const session = (a && a.tmux_session) || `pipe-${id}`;
+  return { ok: true, session, alive: mount.alive(session) };
+});
+ipcMain.handle("registry:terminal", (_e, id) => {
+  const a = registry.read(_projPath()).agents.find((x) => x.id === id);
+  const session = (a && a.tmux_session) || `pipe-${id}`;
+  return mount.snapshot(session, (a && a.tmux_window) || "main");
+});
+ipcMain.handle("registry:terminal_send", (_e, { id, text, window } = {}) => {
+  const a = registry.read(_projPath()).agents.find((x) => x.id === id);
+  const session = (a && a.tmux_session) || `pipe-${id}`;
+  return mount.send(session, window || (a && a.tmux_window) || "main", text);
+});
+// Talk to an agent the RIGHT way: post into its A2A room as a speaker. Its
+// watcher sees it; a brained agent (or a meeting) produces the reply. Reaches
+// the agent regardless of which tmux window it runs in.
+ipcMain.handle("registry:message", (_e, { id, message, speaker } = {}) => {
+  const plan = mount.lookup(_projPath(), id);
+  const room = (plan && (plan.canonical_room || plan.default_room)) || session.domain || "discovery";
+  return mount.post(_projPath(), room, speaker || "CEO", message);
+});
 
 // --- Meetings (A2A meeting engine in the harness) ---
 ipcMain.handle("meetings:options", () => meetings.options(session.project && session.project.path));
