@@ -16,6 +16,7 @@
 const path = require("path");
 const fs = require("fs");
 const { execFileSync, spawn } = require("child_process");
+const { resolvePython, envWithPython } = require("./pybin");
 
 function harnessRoot(projectPath) {
   return path.join(projectPath || process.cwd(), "runtime", "harness");
@@ -33,11 +34,12 @@ function roomDir(projectPath, room) {
 /** Run a model-free harness python helper module and parse its JSON stdout. */
 function _pyJson(projectPath, moduleName) {
   try {
-    const out = execFileSync("python3", ["-m", moduleName], {
+    const out = execFileSync(resolvePython(), ["-m", moduleName], {
       cwd: harnessRoot(projectPath),
       encoding: "utf-8",
       timeout: 8000,
       maxBuffer: 4 * 1024 * 1024,
+      env: envWithPython(),
     });
     return JSON.parse(out || "null");
   } catch (e) {
@@ -81,7 +83,7 @@ function start({ projectPath, room, agenda, criteria, members, team, orchestrato
   else args.push("--members", String(members));
   if (orchestrator) args.push("--orchestrator", String(orchestrator));
 
-  const env = { ...process.env };
+  const env = envWithPython();
   if (allowPaid) env.CEO_ALLOW_PAID = "1";
 
   // Fresh room each start: clear any stale transcript/requirements for this name.

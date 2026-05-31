@@ -1,15 +1,82 @@
 {
   "_comment": "Declarative agent registry. Add an agent = add an entry here (config, not code). 'provider' is any registered harness provider (echo|devin|grok). 'persona' resolves via agents/personas.py. Projects can override by placing their own agents.json in the workspace or via $CEO_AGENTS_CONFIG. Defaults use the free 'echo' provider so meetings run at zero cost; switch to devin/grok for real brains.",
   "agents": [
-    {"id": "ba",          "provider": "echo", "persona": "ba",                "capabilities": ["requirements", "user-journeys", "decomposition"]},
-    {"id": "architect",   "provider": "echo", "persona": "architect",         "capabilities": ["adr", "data-model", "interfaces"]},
-    {"id": "pm",          "provider": "echo", "persona": "pm",                "capabilities": ["roadmap", "epics", "prioritization"]},
-    {"id": "planner",     "provider": "echo", "persona": "planner",           "capabilities": ["task-planning", "specs"]},
-    {"id": "researcher",  "provider": "echo", "persona": "DEEP_RESEARCHER",   "capabilities": ["research", "evidence", "uncertainty"]},
-    {"id": "designer",    "provider": "echo", "persona": "SENIOR_DESIGNER_UX","capabilities": ["ux", "mocks"]},
-    {"id": "facilitator", "provider": "echo", "persona": "swarm-facilitator", "capabilities": ["coordination", "synthesis"]}
+    {
+      "id": "ba",
+      "name": "ba",
+      "provider": "echo",
+      "persona": "ba",
+      "capabilities": [
+        "requirements",
+        "user-journeys",
+        "decomposition"
+      ]
+    },
+    {
+      "id": "architect",
+      "provider": "echo",
+      "persona": "architect",
+      "capabilities": [
+        "adr",
+        "data-model",
+        "interfaces"
+      ]
+    },
+    {
+      "id": "pm",
+      "provider": "echo",
+      "persona": "pm",
+      "capabilities": [
+        "roadmap",
+        "epics",
+        "prioritization"
+      ]
+    },
+    {
+      "id": "planner",
+      "provider": "echo",
+      "persona": "planner",
+      "capabilities": [
+        "task-planning",
+        "specs"
+      ]
+    },
+    {
+      "id": "researcher",
+      "provider": "echo",
+      "persona": "DEEP_RESEARCHER",
+      "capabilities": [
+        "research",
+        "evidence",
+        "uncertainty"
+      ]
+    },
+    {
+      "id": "designer",
+      "provider": "echo",
+      "persona": "SENIOR_DESIGNER_UX",
+      "capabilities": [
+        "ux",
+        "mocks"
+      ]
+    },
+    {
+      "id": "facilitator",
+      "provider": "echo",
+      "persona": "swarm-facilitator",
+      "capabilities": [
+        "coordination",
+        "synthesis"
+      ]
+    }
   ],
   "teams": {
-    "discovery-planning": ["ba", "architect", "pm", "researcher", "designer"]
+    "discovery-planning": [
+      "ba",
+      "architect",
+      "pm",
+      "researcher",
+      "designer"
+    ]
   }
 }

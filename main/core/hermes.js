@@ -469,10 +469,18 @@ function addTask({ board, status, title, body, assignee, persona }) {
     const result = _run(args, 30000);
     if (!result.ok) return { ok: false, reason: result.reason };
 
-    return { ok: true, message: "Task created successfully" };
+    return { ok: true, message: "Task created successfully", out: result.out || "", taskId: _extractTaskId(result.out || "") };
   } catch (e) {
     return { ok: false, reason: `Failed to create task: ${e.message}` };
   }
+}
+
+function _extractTaskId(output) {
+  const s = String(output || "");
+  const direct = s.match(/\b(t_[a-f0-9]{6,}|[A-Z]+-\d+)\b/i);
+  if (direct) return direct[1];
+  const labeled = s.match(/(?:task|id)\s*[:#]?\s*([A-Za-z0-9_-]{4,})/i);
+  return labeled ? labeled[1] : null;
 }
 
 function _kanban(board, args, timeout = 30000) {

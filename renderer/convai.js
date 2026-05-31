@@ -890,6 +890,46 @@ const clientTools = {
     ui().appendStream?.("sys", "Autonomy stopped");
     return "Stopped scheduled autonomy.";
   },
+  async report_system_bug({
+    board,
+    domain,
+    title,
+    source,
+    observedBehavior,
+    expectedBehavior,
+    reproductionSteps,
+    severity,
+    impact,
+    evidence,
+    evidencePath,
+    output,
+    goalId,
+    createRepairTask = true,
+  } = {}) {
+    if (!source || !observedBehavior) return "Source and observed behavior are required.";
+    const r = await window.ceo.reportSystemBug({
+      board,
+      domain: domain || ui().getContext?.().domain || "Engineering",
+      title,
+      source,
+      observedBehavior,
+      expectedBehavior,
+      reproductionSteps,
+      severity,
+      impact,
+      evidence,
+      evidencePath,
+      output,
+      goalId,
+      createRepairTask,
+      requestedBy: "voice-agent",
+    });
+    if (!r || !r.ok) return `Could not report system bug: ${r ? r.reason : "unknown"}`;
+    const bugId = r.bug && r.bug.task && r.bug.task.taskId;
+    const repairId = r.repairTask && r.repairTask.task && r.repairTask.task.taskId;
+    ui().appendStream?.("sys", `Reported system bug${bugId ? ` ${bugId}` : ""}${repairId ? ` with repair ${repairId}` : ""}`);
+    return `Reported system bug${bugId ? ` ${bugId}` : ""}${repairId ? ` and linked repair task ${repairId}` : ""}.`;
+  },
   async list_personas() {
     const r = await window.ceo.listPersonas();
     if (!r || !r.ok) return `Could not list personas: ${r ? r.reason : "unknown"}`;

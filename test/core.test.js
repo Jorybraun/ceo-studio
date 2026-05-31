@@ -22,6 +22,13 @@ const { createProvider, NullProvider } = require("../main/core/llm");
 const { DocumentAgent } = require("../main/core/agent");
 const jobs = require("../main/core/jobs");
 const ticketPlanner = require("../main/core/ticket-planner");
+const domainBoard = require("../main/core/domain-board");
+const autonomy = require("../main/core/autonomy");
+const provenance = require("../main/core/provenance");
+const goals = require("../main/core/goals");
+const goalReview = require("../main/core/goal-review");
+const autonomyLoop = require("../main/core/autonomy-loop");
+const selfRepair = require("../main/core/self-repair");
 
 let passed = 0;
 function ok(name, cond) {
@@ -83,6 +90,142 @@ const pack = ticketPlanner.prepareTicketPack({
 ok("ticket planner finds gaps for thin tickets", pack.gaps.length >= 3);
 ok("ticket planner emits AGUI panel", pack.panel && Array.isArray(pack.panel.components));
 ok("ticket planner emits Kanban comment draft", /planning pack/i.test(pack.comment));
+
+// --- domain board intake contracts ---
+const missingBrief = domainBoard.missingBriefFields({ title: "Draft", domain: "Engineering" });
+ok("domain brief validation rejects thin briefs", missingBrief.includes("goal") && missingBrief.includes("acceptanceCriteria"));
+const briefBody = domainBoard.briefBody({
+  board: "ceo-studio",
+  title: "Autonomous bug intake",
+  goal: "Capture defects from voice and route them to the domain board.",
+  domain: "Engineering",
+  currentRenderedState: "Voice can create generic tasks.",
+  problemMismatch: "Generic tasks do not enforce the canonical brief template.",
+  constraints: ["No API-key CEO provider", "Use Hermes Kanban"],
+  acceptanceCriteria: ["Briefs are template-shaped", "Planner can decompose the brief"],
+  nextAction: "Create the domain board intake tool.",
+  owner: "PM",
+  persona: "planner",
+});
+ok("domain brief body uses canonical sections", /### Current Rendered State/.test(briefBody) && /## Planning Contract/.test(briefBody));
+const missingBug = domainBoard.missingBugFields({ title: "Broken thing", domain: "Engineering" });
+ok("bug validation requires reproduction evidence", missingBug.includes("observedBehavior") && missingBug.includes("reproductionSteps"));
+const bugBody = domainBoard.bugBody({
+  board: "ceo-studio",
+  title: "Blocked cards are not escalated",
+  domain: "Engineering",
+  observedBehavior: "Cards sit in blocked without analysis.",
+  expectedBehavior: "Blocked cards produce an escalation note.",
+  reproductionSteps: ["Create a blocked card", "Observe no escalation record"],
+  severity: "high",
+});
+ok("bug body records triage contract", /# Bug/.test(bugBody) && /## Triage Contract/.test(bugBody));
+const childBody = domainBoard.childTaskBody({
+  parentId: "t_brief",
+  title: "Implement linked task creation",
+  acceptanceCriteria: ["Child task records parent provenance"],
+  verification: ["npm test"],
+});
+ok("child task body carries parent and verification", /Parent ID: t_brief/.test(childBody) && /npm test/.test(childBody));
+
+// --- provenance graph contract ---
+const parentEvent = provenance.recordWorkItem(added.slug, {
+  kind: "brief",
+  board: "ceo-studio",
+  taskId: "t_brief",
+  title: "Parent brief",
+  domain: "engineering",
+});
+const relEvent = provenance.linkChild(added.slug, {
+  parentId: "t_brief",
+  childId: "t_child",
+  title: "Child task",
+  board: "ceo-studio",
+});
+const assetEvent = provenance.recordAsset(added.slug, {
+  parentId: "t_brief",
+  assetId: "asset_1",
+  assetKind: "validation",
+  title: "Test output",
+  path: "artifacts/test-output.txt",
+});
+const graph = provenance.graph(added.slug, "t_brief");
+ok("provenance records work item event", parentEvent && parentEvent.child && parentEvent.child.kind === "brief");
+ok("provenance links child tasks to brief", relEvent && graph.children.some((c) => c.id === "t_child"));
+ok("provenance links assets to brief", assetEvent && graph.assets.some((a) => a.id === "asset_1"));
+
+// --- layered goal alignment contract ---
+const weeklyGoal = goals.upsert(added.slug, {
+  layer: "weekly",
+  title: "Make autonomous board movement visible",
+  outcome: "Blocked work and child tasks have visible provenance and escalation.",
+  domain: "engineering",
+  successCriteria: ["Briefs link to child work", "Blocked work produces escalation memory"],
+});
+ok("goals.upsert creates layered goal", weeklyGoal.ok && weeklyGoal.goal.layer === "weekly" && weeklyGoal.goal.id);
+const goalLink = goals.linkWork(added.slug, {
+  goalId: weeklyGoal.goal.id,
+  workKind: "brief",
+  workId: "t_brief",
+  board: "ceo-studio",
+  title: "Parent brief",
+});
+goals.linkWork(added.slug, {
+  goalId: weeklyGoal.goal.id,
+  workKind: "task",
+  workId: "t_blocked",
+  board: "ceo-studio",
+  title: "Blocked repair",
+});
+ok("goals.linkWork links work and provenance", goalLink.ok && provenance.graph(added.slug, weeklyGoal.goal.id).children.some((c) => c.id === "t_brief"));
+ok("goals.summary groups by layer", goals.summary(added.slug).byLayer.weekly.length >= 1);
+const review = goalReview.buildReview({
+  layer: "weekly",
+  domain: "engineering",
+  board: "ceo-studio",
+  goals: [goals.get(added.slug, weeklyGoal.goal.id)],
+  boardState: {
+    slug: "ceo-studio",
+    columns: {
+      blocked: [{ id: "t_blocked", title: "Blocked repair", status: "blocked" }],
+      triage: [{ id: "t_brief", title: "Parent brief", status: "triage" }],
+    },
+  },
+});
+ok("goal review summarizes board counts", review.boardCounts.blocked === 1 && review.boardCounts.triage === 1);
+ok("goal review proposes next actions", review.goalReviews[0].actions.length >= 1 && /Goal Review/.test(review.markdown));
+const writtenReview = goalReview.writeReview(added.slug, review);
+ok("goal review writes durable artifact", writtenReview.artifact && writtenReview.artifact.type === "dream_cycle" && fs.existsSync(writtenReview.file));
+const policyResult = autonomyLoop.setPolicy(added.slug, { enabled: true, intervalMinutes: 5, allowCreateWork: false, reviewLayers: ["daily"] });
+ok("autonomy policy persists conservative mode", policyResult.ok && policyResult.policy.mode === "propose" && autonomyLoop.getPolicy(added.slug).intervalMinutes === 5);
+ok("autonomy canRun allows enabled policy", autonomyLoop.canRun(added.slug).ok === true);
+const actionSummary = autonomyLoop.summarizeActions([{ ok: true, review }]);
+ok("autonomy summarizes proposed actions", actionSummary.some((a) => a.type === "analyze_blocked_work"));
+
+// --- self-repair intake contract ---
+const systemBug = selfRepair.buildSystemBug({
+  source: "npm test",
+  observedBehavior: "AGUI test failed to bind localhost.",
+  domain: "Engineering",
+});
+ok("self-repair builds valid bug input", domainBoard.missingBugFields(systemBug).length === 0 && systemBug.severity === "high");
+const repairTask = selfRepair.buildRepairTask({ bugId: "t_bug", bugTitle: "AGUI bind failure" });
+ok("self-repair builds linked repair task", repairTask.parentKind === "bug" && repairTask.parentId === "t_bug" && repairTask.relationship === "repairs");
+
+// --- blocked autonomy analysis contract ---
+const blockedComment = autonomy.buildBlockedAnalysis({
+  board: "ceo-studio",
+  task: {
+    id: "t_blocked",
+    title: "Fix failing build",
+    status: "blocked",
+    last_failure_error: "npm test fails in renderer checks",
+  },
+  detail: { comments: [{ author: "worker", body: "I am stuck on the failing check." }] },
+});
+ok("blocked analyzer emits escalation comment", blockedComment.includes("CEO Studio Blocker Analysis") && blockedComment.includes("Escalation target: specialist"));
+ok("blocked analyzer detects prior analysis", autonomy.hasRecentBlockerAnalysis({ comments: [{ author: "CEO Studio Autonomy", body: blockedComment }] }) === true);
+ok("blocked analyzer routes unclear briefs to planner", autonomy.escalationTarget({ title: "Brief is ambiguous and missing acceptance criteria" }) === "planner");
 
 // --- cost guardrail (the non-negotiable) ---
 const meter = new CostMeter(added.slug, { maxSessionUsd: 0.01, maxDayUsd: 1 });

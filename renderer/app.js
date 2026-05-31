@@ -312,7 +312,86 @@ function assigneeName(a) {
   return typeof a === "string" ? a : (a.profile || a.name || a.assignee || a.id || "");
 }
 
-function renderTaskHtml({ board, task, comments = [], assignees = [], log = "" }) {
+function safeIpc(call, fallback = null) {
+  try { return Promise.resolve(call()).catch(() => fallback); }
+  catch { return Promise.resolve(fallback); }
+}
+
+function taskGoalLinks(goalsRes, taskId) {
+  const goals = (goalsRes && goalsRes.goals) || [];
+  return goals.filter((goal) =>
+    (goal.links || []).some((link) => String(link.workId || "") === String(taskId || "")));
+}
+
+function renderTaskContextPanel({ task, provenance, goalsRes, autonomyRes }) {
+  const taskId = task && task.id;
+  const events = (provenance && provenance.events) || [];
+  const children = events.filter((event) => event.parent && String(event.parent.id || "") === String(taskId || "") && event.child).map((event) => event.child);
+  const parents = events.filter((event) => event.child && String(event.child.id || "") === String(taskId || "") && event.parent).map((event) => ({
+    ...event.parent,
+    relationship: event.metadata && event.metadata.relationship,
+  }));
+  const assets = events.filter((event) => event.parent && String(event.parent.id || "") === String(taskId || "") && event.asset).map((event) => event.asset);
+  const linkedGoals = taskGoalLinks(goalsRes, taskId);
+  const autonomyOk = autonomyRes && autonomyRes.ok;
+  const policy = (autonomyOk && autonomyRes.policy) || {};
+  const state = (autonomyOk && autonomyRes.state) || {};
+  const lastRun = state.lastRunAt ? new Date(state.lastRunAt).toLocaleString() : "never";
+  const goalsHtml = linkedGoals.length
+    ? linkedGoals.slice(0, 4).map((goal) => `<div class="rounded-lg border border-neutral-800 bg-neutral-950/50 p-2">
+        <div class="text-[10px] uppercase tracking-wider text-neutral-600">${esc(goal.layer || "goal")} · ${esc(goal.status || "active")}</div>
+        <div class="mt-1 text-sm leading-snug text-neutral-200">${esc(goal.title || goal.id)}</div>
+        ${goal.outcome ? `<div class="mt-1 line-clamp-2 text-xs leading-5 text-neutral-500">${esc(goal.outcome)}</div>` : ""}
+      </div>`).join("")
+    : `<div class="text-xs text-neutral-600">No goal link recorded for this task.</div>`;
+  const parentHtml = parents.length
+    ? parents.slice(0, 5).map((parent) => `<div class="flex items-start gap-2 text-xs">
+        <span class="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500/70"></span>
+        <span class="min-w-0"><span class="font-mono text-neutral-400">${esc(parent.id)}</span>${parent.title ? ` <span class="text-neutral-500">${esc(parent.title)}</span>` : ""}${parent.relationship ? ` <span class="text-neutral-700">${esc(parent.relationship)}</span>` : ""}</span>
+      </div>`).join("")
+    : `<div class="text-xs text-neutral-600">No parent brief recorded.</div>`;
+  const childHtml = children.length
+    ? children.slice(0, 5).map((child) => `<div class="flex items-start gap-2 text-xs">
+        <span class="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-500/70"></span>
+        <span class="min-w-0"><span class="font-mono text-neutral-400">${esc(child.id)}</span>${child.title ? ` <span class="text-neutral-500">${esc(child.title)}</span>` : ""}</span>
+      </div>`).join("")
+    : `<div class="text-xs text-neutral-600">No child work recorded.</div>`;
+  const assetHtml = assets.length
+    ? assets.slice(0, 5).map((asset) => `<div class="flex items-start gap-2 text-xs">
+        <span class="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500/70"></span>
+        <span class="min-w-0"><span class="text-neutral-300">${esc(asset.title || asset.id)}</span>${asset.path ? ` <span class="break-all font-mono text-neutral-600">${esc(asset.path)}</span>` : ""}</span>
+      </div>`).join("")
+    : `<div class="text-xs text-neutral-600">No assets recorded.</div>`;
+  return `<div class="rounded-2xl border border-neutral-800 bg-neutral-950/45 p-4">
+    <div class="text-[10px] uppercase tracking-wider text-neutral-600">Planning Context</div>
+    <div class="mt-3 space-y-3">
+      <div>
+        <div class="mb-2 text-[10px] uppercase tracking-wider text-neutral-700">Goal alignment</div>
+        <div class="space-y-2">${goalsHtml}</div>
+      </div>
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-1">
+        <div>
+          <div class="mb-2 text-[10px] uppercase tracking-wider text-neutral-700">Parent brief</div>
+          <div class="space-y-1.5">${parentHtml}</div>
+        </div>
+        <div>
+          <div class="mb-2 text-[10px] uppercase tracking-wider text-neutral-700">Child work</div>
+          <div class="space-y-1.5">${childHtml}</div>
+        </div>
+        <div>
+          <div class="mb-2 text-[10px] uppercase tracking-wider text-neutral-700">Assets</div>
+          <div class="space-y-1.5">${assetHtml}</div>
+        </div>
+      </div>
+      <div class="rounded-lg border border-neutral-800 bg-neutral-950/55 p-2 text-xs leading-5 text-neutral-500">
+        Autonomy: <span class="${autonomyRes && autonomyRes.running ? "text-emerald-300" : "text-neutral-300"}">${autonomyRes && autonomyRes.running ? "running" : "stopped"}</span>
+        ${autonomyOk ? ` · ${esc(policy.mode || "propose")} · interval ${esc(policy.intervalMinutes || 60)}m · last ${esc(lastRun)}` : ` · ${esc((autonomyRes && autonomyRes.reason) || "unavailable")}`}
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderTaskHtml({ board, task, comments = [], assignees = [], log = "", provenance = null, goalsRes = null, autonomyRes = null }) {
   const status = task.status || task.state || "";
   const currentAssignee = task.assignee || "";
   const options = [
@@ -362,6 +441,7 @@ function renderTaskHtml({ board, task, comments = [], assignees = [], log = "" }
           <div class="text-[10px] uppercase tracking-wider text-neutral-600">Brief</div>
           <div class="mt-3 whitespace-pre-wrap text-sm leading-6 text-neutral-300">${esc(body)}</div>
         </div>
+        ${renderTaskContextPanel({ task, provenance, goalsRes, autonomyRes })}
       </aside>
       <section class="space-y-3">
         <div class="rounded-2xl border border-neutral-800 bg-neutral-950/45 p-4">
@@ -389,10 +469,13 @@ async function openTaskInStudio({ board, taskId, taskTitle, taskStatus } = {}) {
   panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading task context...</div>';
   try {
     if (window.ceo.ceoFocusTask) await window.ceo.ceoFocusTask({ ...focusedTask });
-    const [r, assigneesRes, logRes] = await Promise.all([
+    const [r, assigneesRes, logRes, provenanceRes, goalsRes, autonomyRes] = await Promise.all([
       window.ceo.ceoTaskDetail ? window.ceo.ceoTaskDetail(board, taskId) : null,
-      window.ceo.ceoAssignees ? window.ceo.ceoAssignees(board) : null,
-      window.ceo.ceoTaskLog ? window.ceo.ceoTaskLog({ board, taskId }) : null,
+      window.ceo.ceoAssignees ? safeIpc(() => window.ceo.ceoAssignees(board)) : null,
+      window.ceo.ceoTaskLog ? safeIpc(() => window.ceo.ceoTaskLog({ board, taskId })) : null,
+      window.ceo.provenanceGraph ? safeIpc(() => window.ceo.provenanceGraph()) : null,
+      window.ceo.listGoals ? safeIpc(() => window.ceo.listGoals({ domain: currentDomain })) : null,
+      window.ceo.autonomyStatus ? safeIpc(() => window.ceo.autonomyStatus()) : null,
     ]);
     if (!r || !r.ok) {
       const md = [
@@ -411,6 +494,9 @@ async function openTaskInStudio({ board, taskId, taskTitle, taskStatus } = {}) {
         comments: r.comments || [],
         assignees: (assigneesRes && assigneesRes.assignees) || [],
         log: (logRes && logRes.ok && logRes.out) || "",
+        provenance: provenanceRes && provenanceRes.ok ? provenanceRes : null,
+        goalsRes: goalsRes && goalsRes.ok ? goalsRes : null,
+        autonomyRes,
       });
     }
     appendStream("sys", `Planning focus loaded: ${taskTitle || taskId}. Ask the CEO for a domain plan, acceptance criteria, risks, or the right agent team.`);

@@ -30,6 +30,7 @@ const autonomyLoop = require("./core/autonomy-loop");
 const provenance = require("./core/provenance");
 const goals = require("./core/goals");
 const goalReview = require("./core/goal-review");
+const selfRepair = require("./core/self-repair");
 const meetings = require("./core/meetings");
 const registry = require("./core/registry");
 const mount = require("./core/mount");
@@ -1140,6 +1141,16 @@ ipcMain.handle("autonomy:stop", () => {
   stopAutonomyTimer();
   if (session.project) autonomyLoop.setPolicy(session.project.slug, { enabled: false });
   return { ok: true, running: false };
+});
+ipcMain.handle("self_repair:report_bug", (_e, bug = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  const domainName = bug.domain || session.domain || "Engineering";
+  return selfRepair.reportSystemBug({
+    ...bug,
+    domain: domainName,
+    board: boardForDomain(bug.board, domainName) || bug.board,
+    requestedBy: bug.requestedBy || "voice/planner",
+  }, { projectSlug: session.project.slug });
 });
 // AGUI: the local AG-UI server URL the renderer's HttpAgent connects to.
 ipcMain.handle("agui:url", () => aguiServer.url());

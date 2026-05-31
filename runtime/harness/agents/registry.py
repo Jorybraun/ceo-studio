@@ -14,11 +14,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
 import sys
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
+
+# Make the harness root importable so `from agents import agent_config` works
+# regardless of how this module is invoked (as a script via launch-agent, or
+# imported). agent_config in turn does `from config import paths`.
+_HARNESS_ROOT = Path(__file__).resolve().parent.parent
+if str(_HARNESS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_HARNESS_ROOT))
 
 # ---------------------------------------------------------------------------
 # Models / Runtimes
@@ -205,6 +214,71 @@ AGENTS: dict[str, dict[str, Any]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Declarative agents (agents.json) — the cockpit's writable source of truth.
+# We merge these in so an agent created in the UI is a first-class citizen for
+# launch-agent / herder / domain-room, without hand-editing this file.
+# ---------------------------------------------------------------------------
+
+# provider -> (launch_mode, command run in the tmux main window)
+_PROVIDER_LAUNCH = {
+    "grok": ("external", "grok"),
+    "devin": ("external", "devin"),
+    "echo": ("watcher_only", ""),
+}
+
+
+def _declarative_agents() -> dict[str, dict[str, Any]]:
+    """Agents declared in agents.json, mapped into registry entry shape."""
+    try:
+        from agents import agent_config
+    except Exception:
+        try:
+            import agent_config  # when imported from within the agents/ dir
+        except Exception:
+            return {}
+    try:
+        cfg = agent_config.load_config()
+    except Exception:
+        return {}
+
+    out: dict[str, dict[str, Any]] = {}
+    for aid, spec in (cfg.get("agents") or {}).items():
+        provider = str(spec.get("provider") or "echo")
+        mode, command = _PROVIDER_LAUNCH.get(provider, ("external", ""))
+        room = str(spec.get("room") or "discovery")
+        out[aid] = {
+            "id": aid,
+            "display_name": spec.get("name") or aid,
+            "role": spec.get("description") or f"{provider} agent",
+            "persona": spec.get("persona") or "",
+            "canonical_room": room,
+            "default_room": room,
+            "tmux_session": spec.get("tmux_session") or f"pipe-{aid}",
+            "tmux_window": spec.get("tmux_window") or "main",
+            "watcher_window": "watcher",
+            "launch_mode": mode,
+            "profile": "",
+            "command": command,
+            "capabilities": list(spec.get("capabilities") or []),
+            "mission": spec.get("description") or "",
+            "provider": provider,
+            "source": "agents.json",
+        }
+    return out
+
+
+def _all_agents() -> dict[str, dict[str, Any]]:
+    """Built-in AGENTS merged with declarative agents.json entries.
+
+    Built-ins win on id conflicts so existing system agents keep their exact
+    behavior; new UI-created agents are added on top.
+    """
+    merged = _declarative_agents()
+    merged.update(AGENTS)
+    return merged
+
+
 def _slug(value: str) -> str:
     value = value.strip().lstrip("@").lower()
     value = re.sub(r"[\s_]+", "-", value)
@@ -274,7 +348,7 @@ def resolve_agent_id(name: str) -> str | None:
     if not query:
         return None
 
-    for key, data in AGENTS.items():
+    for key, data in _all_agents().items():
         agent = _normalise_agent(key, data)
         if query in {_slug(alias) for alias in _aliases_for(key, agent)}:
             return agent["id"]
@@ -286,7 +360,7 @@ def get_agent(name: str) -> dict[str, Any] | None:
     agent_id = resolve_agent_id(name)
     if not agent_id:
         return None
-    for key, data in AGENTS.items():
+    for key, data in _all_agents().items():
         agent = _normalise_agent(key, data)
         if agent["id"] == agent_id:
             return agent
@@ -306,13 +380,13 @@ def get_default_room(name: str) -> str:
 
 
 def list_agents() -> list[str]:
-    return [_normalise_agent(key, value)["id"] for key, value in AGENTS.items()]
+    return [_normalise_agent(key, value)["id"] for key, value in _all_agents().items()]
 
 
 def agents_for_room(room: str) -> dict[str, dict[str, Any]]:
     return {
         _normalise_agent(k, v)["id"]: _normalise_agent(k, v)
-        for k, v in AGENTS.items()
+        for k, v in _all_agents().items()
         if _normalise_agent(k, v).get("canonical_room") == room
     }
 

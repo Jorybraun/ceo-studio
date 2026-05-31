@@ -54,6 +54,12 @@ const ok = (n, c) => { if (!c) { console.error("FAIL", n); process.exitCode = 1;
     "convai:status", "convai:start",
     "docs:list", "docs:tree", "docs:read",
     "jobs:create_ticket_pack", "jobs:get", "jobs:list", "jobs:apply_ticket_comment",
+    "domain_board:create_brief", "domain_board:create_bug", "domain_board:decompose_brief",
+    "domain_board:create_child_task", "domain_board:record_asset", "provenance:graph",
+    "goals:list", "goals:upsert", "goals:link_work", "goals:review",
+    "autonomy:analyze_blocked",
+    "autonomy:status", "autonomy:configure", "autonomy:run_cycle", "autonomy:start", "autonomy:stop",
+    "self_repair:report_bug",
     "swarm:request"];
   ok("all IPC handlers registered", expected.every((c) => typeof handlers[c] === "function"));
 
@@ -99,17 +105,24 @@ const ok = (n, c) => { if (!c) { console.error("FAIL", n); process.exitCode = 1;
   const domain = await handlers["domain:define"](null, {
     name: "Ops",
     purpose: "Operational planning",
+    kanbanBoard: "ops-board",
     createScaffold: true,
     relativePath: "domains/ops",
   });
   ok("domain:define creates a scaffolded domain", domain && domain.ok === true && fs.existsSync(path.join(sampleProject, "domains", "ops", "AGENTS.md")));
   const swarm = await handlers["swarm:request"](null, "research the market");
   ok("swarm:request responds honestly (not enabled)", swarm && swarm.ok === true && swarm.enabled === false);
+  const thinBrief = await handlers["domain_board:create_brief"](null, { title: "Thin", domain: "Ops" });
+  ok("domain_board:create_brief enforces template", thinBrief && thinBrief.ok === false && Array.isArray(thinBrief.missing));
+  ok("domain_board:create_brief prefers mapped domain board", /Board: ops-board/.test(thinBrief.template || ""));
+  const thinBug = await handlers["domain_board:create_bug"](null, { title: "Bug", domain: "Ops" });
+  ok("domain_board:create_bug enforces repro fields", thinBug && thinBug.ok === false && Array.isArray(thinBug.missing));
 
   await handlers["cost:kill"]();
   const killedReply = await handlers["agent:ask"](null, "again");
   ok("agent halts after kill switch", killedReply.halted === true);
 
+  require("../main/core/agui-server").stop();
   Module._load = origLoad;
   console.log(`\n${passed} boot checks passed.`);
 })();

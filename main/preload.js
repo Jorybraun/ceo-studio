@@ -86,6 +86,7 @@ contextBridge.exposeInMainWorld("ceo", {
   autonomyRunCycle: (info) => ipcRenderer.invoke("autonomy:run_cycle", info),
   autonomyStart: (info) => ipcRenderer.invoke("autonomy:start", info),
   autonomyStop: () => ipcRenderer.invoke("autonomy:stop"),
+  reportSystemBug: (bug) => ipcRenderer.invoke("self_repair:report_bug", bug),
   // AGUI: local AG-UI server URL the renderer's HttpAgent connects to.
   aguiUrl: () => ipcRenderer.invoke("agui:url"),
   // Agent registry (single source of truth: agents.json)
