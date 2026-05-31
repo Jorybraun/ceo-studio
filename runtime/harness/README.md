@@ -271,7 +271,18 @@ CLI agent can be wrapped and orchestrated uniformly:
   --members "ba:echo:ba,arch:echo:architect,pm:echo:pm" \
   --agenda "Define requirements for X" \
   --criteria "What a good outcome looks like"
+
+# ...or pull members from the declarative registry (agents.json) by id or team:
+./bin/agent meeting --room discovery --members "ba,architect,pm" --agenda "..."
+./bin/agent meeting --room discovery --team discovery-planning --agenda "..."
 ```
+
+**Declarative agent registry (`agents/agents.json`).** Adding an agent is config,
+not code: declare `{id, provider, persona, model, capabilities}` and it's usable as
+a meeting member by bare id (inline `id:provider:persona` overrides). Named `teams`
+expand via `--team`. Projects override the shipped defaults via `$CEO_AGENTS_CONFIG`
+or a `<workspace>/agents.json` (env file wins). Providers can be mixed freely
+(echo/devin/grok).
 
 Notes:
 - Every A2A exchange is still mirrored into the human-visible **domain room** (the

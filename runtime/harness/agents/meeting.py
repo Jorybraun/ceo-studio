@@ -29,6 +29,7 @@ from typing import Optional
 
 from . import a2a_runtime
 from . import agent_adapter
+from . import agent_config
 from . import personas as personas_mod
 from config import paths
 
@@ -177,17 +178,38 @@ async def run_meeting(*, room: str, agenda: str, members: list[Member],
     }
 
 
+def _member_from_token(token: str) -> Member:
+    """Resolve one member token.
+
+    - "id:provider:persona" -> explicit inline spec (provider/persona optional).
+    - bare "id"             -> look it up in the declarative agent config; if
+                               found, use its provider/persona/model/caps. If
+                               not found, fall back to echo with no persona.
+    Inline fields always override config.
+    """
+    parts = token.split(":")
+    mid = parts[0].strip()
+    inline_provider = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+    inline_persona = parts[2].strip() if len(parts) > 2 and parts[2].strip() else None
+
+    cfg = agent_config.get_agent(mid) or {}
+    provider = inline_provider or cfg.get("provider") or "echo"
+    persona = inline_persona or cfg.get("persona")
+    return Member(id=mid, provider=provider, persona=persona,
+                  model=cfg.get("model"), capabilities=cfg.get("capabilities", []) or [])
+
+
 def parse_members(spec: str) -> list[Member]:
-    """Parse a CLI member spec: "id:provider:persona,id2:provider2:persona2".
-    provider/persona optional -> default provider 'echo', no persona."""
+    """Parse a comma-separated member spec into Members, resolving bare ids via
+    the declarative agent config (agents.json)."""
     members: list[Member] = []
     for chunk in (spec or "").split(","):
         chunk = chunk.strip()
-        if not chunk:
-            continue
-        parts = chunk.split(":")
-        mid = parts[0].strip()
-        provider = parts[1].strip() if len(parts) > 1 and parts[1].strip() else "echo"
-        persona = parts[2].strip() if len(parts) > 2 and parts[2].strip() else None
-        members.append(Member(id=mid, provider=provider, persona=persona))
+        if chunk:
+            members.append(_member_from_token(chunk))
     return members
+
+
+def members_for_team(team_name: str) -> list[Member]:
+    """Expand a named team (from agents.json) into resolved Members."""
+    return [_member_from_token(mid) for mid in agent_config.get_team(team_name)]

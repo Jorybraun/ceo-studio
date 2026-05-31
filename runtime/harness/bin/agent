@@ -67,9 +67,15 @@ def cmd_meeting(args):
         agenda = Path(args.agenda_file).read_text(encoding="utf-8")
     if not agenda:
         sys.exit("error: provide --agenda or --agenda-file")
-    members = meeting_mod.parse_members(args.members)
+    if args.team:
+        members = meeting_mod.members_for_team(args.team)
+        if not members:
+            sys.exit(f"error: team '{args.team}' not found in agents.json (or empty)")
+    else:
+        members = meeting_mod.parse_members(args.members or "")
     if not members:
-        sys.exit("error: provide --members (e.g. 'ba:echo:ba,arch:echo:architect')")
+        sys.exit("error: provide --members (e.g. 'ba,architect' from config, or "
+                 "'ba:echo:ba,arch:echo:architect') or --team <name>")
     result = asyncio.run(meeting_mod.run_meeting(
         room=args.room, agenda=agenda, members=members, criteria=args.criteria or "",
         orchestrator=args.orchestrator, timeout=args.timeout))
@@ -159,8 +165,9 @@ def main():
     mt.add_argument("--agenda", default=None)
     mt.add_argument("--agenda-file", default=None)
     mt.add_argument("--criteria", default="", help="what a good outcome looks like")
-    mt.add_argument("--members", required=True,
-                    help="comma list of id[:provider[:persona]], e.g. ba:echo:ba,arch:echo:architect")
+    mt.add_argument("--members", default=None,
+                    help="comma list of ids (resolved via agents.json) or id[:provider[:persona]]")
+    mt.add_argument("--team", default=None, help="named team from agents.json (alternative to --members)")
     mt.add_argument("--orchestrator", default=None,
                     help="optional provider that synthesizes requirements (else deterministic)")
     mt.add_argument("--timeout", type=int, default=600)
