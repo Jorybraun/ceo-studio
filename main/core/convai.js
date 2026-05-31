@@ -26,7 +26,7 @@ const API_BASE = "https://api.elevenlabs.io/v1";
 
 // Bump when the agent config (prompt/tools/behavior) below changes, so existing
 // agents get PATCHed into sync instead of serving a stale config.
-const CONFIG_VERSION = 22;
+const CONFIG_VERSION = 26;
 
 // The CEO (Hermes) thinks for a while on real turns — a cold `hermes chat`
 // floor of ~6s, and 15–60s+ for substantive/long-session answers. ElevenLabs
@@ -516,6 +516,140 @@ const COCKPIT_TOOLS = [
   },
   {
     type: "client",
+    name: "create_brief",
+    description: "Create a real Hermes Kanban brief on the domain board. The canonical brief template is enforced; if required fields are missing, the tool returns the missing fields and no task is created.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["title", "goal", "domain", "currentRenderedState", "problemMismatch", "acceptanceCriteria", "nextAction"],
+      properties: {
+        board: { type: "string", description: "Hermes Kanban board slug. Defaults to current/domain board." },
+        title: { type: "string", description: "Brief title." },
+        goal: { type: "string", description: "Single most important outcome." },
+        domain: { type: "string", description: "Domain this brief belongs to." },
+        currentRenderedState: { type: "string", description: "What is visibly/currently true now." },
+        problemMismatch: { type: "string", description: "Gap between intended state and current state." },
+        constraints: { type: "string", description: "Constraints, comma or newline separated." },
+        acceptanceCriteria: { type: "string", description: "Concrete testable criteria, comma or newline separated." },
+        nextAction: { type: "string", description: "Immediate next action." },
+        owner: { type: "string", description: "Human or role owner." },
+        persona: { type: "string", description: "Planner/worker persona." },
+        reference: { type: "string", description: "Relevant URL, file, task id, or source note." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "create_bug",
+    description: "Create a real Hermes Kanban bug on the domain board. Required repro fields are enforced; if any are missing, no task is created.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["title", "domain", "observedBehavior", "expectedBehavior", "reproductionSteps", "severity"],
+      properties: {
+        board: { type: "string", description: "Hermes Kanban board slug. Defaults to current/domain board." },
+        title: { type: "string", description: "Bug summary." },
+        domain: { type: "string", description: "Domain this bug belongs to." },
+        observedBehavior: { type: "string", description: "What actually happens." },
+        expectedBehavior: { type: "string", description: "What should happen." },
+        reproductionSteps: { type: "string", description: "Steps to reproduce, comma or newline separated." },
+        severity: { type: "string", description: "Severity, such as critical, high, medium, or low." },
+        impact: { type: "string", description: "User/product/system impact." },
+        evidence: { type: "string", description: "Logs, screenshots, task ids, or file paths." },
+        acceptanceCriteria: { type: "string", description: "Verification criteria, comma or newline separated." },
+        owner: { type: "string", description: "Human or role owner." },
+        persona: { type: "string", description: "Planner/worker persona." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "decompose_brief",
+    description: "Ask Hermes Kanban to decompose an existing brief task into child work items after the brief has been created and reviewed.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["taskId"],
+      properties: {
+        board: { type: "string", description: "Hermes Kanban board slug." },
+        taskId: { type: "string", description: "Brief task id to decompose." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "create_child_task",
+    description: "Create a real Hermes child task that queryably belongs to a parent brief or bug in CEO Studio provenance. Use this when manually decomposing a brief into tasks.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["parentId", "title", "acceptanceCriteria"],
+      properties: {
+        board: { type: "string", description: "Hermes Kanban board slug." },
+        domain: { type: "string", description: "Domain for board mapping." },
+        parentKind: { type: "string", description: "brief or bug. Defaults to brief." },
+        parentId: { type: "string", description: "Parent brief/bug task id or stable title." },
+        title: { type: "string", description: "Child task title." },
+        outcome: { type: "string", description: "Expected outcome." },
+        acceptanceCriteria: { type: "string", description: "Concrete criteria, comma or newline separated." },
+        verification: { type: "string", description: "Verification commands/evidence, comma or newline separated." },
+        workspace: { type: "string", description: "Workspace/worktree/path rule." },
+        owner: { type: "string", description: "Owner or role." },
+        persona: { type: "string", description: "Worker persona." },
+        status: { type: "string", description: "Initial lane/status, usually triage or planning." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "record_brief_asset",
+    description: "Record that a generated artifact, file, screenshot, report, or validation output belongs to a parent brief/task/bug.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["parentId"],
+      properties: {
+        parentKind: { type: "string", description: "brief, task, or bug. Defaults to brief." },
+        parentId: { type: "string", description: "Parent work item id." },
+        assetKind: { type: "string", description: "artifact, file, screenshot, report, patch, log, validation, etc." },
+        assetId: { type: "string", description: "Stable id if available." },
+        title: { type: "string", description: "Asset title." },
+        path: { type: "string", description: "Project-relative file path or evidence path." },
+        summary: { type: "string", description: "Short summary of the asset." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "show_provenance",
+    description: "Show child tasks and assets linked to a parent brief/task/bug from CEO Studio's provenance store.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["parentId"],
+      properties: {
+        parentId: { type: "string", description: "Parent brief/task/bug id." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "analyze_blocked_work",
+    description: "Scan the blocked lane on a Hermes domain board, add blocker-analysis comments for unexamined blocked tasks, and log escalation items into memory. Use when work is stuck or the user asks why the board is blocked.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: [],
+      properties: {
+        board: { type: "string", description: "Optional Hermes Kanban board slug. Defaults to the domain/current board." },
+        domain: { type: "string", description: "Optional domain name for board mapping." },
+        dryRun: { type: "boolean", description: "If true, inspect and draft analyses without writing comments or memory." },
+        limit: { type: "number", description: "Maximum blocked tasks to analyze." },
+      },
+    },
+  },
+  {
+    type: "client",
     name: "show_ticket",
     description: "Load a Kanban ticket body/comments and render it in the left panel for discussion.",
     expects_response: true,
@@ -623,9 +757,105 @@ const COCKPIT_TOOLS = [
   },
 ];
 
+// Team communication — talk to the agent team (registry + A2A meeting engine).
+const TEAM_TOOLS = [
+  {
+    type: "client",
+    name: "list_agents",
+    description: "List the agent team from the registry (agents.json): each agent's id, persona, model/provider brain, and whether it is currently mounted (live). Also lists teams. Use before messaging an agent or convening a meeting.",
+    expects_response: true,
+    parameters: { type: "object", required: [], properties: {} },
+  },
+  {
+    type: "client",
+    name: "message_agent",
+    description: "Send a message to a specific mounted teammate's live session. The agent must be mounted first. Use to delegate or ask a single teammate something directly.",
+    expects_response: true,
+    parameters: {
+      type: "object", required: ["agent", "message"],
+      properties: {
+        agent: { type: "string", description: "Agent id or name from list_agents." },
+        message: { type: "string", description: "The message to deliver to the agent." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "start_meeting",
+    description: "Convene the team in an A2A meeting room on a given agenda. Runs in the background; follow it with read_room. Use when several agents should collaborate to produce requirements or a plan.",
+    expects_response: true,
+    parameters: {
+      type: "object", required: ["agenda"],
+      properties: {
+        agenda: { type: "string", description: "What the meeting should accomplish." },
+        room: { type: "string", description: "Optional room name; one is generated if omitted." },
+        criteria: { type: "string", description: "Optional success/exit criteria for the meeting." },
+        members: { type: "string", description: "Comma-separated agent ids to invite (or use team)." },
+        team: { type: "string", description: "A team name from list_agents (alternative to members)." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "read_room",
+    description: "Read the live transcript and any produced requirements for a meeting room started with start_meeting.",
+    expects_response: true,
+    parameters: {
+      type: "object", required: ["room"],
+      properties: { room: { type: "string", description: "Room name returned by start_meeting." } },
+    },
+  },
+];
+
+// Render / navigation control — let the agent drive the Studio UI surfaces.
+const RENDER_TOOLS = [
+  {
+    type: "client",
+    name: "open_view",
+    description: "Open a Studio left-panel view: 'domain', 'board', 'tasks', 'teams', 'channels', or 'meetings'. Use to navigate the cockpit for the user.",
+    expects_response: true,
+    parameters: {
+      type: "object", required: ["view"],
+      properties: { view: { type: "string", description: "One of: domain, board, tasks, teams, channels, meetings." } },
+    },
+  },
+  {
+    type: "client",
+    name: "open_agent_detail",
+    description: "Open a teammate's detail view (left panel) and its live terminal/logs surface (right panel). Use when discussing or monitoring a specific agent.",
+    expects_response: true,
+    parameters: {
+      type: "object", required: ["agent"],
+      properties: { agent: { type: "string", description: "Agent id or name from list_agents." } },
+    },
+  },
+  {
+    type: "client",
+    name: "mount_agent",
+    description: "Mount a teammate: start its CLI session + A2A room watcher so it is live and can receive messages. Use before message_agent if the agent is not mounted.",
+    expects_response: true,
+    parameters: {
+      type: "object", required: ["agent"],
+      properties: { agent: { type: "string", description: "Agent id or name." } },
+    },
+  },
+  {
+    type: "client",
+    name: "unmount_agent",
+    description: "Unmount a teammate: stop its live session. Use to free resources when an agent is no longer needed.",
+    expects_response: true,
+    parameters: {
+      type: "object", required: ["agent"],
+      properties: { agent: { type: "string", description: "Agent id or name." } },
+    },
+  },
+];
+
 const TOOLS = [
   ASK_CEO_TOOL,
   ...COCKPIT_TOOLS,
+  ...TEAM_TOOLS,
+  ...RENDER_TOOLS,
   ..._LEGACY_TOOLS.filter((t) => ![
     "modify_my_code",
     "test_my_changes",
@@ -695,7 +925,9 @@ function _conversationConfig(env = process.env, { projectName, currentDomain = "
     `You are CEO Studio's live voice cockpit agent for ${who}. You are useful in conversation: you can inspect domains, tickets, files, and brain context; render the left panel; and then hand distilled requests to the CEO or document agent when that is the right next step.`,
     `Current domain: ${currentDomain || "All"}. ${domainInstruction}`,
     "Do not forward every utterance to the CEO. First understand the user's intent. For casual clarification, answer directly. For domain/ticket/file work, gather the smallest useful context with tools, render useful artifacts in the left panel, and keep the user in the loop.",
-    "Routing: use ticket tools for Kanban/ticket/board questions; use project file tools for documents and code; use local brain tools for immediate project memory; use GBrain tools for long-term memory, founder-judgment patterns, historical decisions, and synthesis-heavy context; use define_domain/list_domains/set_domain for domain setup; use ask_document_agent for document-specific analysis; use tell_ceo or ask_ceo only for strategic decisions, delegation, prioritization, or final handoff.",
+    "Routing: use ticket tools for Kanban/ticket/board questions; use create_brief for new structured work briefs; use create_bug for reproducible defects; use create_child_task when manually decomposing a brief into queryably linked tasks; use record_brief_asset when generated evidence or files belong to a brief/task; use show_provenance to inspect those links; use decompose_brief only after a brief task exists and should let Hermes decompose; use analyze_blocked_work when work is stuck or blocked and needs escalation; use project file tools for documents and code; use local brain tools for immediate project memory; use GBrain tools for long-term memory, founder-judgment patterns, historical decisions, and synthesis-heavy context; use define_domain/list_domains/set_domain for domain setup; use ask_document_agent for document-specific analysis; use tell_ceo or ask_ceo only for strategic decisions, delegation, prioritization, or final handoff.",
+    "Team: you can see and operate the agent team. Use list_agents to see the roster and who is mounted; mount_agent to bring an agent live; message_agent to delegate to one teammate; start_meeting + read_room to convene several agents on an agenda and collect their requirements. Use open_view and open_agent_detail to navigate the cockpit and surface a teammate's live terminal for the user.",
+    "Live context: at the start of every session and whenever the user switches project/domain/file you receive a 'CEO STUDIO LIVE CONTEXT' update with the active project, domain, open file, team roster, board tickets, and recent decisions. Trust it as ground truth for where we are — do not ask the user which project or domain we are on.",
     "When the user asks to create or set up a domain, ask only for missing essentials, then call define_domain and set_domain. If a visual summary helps, call render_panel.",
     "When discussing a file or ticket, prefer showing it in the left panel before reasoning about it. Mention concrete file paths or ticket ids.",
     "Voice style: concise, direct, collaborative. Stop immediately when the user speaks. Do not invent unavailable facts; use tools or say what is missing.",

@@ -84,6 +84,58 @@ function setPanelTitle(text) {
   if (title) title.textContent = text || "Panel";
 }
 
+function renderArchitectureOverview() {
+  const ui = {
+    title: "Current architecture",
+    components: [
+      {
+        type: "card",
+        title: "PIPE Discovery Micro-App: current code path",
+        body: "The main process owns project state, domain scope, the project brain, Hermes relay, GBrain, jobs, voice, and all IPC. The renderer is a thin cockpit; preload exposes the only safe API surface.",
+      },
+      {
+        type: "mermaid",
+        diagram: [
+          "flowchart TB",
+          "  U[User / Operator] --> R[Renderer UI\nrenderer/app.js + dashboard.js]",
+          "  R --> P[Preload bridge\nwindow.ceo IPC API]",
+          "  P --> M[Main process\nmain/index.js]",
+          "  M --> S[Session state\nproject / domain / cost / provider / agent]",
+          "  M --> D[Domain store\nmain/core/domains.js]",
+          "  M --> B[Project brain\nmain/core/brain.js]",
+          "  M --> G[GBrain bridge\nmain/core/gbrain.js + gbrain CLI]",
+          "  M --> H[Hermes CEO relay\nmain/core/hermes.js]",
+          "  M --> J[Job queue + ticket packs\nmain/core/jobs.js + ticket-planner.js]",
+          "  M --> V[Voice / ConvAI\nmain/core/voice.js + convai.js]",
+          "  M --> A[AGUI server\nmain/core/agui-server.js]",
+          "  A --> R",
+          "  B --> T[Docs / artifacts index]",
+          "  D --> T",
+          "  H --> K[Kanban / swarm / room]\n",
+          "  P --> C[Renderer panel renderers\nmarked + mermaid + registry]",
+          "  C --> L[Left panel\n#panel1]",
+        ].join("\n"),
+      },
+      {
+        type: "list",
+        ordered: false,
+        items: [
+          "Renderer is thin and never touches Node directly.",
+          "Main is the authority for state, file access, and live CEO operations.",
+          "Project brain and GBrain are separate knowledge paths; Hermes is the conversational CEO.",
+          "The left panel can render markdown, cards, and Mermaid diagrams through AGUI or direct panel rendering.",
+        ],
+      },
+    ],
+  };
+  if (window.CEOAgui && window.CEOAgui.showAgui) window.CEOAgui.showAgui(ui);
+  else {
+    setPanelTitle(ui.title);
+    const fallback = [`# ${ui.title}`, "", "```mermaid", ui.components[1].diagram, "```"].join("\n");
+    panelContent().innerHTML = window.marked ? window.marked.parse(fallback) : fallback;
+  }
+}
+
 function setStudioFocus(title, subtitle, mode = "Studio") {
   const modeEl = $("#studio-mode-pill");
   const titleEl = $("#studio-focus-title");
@@ -211,6 +263,7 @@ async function showFile(path) {
   window.ceoUI.showPanel(path, r.text);
   setFilePaneOpen(false);
   setVoiceStatus(`Showing ${path}`);
+  window.CEOConvai?.syncContext?.(`opened file ${path}`);
 }
 
 function renderTaskMarkdown({ board, task, comments = [] }) {
@@ -472,6 +525,7 @@ async function openProject(id) {
   appendStream("sys", `Opened "${res.project.name}". Brain initialized & docs indexed.`);
   renderMeter(await window.ceo.costStatus());
   setAgentState("idle");
+  window.CEOConvai?.syncContext?.(`opened project ${res.project.name}`);
 }
 
 /** One text turn: prompt -> agent -> reply in the stream. */
@@ -793,6 +847,605 @@ async function createTask(boardOverride = null) {
 
 // Expose thin UI helpers so the live-voice module (convai.js, an ES module)
 // can render transcripts + drive the presence circle without duplicating code.
+// --- Studio nav rail: the left rail opens workspace panels --------------
+// Each nav item renders a view into the main content panel (#panel-content-body).
+// Views: domain (existing planning board), board (Kanban), tasks (flat list),
+// teams (registry teams), channels (rooms/DMs), meetings (working session).
+let studioView = "domain";
+let navMeetingOpts = null;     // cached {agents, teams, personas} for the meetings view
+let navMeetingRoom = null;
+let navMeetingTimer = null;
+const NAV_COL_ORDER = ["planning", "triage", "todo", "ready", "running", "blocked", "scheduled", "review", "done"];
+
+function setActiveNav(view) {
+  document.querySelectorAll("#studio-nav .nav-item").forEach((b) => {
+    const active = b.dataset.view === view;
+    b.classList.toggle("bg-neutral-800", active);
+    b.classList.toggle("text-neutral-100", active);
+    b.classList.toggle("text-neutral-300", !active);
+  });
+}
+
+function navEmpty(msg) {
+  return `<div class="rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-sm text-neutral-500">${esc(msg)}</div>`;
+}
+
+async function currentBoardSlug() {
+  if (!window.ceo.ceoBoardsForDomain) return null;
+  let res = {};
+  try { res = await window.ceo.ceoBoardsForDomain(currentDomain); } catch { res = {}; }
+  const boards = (res && res.boards) || [];
+  return (boards[0] && boards[0].slug) || (res && res.current)
+    || (currentProject && currentProject.slug) || null;
+}
+
+async function renderBoardView() {
+  setPanelTitle("Board");
+  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading board…</div>';
+  const slug = await currentBoardSlug();
+  if (!slug) { panelContent().innerHTML = navEmpty("No Kanban board for this domain yet."); return; }
+  let data = {};
+  try { data = await window.ceo.ceoBoard(slug); } catch { data = {}; }
+  const cols = (data && data.columns) || {};
+  const present = Object.keys(cols);
+  const ordered = NAV_COL_ORDER.filter((c) => present.includes(c)).concat(present.filter((c) => !NAV_COL_ORDER.includes(c)));
+  if (!ordered.length) { panelContent().innerHTML = navEmpty(`Board "${slug}" is empty.`); return; }
+  const lanes = ordered.map((status) => {
+    const tasks = cols[status] || [];
+    const cards = tasks.map((t) => `
+      <div class="studio-task-card cursor-pointer rounded-lg border border-neutral-800 bg-neutral-900/70 p-2.5 hover:border-neutral-700 transition"
+           data-board="${esc(slug)}" data-task-id="${esc(t.id)}" data-task-title="${esc(t.title)}" data-task-status="${esc(status)}">
+        <div class="text-[13px] text-neutral-100 leading-snug">${esc(t.title)}</div>
+        ${t.assignee ? `<div class="mt-1 text-[10px] text-neutral-500">${esc(t.assignee)}</div>` : ""}
+      </div>`).join("") || '<div class="px-2 py-3 text-xs text-neutral-700">empty</div>';
+    return `<section class="w-[240px] shrink-0 rounded-xl border border-neutral-800 bg-neutral-950/40">
+      <div class="flex items-center gap-2 border-b border-neutral-800/70 px-3 py-2">
+        <span class="text-[11px] font-semibold uppercase tracking-wider text-neutral-300">${esc(status)}</span>
+        <span class="ml-auto text-[11px] text-neutral-600">${tasks.length}</span>
+      </div>
+      <div class="space-y-2 p-2">${cards}</div>
+    </section>`;
+  }).join("");
+  panelContent().innerHTML = `<div class="flex gap-3 overflow-x-auto pb-2">${lanes}</div>`;
+}
+
+async function renderTasksView() {
+  setPanelTitle("Tasks");
+  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading tasks…</div>';
+  const slug = await currentBoardSlug();
+  if (!slug) { panelContent().innerHTML = navEmpty("No board for this domain yet."); return; }
+  let data = {};
+  try { data = await window.ceo.ceoBoard(slug); } catch { data = {}; }
+  const cols = (data && data.columns) || {};
+  const rows = [];
+  for (const status of Object.keys(cols)) {
+    for (const t of cols[status] || []) rows.push({ ...t, status });
+  }
+  if (!rows.length) { panelContent().innerHTML = navEmpty(`No tasks on "${slug}".`); return; }
+  panelContent().innerHTML = `<div class="space-y-1.5">${rows.map((t) => `
+    <div class="studio-task-card cursor-pointer flex items-center gap-3 rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-2 hover:border-neutral-700 transition"
+         data-board="${esc(slug)}" data-task-id="${esc(t.id)}" data-task-title="${esc(t.title)}" data-task-status="${esc(t.status)}">
+      <span class="text-[10px] uppercase tracking-wider text-neutral-500 w-20 shrink-0">${esc(t.status)}</span>
+      <span class="flex-1 min-w-0 truncate text-sm text-neutral-100">${esc(t.title)}</span>
+      <span class="text-[10px] text-neutral-600 shrink-0">${esc(t.assignee || "—")}</span>
+    </div>`).join("")}</div>`;
+}
+
+// --- Registry (agents + teams) — the single source of truth for the Team panel.
+let registryState = { agents: [], teams: [], personas: [], providers: [] };
+
+async function loadRegistry() {
+  const [reg, per, prov] = await Promise.all([
+    window.ceo.registryList ? window.ceo.registryList() : { agents: [], teams: [] },
+    window.ceo.registryPersonas ? window.ceo.registryPersonas() : { personas: [] },
+    window.ceo.registryProviders ? window.ceo.registryProviders() : { providers: ["echo"] },
+  ]);
+  registryState = {
+    agents: (reg && reg.agents) || [],
+    teams: (reg && reg.teams) || [],
+    personas: (per && per.personas) || [],
+    providers: (prov && prov.providers) || ["echo"],
+  };
+  return registryState;
+}
+
+function agentSubtitle(a) {
+  const persona = a.persona ? esc(a.persona) : "no persona";
+  const brain = esc(a.provider || "echo") + (a.model ? ` · ${esc(a.model)}` : "");
+  return `${persona} · ${brain}`;
+}
+
+async function renderTeamsView() {
+  setPanelTitle("Team");
+  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading team…</div>';
+  await loadRegistry();
+  renderTeamPanel();
+}
+
+function renderTeamPanel() {
+  const { agents, teams } = registryState;
+  const agentById = new Map(agents.map((a) => [a.id, a]));
+
+  const roster = agents.length ? agents.map((a) => `
+    <button class="team-agent-card text-left rounded-xl border border-neutral-800 bg-neutral-900/60 p-3 hover:border-cyan-500/40 transition" data-agent="${esc(a.id)}">
+      <div class="flex items-center gap-2">
+        <span class="w-2 h-2 rounded-full ${a.tmux_session ? "bg-emerald-500" : "bg-neutral-600"}"></span>
+        <span class="text-sm font-medium text-neutral-100 truncate">${esc(a.name || a.id)}</span>
+        <span class="ml-auto text-[10px] uppercase tracking-wider text-neutral-500">${esc(a.provider || "echo")}</span>
+      </div>
+      <div class="mt-1.5 text-[11px] text-neutral-500 truncate">${agentSubtitle(a)}</div>
+      ${(a.capabilities || []).length ? `<div class="mt-2 flex flex-wrap gap-1">${a.capabilities.slice(0, 3).map((c) => `<span class="text-[9px] bg-neutral-800 text-neutral-400 px-1.5 py-0.5 rounded">${esc(c)}</span>`).join("")}</div>` : ""}
+    </button>`).join("") : navEmpty("No agents yet. Click “New agent” to hire one.");
+
+  const teamCards = teams.length ? teams.map((t) => {
+    const members = (t.members || []).map((id) => {
+      const a = agentById.get(id);
+      return `<div class="flex items-center gap-2 rounded-md border border-neutral-800 bg-neutral-950/40 px-2.5 py-1.5">
+        <span class="w-1.5 h-1.5 rounded-full bg-cyan-500/70"></span>
+        <span class="text-sm text-neutral-200">${esc(a ? (a.name || a.id) : id)}</span>
+        <span class="ml-auto text-[10px] text-neutral-500">${a ? agentSubtitle(a) : "not in registry"}</span>
+        <button class="team-remove text-neutral-600 hover:text-red-400 text-xs ml-1" data-team="${esc(t.name)}" data-agent="${esc(id)}" title="Remove from team">✕</button>
+      </div>`;
+    }).join("") || '<div class="text-xs text-neutral-600">No members yet.</div>';
+    const candidates = agents.filter((a) => !(t.members || []).includes(a.id));
+    const addSel = candidates.length ? `
+      <select class="team-add mt-2 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-xs text-neutral-100" data-team="${esc(t.name)}">
+        <option value="">+ add member…</option>
+        ${candidates.map((a) => `<option value="${esc(a.id)}">${esc(a.name || a.id)}</option>`).join("")}
+      </select>` : "";
+    return `<section class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+      <div class="mb-2 flex items-center gap-2">
+        <span class="text-sm font-medium text-neutral-100">${esc(t.name)}</span>
+        <span class="ml-auto text-[11px] text-neutral-500">${(t.members || []).length} members</span>
+        <button class="team-delete text-neutral-600 hover:text-red-400 text-xs ml-1" data-team="${esc(t.name)}" title="Delete team">Delete</button>
+      </div>
+      <div class="space-y-1.5">${members}</div>
+      ${addSel}
+    </section>`;
+  }).join("") : navEmpty("No teams yet. Click “New team” to assemble one from your roster.");
+
+  panelContent().innerHTML = `
+    <div class="space-y-5">
+      <div>
+        <div class="mb-2 flex items-center gap-2">
+          <span class="text-sm font-semibold text-neutral-100">Roster</span>
+          <span class="text-[11px] text-neutral-500">${agents.length} agent${agents.length === 1 ? "" : "s"}</span>
+          <button id="agent-new" class="ml-auto text-xs bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-3 py-1 font-medium transition">+ New agent</button>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">${roster}</div>
+      </div>
+      <div>
+        <div class="mb-2 flex items-center gap-2">
+          <span class="text-sm font-semibold text-neutral-100">Teams</span>
+          <span class="text-[11px] text-neutral-500">${teams.length} team${teams.length === 1 ? "" : "s"}</span>
+          <button id="team-new" class="ml-auto text-xs bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 rounded-md px-3 py-1 font-medium transition">+ New team</button>
+        </div>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">${teamCards}</div>
+      </div>
+    </div>`;
+}
+
+// --- Agent create/edit modal (appended to <body> so panel re-renders don't wipe it).
+function closeAgentModal() {
+  const m = document.getElementById("agent-modal");
+  if (m) m.remove();
+}
+
+function openAgentModal(agentId) {
+  closeAgentModal();
+  const editing = agentId ? registryState.agents.find((a) => a.id === agentId) : null;
+  const personas = registryState.personas || [];
+  const providers = registryState.providers || ["echo"];
+  const personaOpts = `<option value="">— none —</option>` +
+    personas.map((p) => `<option value="${esc(p.id)}" ${editing && editing.persona === p.id ? "selected" : ""}>${esc(p.name || p.id)}</option>`).join("");
+  const providerOpts = providers.map((p) => `<option value="${esc(p)}" ${editing && editing.provider === p ? "selected" : ""}>${esc(p)}</option>`).join("");
+  const wrap = document.createElement("div");
+  wrap.id = "agent-modal";
+  wrap.className = "fixed inset-0 z-[80] bg-neutral-950/80 backdrop-blur-sm flex items-start justify-center p-6 pt-16 overflow-auto";
+  wrap.innerHTML = `
+    <div class="w-[460px] max-w-[92vw] rounded-2xl border border-neutral-800 bg-neutral-900 shadow-2xl p-5 space-y-4">
+      <div class="flex items-center">
+        <span class="text-base font-semibold text-neutral-100">${editing ? "Edit agent" : "New agent"}</span>
+        <div class="flex-1"></div>
+        <button id="agent-modal-close" class="text-sm text-neutral-400 hover:text-neutral-100">✕</button>
+      </div>
+      <label class="block text-xs text-neutral-400">Name
+        <input id="am-name" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100" value="${editing ? esc(editing.name || editing.id) : ""}" placeholder="e.g. Ada — Architect" />
+      </label>
+      <div class="flex gap-2">
+        <label class="flex-1 text-xs text-neutral-400">Brain / provider
+          <select id="am-provider" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100">${providerOpts}</select>
+        </label>
+        <label class="flex-1 text-xs text-neutral-400">Model (optional)
+          <input id="am-model" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100" value="${editing && editing.model ? esc(editing.model) : ""}" placeholder="e.g. grok-build" />
+        </label>
+      </div>
+      <label class="block text-xs text-neutral-400">Persona / role
+        <select id="am-persona" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100">${personaOpts}</select>
+      </label>
+      <label class="block text-xs text-neutral-400">Capabilities (comma-separated)
+        <input id="am-caps" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100" value="${editing ? esc((editing.capabilities || []).join(", ")) : ""}" placeholder="adr, data-model" />
+      </label>
+      <label class="block text-xs text-neutral-400">Memory key
+        <input id="am-mem" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 font-mono" value="${editing && editing.memory_key ? esc(editing.memory_key) : ""}" placeholder="agent:${editing ? esc(editing.id) : "name"}" />
+        <span class="text-[10px] text-neutral-600">Private memory namespace. Shared project/domain knowledge still comes from gbrain.</span>
+      </label>
+      <label class="block text-xs text-neutral-400">Description (optional)
+        <textarea id="am-desc" rows="2" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100">${editing ? esc(editing.description || "") : ""}</textarea>
+      </label>
+      <div class="flex items-center gap-2 pt-1">
+        <button id="am-save" class="text-sm bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-4 py-1.5 font-medium transition">${editing ? "Save" : "Create"}</button>
+        ${editing ? `<button id="am-delete" class="text-sm bg-red-900/40 hover:bg-red-900/70 border border-red-900/60 text-red-300 rounded-md px-3 py-1.5 transition">Delete</button>` : ""}
+        <span id="am-msg" class="text-xs text-neutral-500"></span>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener("click", (e) => { if (e.target === wrap) closeAgentModal(); });
+  document.getElementById("agent-modal-close").addEventListener("click", closeAgentModal);
+  document.getElementById("am-save").addEventListener("click", () => saveAgentModal(editing ? editing.id : null));
+  const del = document.getElementById("am-delete");
+  if (del) del.addEventListener("click", () => deleteAgentFromModal(editing.id));
+}
+
+async function saveAgentModal(existingId) {
+  const msg = document.getElementById("am-msg");
+  const val = (id) => (document.getElementById(id) && document.getElementById(id).value) || "";
+  const spec = {
+    name: val("am-name").trim(),
+    provider: val("am-provider") || "echo",
+    model: val("am-model").trim() || null,
+    persona: val("am-persona") || null,
+    capabilities: val("am-caps").split(",").map((s) => s.trim()).filter(Boolean),
+    memory_key: val("am-mem").trim() || null,
+    description: val("am-desc").trim(),
+  };
+  if (!spec.name) { if (msg) msg.textContent = "name required"; return; }
+  if (msg) msg.textContent = "saving…";
+  const r = existingId
+    ? await window.ceo.registryUpdateAgent(existingId, spec)
+    : await window.ceo.registryCreateAgent(spec);
+  if (!r || !r.ok) { if (msg) msg.textContent = "failed: " + (r ? r.reason : "unknown"); return; }
+  closeAgentModal();
+  await loadRegistry();
+  // Stay in the detail view if we were editing a selected agent; else the roster.
+  if (selectedAgentId && registryState.agents.some((a) => a.id === selectedAgentId)) {
+    const a = registryState.agents.find((x) => x.id === selectedAgentId);
+    await renderAgentDetail(a);
+  } else {
+    renderTeamPanel();
+  }
+}
+
+async function deleteAgentFromModal(id) {
+  if (!confirm(`Delete agent "${id}"? This also removes it from any team.`)) return;
+  const r = await window.ceo.registryDeleteAgent(id);
+  if (r && r.ok) { closeAgentModal(); closeAgentSurface(); await loadRegistry(); renderTeamPanel(); }
+}
+
+async function teamSetMembers(name, members) {
+  const r = await window.ceo.registrySaveTeam(name, members);
+  if (r && r.ok) { await loadRegistry(); renderTeamPanel(); }
+  return r;
+}
+
+// --- Agent detail (left panel) + live terminal/logs surface (right panel) ---
+let selectedAgentId = null;
+let selectedAgentRoom = "discovery";
+let agentSurfaceTab = "terminal";
+let agentTermTimer = null;
+
+function detailRow(label, valueHtml) {
+  return `<div class="rounded-lg border border-neutral-800 bg-neutral-950/40 p-2">
+    <div class="text-[10px] uppercase tracking-wider text-neutral-600">${label}</div>
+    <div class="mt-0.5 text-neutral-300 break-all">${valueHtml}</div>
+  </div>`;
+}
+
+async function openAgentDetail(id) {
+  const a = registryState.agents.find((x) => x.id === id);
+  if (!a) return;
+  selectedAgentId = id;
+  await renderAgentDetail(a);
+  showAgentSurface(a);
+}
+
+async function renderAgentDetail(a) {
+  setPanelTitle(a.name || a.id);
+  let mounted = false;
+  if (a.tmux_session) {
+    try { const live = await window.ceo.registryAlive(a.id); mounted = !!(live && live.alive); } catch { mounted = false; }
+  }
+  const brain = esc(a.provider || "echo") + (a.model ? " · " + esc(a.model) : "");
+  panelContent().innerHTML = `
+    <div class="space-y-4 max-w-2xl">
+      <button id="agent-back" class="text-xs text-neutral-400 hover:text-neutral-200">← Back to team</button>
+      <div class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4 space-y-3">
+        <div class="flex items-center gap-2">
+          <span class="w-2.5 h-2.5 rounded-full ${mounted ? "bg-emerald-500" : "bg-neutral-600"}"></span>
+          <span class="text-base font-semibold text-neutral-100">${esc(a.name || a.id)}</span>
+          <span class="ml-auto text-[10px] uppercase tracking-wider text-neutral-500">${esc(a.provider || "echo")}</span>
+        </div>
+        <div class="grid grid-cols-2 gap-2 text-xs">
+          ${detailRow("Persona", esc(a.persona || "—"))}
+          ${detailRow("Brain", brain)}
+          ${detailRow("Memory key", esc(a.memory_key || "—"))}
+          ${detailRow("tmux", a.tmux_session ? esc(a.tmux_session) + (mounted ? " · live" : " · stopped") : "not mounted")}
+        </div>
+        ${(a.capabilities || []).length ? `<div class="flex flex-wrap gap-1">${a.capabilities.map((c) => `<span class="text-[10px] bg-neutral-800 text-neutral-400 px-1.5 py-0.5 rounded">${esc(c)}</span>`).join("")}</div>` : ""}
+        ${a.description ? `<p class="text-xs text-neutral-400">${esc(a.description)}</p>` : ""}
+        <div class="flex items-center gap-2 pt-1">
+          ${mounted
+            ? `<button id="agent-unmount" class="text-sm bg-red-900/40 hover:bg-red-900/70 border border-red-900/60 text-red-300 rounded-md px-3 py-1.5 transition">Unmount</button>`
+            : `<button id="agent-mount" class="text-sm bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-3 py-1.5 font-medium transition">Mount</button>`}
+          <button id="agent-edit" class="text-sm bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 rounded-md px-3 py-1.5 transition">Edit</button>
+          <span id="agent-detail-msg" class="text-xs text-neutral-500"></span>
+        </div>
+        <p class="text-[11px] text-neutral-600">Mounting starts the agent's CLI + a room watcher (its A2A presence). Watch it live in the right panel →</p>
+      </div>
+    </div>`;
+}
+
+function showAgentSurface(a) {
+  const surf = document.getElementById("agent-surface");
+  if (!surf) return;
+  // Inline style wins over Tailwind's class ordering so the toggle is deterministic.
+  surf.classList.remove("hidden");
+  surf.style.display = "flex";
+  const name = document.getElementById("as-name");
+  const sub = document.getElementById("as-sub");
+  if (name) name.textContent = a.name || a.id;
+  if (sub) sub.textContent = agentSubtitle(a);
+  setAgentSurfaceTab("terminal");
+}
+
+function closeAgentSurface() {
+  if (agentTermTimer) { clearInterval(agentTermTimer); agentTermTimer = null; }
+  selectedAgentId = null;
+  const surf = document.getElementById("agent-surface");
+  if (surf) { surf.classList.add("hidden"); surf.style.display = "none"; }
+}
+
+function setAgentSurfaceTab(tab) {
+  agentSurfaceTab = tab;
+  const tt = document.getElementById("as-tab-terminal");
+  const tl = document.getElementById("as-tab-logs");
+  const on = (b) => { b.classList.add("bg-neutral-700", "text-neutral-100"); b.classList.remove("text-neutral-400"); };
+  const off = (b) => { b.classList.remove("bg-neutral-700", "text-neutral-100"); b.classList.add("text-neutral-400"); };
+  if (tt && tl) { if (tab === "terminal") { on(tt); off(tl); } else { on(tl); off(tt); } }
+  const inputRow = document.getElementById("as-input-row");
+  if (inputRow) inputRow.classList.toggle("hidden", tab !== "terminal");
+  pollAgentSurface();
+  if (agentTermTimer) clearInterval(agentTermTimer);
+  agentTermTimer = setInterval(pollAgentSurface, tab === "terminal" ? 1500 : 3000);
+}
+
+async function pollAgentSurface() {
+  if (!selectedAgentId) return;
+  const out = document.getElementById("as-output");
+  const dot = document.getElementById("as-dot");
+  if (!out) return;
+  if (agentSurfaceTab === "terminal") {
+    let r = {};
+    try { r = await window.ceo.registryTerminal(selectedAgentId); } catch { r = {}; }
+    if (r && r.ok) {
+      out.textContent = r.output || "(empty)";
+      if (dot) dot.className = "w-2 h-2 rounded-full bg-emerald-500";
+    } else {
+      out.textContent = `Terminal unavailable: ${r ? r.reason : "unknown"}\n\nMount the agent (left panel) to start its session.`;
+      if (dot) dot.className = "w-2 h-2 rounded-full bg-neutral-600";
+    }
+  } else {
+    let r = {};
+    try { r = await window.ceo.meetingRoom(selectedAgentRoom); } catch { r = {}; }
+    const feed = (r && r.feed) || [];
+    out.textContent = feed.length
+      ? feed.map((e) => `[${e.speaker}] ${e.body}`).join("\n\n")
+      : `No activity in room "${selectedAgentRoom}" yet.`;
+  }
+  out.scrollTop = out.scrollHeight;
+}
+
+async function mountSelectedAgent() {
+  const msg = document.getElementById("agent-detail-msg");
+  if (msg) msg.textContent = "mounting…";
+  let r = {};
+  try { r = await window.ceo.registryMount(selectedAgentId); } catch (e) { r = { ok: false, reason: String(e) }; }
+  if (r && r.room) selectedAgentRoom = r.room;
+  if (!r || !r.ok) { if (msg) msg.textContent = "mount failed: " + (r ? r.reason : "unknown"); return; }
+  await loadRegistry();
+  const a = registryState.agents.find((x) => x.id === selectedAgentId);
+  if (a) { await renderAgentDetail(a); pollAgentSurface(); }
+}
+
+async function unmountSelectedAgent() {
+  const msg = document.getElementById("agent-detail-msg");
+  if (msg) msg.textContent = "unmounting…";
+  try { await window.ceo.registryUnmount(selectedAgentId); } catch { /* ignore */ }
+  await loadRegistry();
+  const a = registryState.agents.find((x) => x.id === selectedAgentId);
+  if (a) { await renderAgentDetail(a); pollAgentSurface(); }
+}
+
+async function sendAgentKeys() {
+  const input = document.getElementById("as-input");
+  if (!selectedAgentId || !input) return;
+  const text = input.value;
+  if (!text.trim()) return;
+  input.value = "";
+  await window.ceo.registryTerminalSend(selectedAgentId, text);
+  setTimeout(pollAgentSurface, 300);
+}
+
+// Agent surface buttons live in panel2 (outside the left panelContent that the rest of
+// the UI delegates on). Delegate on document so they stay live regardless of re-renders
+// or attach timing — the ✕ must ALWAYS close the panel.
+function wireAgentSurface() {
+  document.addEventListener("click", (e) => {
+    if (e.target.closest("#as-close")) { closeAgentSurface(); renderTeamPanel(); return; }
+    if (e.target.closest("#as-tab-terminal")) { setAgentSurfaceTab("terminal"); return; }
+    if (e.target.closest("#as-tab-logs")) { setAgentSurfaceTab("logs"); return; }
+    if (e.target.closest("#as-send")) { sendAgentKeys(); return; }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target && e.target.id === "as-input") { sendAgentKeys(); return; }
+    if (e.key === "Escape" && selectedAgentId) {
+      const surf = document.getElementById("agent-surface");
+      if (surf && !surf.classList.contains("hidden")) { closeAgentSurface(); renderTeamPanel(); }
+    }
+  });
+}
+
+async function renderChannelsView() {
+  setPanelTitle("Channels");
+  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading channels…</div>';
+  await loadRegistry();
+  const teams = registryState.teams;
+  const agents = registryState.agents;
+  const groupRooms = teams.map((t) => `
+    <button class="channel-item w-full text-left flex items-center gap-2 rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition" data-channel="team:${esc(t.name)}">
+      <span class="text-neutral-500">#</span><span>${esc(t.name)}</span>
+      <span class="ml-auto text-[10px] text-neutral-600">${(t.members || []).length} agents</span>
+    </button>`).join("") || '<div class="px-3 py-2 text-xs text-neutral-600">No team channels yet.</div>';
+  const dms = agents.map((a) => `
+    <button class="channel-item w-full text-left flex items-center gap-2 rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition" data-channel="dm:${esc(a.id)}">
+      <span class="text-neutral-500">◌</span><span>${esc(a.name || a.id)}</span>
+      <span class="ml-auto text-[10px] text-neutral-600">${esc(a.provider || "echo")}</span>
+    </button>`).join("") || '<div class="px-3 py-2 text-xs text-neutral-600">No agents in registry.</div>';
+  panelContent().innerHTML = `
+    <div class="space-y-4 max-w-2xl">
+      <div>
+        <div class="mb-1 px-1 text-[11px] uppercase tracking-wider text-neutral-500">Group channels</div>
+        <div class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-1">${groupRooms}</div>
+      </div>
+      <div>
+        <div class="mb-1 px-1 text-[11px] uppercase tracking-wider text-neutral-500">Direct messages</div>
+        <div class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-1">${dms}</div>
+      </div>
+      <div class="px-1 text-[11px] text-neutral-600">Channels will open a live room in the chat panel on the right. (Room wiring is the next step.)</div>
+    </div>`;
+}
+
+function stopNavMeetingPoll() { if (navMeetingTimer) { clearInterval(navMeetingTimer); navMeetingTimer = null; } }
+
+async function renderMeetingsView() {
+  setPanelTitle("Meetings");
+  stopNavMeetingPoll();
+  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading session setup…</div>';
+  await loadRegistry();
+  navMeetingOpts = { agents: registryState.agents, teams: registryState.teams };
+  const teams = navMeetingOpts.teams;
+  const agents = navMeetingOpts.agents;
+  const teamOpts = `<option value="">— pick a team —</option>` +
+    teams.map((t) => `<option value="${esc(t.name)}">${esc(t.name)} (${(t.members || []).length})</option>`).join("");
+  const agentChecks = agents.map((a) => `
+    <label class="flex items-center gap-2 text-xs text-neutral-300">
+      <input type="checkbox" class="nav-mtg-member accent-cyan-500" value="${esc(a.id)}" />
+      <span class="text-neutral-200">${esc(a.name || a.id)}</span>
+      <span class="text-[10px] text-neutral-500">${esc(a.provider || "echo")}${a.persona ? " · " + esc(a.persona) : ""}</span>
+    </label>`).join("") || '<div class="text-[11px] text-neutral-600">No agents in registry.</div>';
+  panelContent().innerHTML = `
+    <div class="space-y-4 max-w-3xl">
+      <div class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4 space-y-3">
+        <div class="text-sm font-semibold text-neutral-100">Working session</div>
+        <p class="text-[12px] leading-5 text-neutral-500">A meeting is a group room: a team works an agenda toward a goal and produces a written result. Pick a team (or members), give it a goal, and start.</p>
+        <label class="block text-xs text-neutral-400">Goal / agenda
+          <textarea id="nav-mtg-agenda" rows="2" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-cyan-500/50" placeholder="What should the team work out?"></textarea>
+        </label>
+        <label class="block text-xs text-neutral-400">Good outcome (optional)
+          <input id="nav-mtg-criteria" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-cyan-500/50" placeholder="What a good result looks like" />
+        </label>
+        <label class="block text-xs text-neutral-400">Team
+          <select id="nav-mtg-team" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-cyan-500/50">${teamOpts}</select>
+        </label>
+        <div class="text-xs text-neutral-400">Or pick members
+          <div class="mt-1 max-h-[160px] overflow-auto rounded-md border border-neutral-800 bg-neutral-950/40 p-2 space-y-1">${agentChecks}</div>
+        </div>
+        <label class="flex items-center gap-2 text-xs text-amber-300/90">
+          <input id="nav-mtg-paid" type="checkbox" class="accent-amber-500" /> Use real agents (devin/grok) — costs credits
+        </label>
+        <div class="flex items-center gap-2">
+          <button id="nav-mtg-start" class="text-sm bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-4 py-1.5 font-medium transition">Start session</button>
+          <span id="nav-mtg-msg" class="text-xs text-neutral-500"></span>
+        </div>
+      </div>
+      <div class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+        <div class="flex items-center gap-2 text-[11px] uppercase tracking-wider text-neutral-500">
+          <span>Transcript</span><span id="nav-mtg-room" class="font-mono text-neutral-400 normal-case"></span><span id="nav-mtg-state" class="ml-auto normal-case"></span>
+        </div>
+        <div id="nav-mtg-transcript" class="mt-2 space-y-2 text-sm"><div class="text-neutral-600">No session yet.</div></div>
+        <div id="nav-mtg-req" class="hidden mt-3 border-t border-neutral-800/60 pt-3">
+          <div class="text-[11px] uppercase tracking-wider text-emerald-400/80 mb-1">Result</div>
+          <div id="nav-mtg-req-body" class="prose prose-invert prose-sm max-w-none text-neutral-200"></div>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function startNavMeeting() {
+  const msg = $("#nav-mtg-msg");
+  const agenda = ($("#nav-mtg-agenda") && $("#nav-mtg-agenda").value || "").trim();
+  const criteria = ($("#nav-mtg-criteria") && $("#nav-mtg-criteria").value || "").trim();
+  const team = ($("#nav-mtg-team") && $("#nav-mtg-team").value) || "";
+  const members = Array.from(document.querySelectorAll(".nav-mtg-member:checked")).map((c) => c.value).join(",");
+  const allowPaid = !!($("#nav-mtg-paid") && $("#nav-mtg-paid").checked);
+  if (!agenda) { if (msg) msg.textContent = "goal required"; return; }
+  if (!team && !members) { if (msg) msg.textContent = "pick a team or members"; return; }
+  if (msg) msg.textContent = "starting…";
+  const info = { room: `session-${Date.now()}`, agenda, criteria, allowPaid };
+  if (team) info.team = team; else info.members = members;
+  let r = {};
+  try { r = await window.ceo.meetingStart(info); } catch (e) { r = { ok: false, reason: String(e) }; }
+  if (!r || !r.ok) { if (msg) msg.textContent = `failed: ${r ? r.reason : "unknown"}`; return; }
+  if (msg) msg.textContent = "running — watch below";
+  navMeetingRoom = r.room;
+  const lbl = $("#nav-mtg-room"); if (lbl) lbl.textContent = r.room;
+  pollNavMeeting();
+  stopNavMeetingPoll();
+  navMeetingTimer = setInterval(pollNavMeeting, 2500);
+}
+
+async function pollNavMeeting() {
+  if (!navMeetingRoom || !window.ceo.meetingRoom) return;
+  let r = {};
+  try { r = await window.ceo.meetingRoom(navMeetingRoom); } catch { return; }
+  if (!r || !r.ok) return;
+  const host = $("#nav-mtg-transcript");
+  if (host) {
+    const feed = r.feed || [];
+    host.innerHTML = feed.length ? feed.map((it) => {
+      const isFac = /facilitator|orchestrator/i.test(it.speaker);
+      return `<div class="rounded-lg border ${isFac ? "border-cyan-500/30 bg-cyan-950/10" : "border-neutral-800 bg-neutral-900/50"} p-2.5">
+        <div class="text-[11px] font-medium ${isFac ? "text-cyan-300" : "text-neutral-300"}">${esc(it.speaker)}</div>
+        <div class="mt-1 whitespace-pre-wrap text-[12px] text-neutral-300">${esc(it.body)}</div>
+      </div>`;
+    }).join("") : `<div class="text-neutral-600">Waiting for the session to begin…</div>`;
+  }
+  const state = $("#nav-mtg-state");
+  if (state) state.innerHTML = r.running ? `<span class="text-amber-300">● running</span>` : `<span class="text-emerald-400">✓ complete</span>`;
+  const reqWrap = $("#nav-mtg-req"), reqBody = $("#nav-mtg-req-body");
+  if (reqWrap && reqBody) {
+    if (r.requirements) { reqWrap.classList.remove("hidden"); reqBody.innerHTML = window.marked ? window.marked.parse(r.requirements) : esc(r.requirements); }
+    else reqWrap.classList.add("hidden");
+  }
+  if (!r.running) stopNavMeetingPoll();
+}
+
+async function openView(view) {
+  studioView = view || "domain";
+  setActiveNav(studioView);
+  if (studioView !== "meetings") stopNavMeetingPoll();
+  closeAgentSurface();
+  switch (studioView) {
+    case "board": return renderBoardView();
+    case "tasks": return renderTasksView();
+    case "teams": return renderTeamsView();
+    case "channels": return renderChannelsView();
+    case "meetings": return renderMeetingsView();
+    case "domain":
+    default: return renderStudioBoard(currentDomain);
+  }
+}
+
 window.ceoUI = {
   appendStream, setAgentState, setVoiceStatus, renderMeter,
   hasProject: () => !!currentProject,
@@ -848,7 +1501,20 @@ window.ceoUI = {
     await window.ceo.setDomain(currentDomain);
     await refreshFileTree(currentDomain);
     await renderStudioBoard(currentDomain);
+    window.CEOConvai?.syncContext?.(`domain → ${currentDomain}`);
   },
+  // Voice agent render control: drive the left nav and the Team panel.
+  openView: (view) => openView(view),
+  async openAgentDetail(idOrName) {
+    await loadRegistry();
+    const a = registryState.agents.find((x) => x.id === idOrName || x.name === idOrName);
+    if (!a) return false;
+    studioView = "teams";
+    setActiveNav("teams");
+    await openAgentDetail(a.id);
+    return true;
+  },
+  refreshTeam() { if (studioView === "teams") renderTeamPanel(); },
 };
 
 // --- wiring ---
@@ -868,6 +1534,7 @@ $("#domain-switcher").addEventListener("change", async (e) => {
   await window.ceo.setDomain(currentDomain);
   await refreshFileTree(currentDomain);
   await renderStudioBoard(currentDomain);
+  window.CEOConvai?.syncContext?.(`domain → ${currentDomain}`);
 });
 $("#file-tree-refresh").addEventListener("click", () => refreshFileTree(currentDomain));
 $("#file-pane-toggle").addEventListener("click", () => setFilePaneOpen(!filePaneOpen));
@@ -975,6 +1642,56 @@ panelContent().addEventListener("click", async (e) => {
     }
   }
 });
+// Studio nav rail: each item opens its workspace panel.
+document.querySelectorAll("#studio-nav .nav-item").forEach((b) => {
+  b.addEventListener("click", () => openView(b.dataset.view));
+});
+// Meetings + Team panel controls (delegated, since panels re-render on open).
+panelContent().addEventListener("click", async (e) => {
+  if (e.target.closest("#nav-mtg-start")) { startNavMeeting(); return; }
+  // Team panel: roster + team management
+  if (e.target.closest("#agent-new")) { openAgentModal(null); return; }
+  const card = e.target.closest(".team-agent-card");
+  if (card) { openAgentDetail(card.dataset.agent); return; }
+  // Agent detail view buttons
+  if (e.target.closest("#agent-back")) { closeAgentSurface(); renderTeamPanel(); return; }
+  if (e.target.closest("#agent-edit")) { openAgentModal(selectedAgentId); return; }
+  if (e.target.closest("#agent-mount")) { mountSelectedAgent(); return; }
+  if (e.target.closest("#agent-unmount")) { unmountSelectedAgent(); return; }
+  const remove = e.target.closest(".team-remove");
+  if (remove) {
+    const team = registryState.teams.find((x) => x.name === remove.dataset.team);
+    const members = (team ? team.members : []).filter((m) => m !== remove.dataset.agent);
+    await teamSetMembers(remove.dataset.team, members);
+    return;
+  }
+  const delTeam = e.target.closest(".team-delete");
+  if (delTeam) {
+    if (!confirm(`Delete team "${delTeam.dataset.team}"?`)) return;
+    const r = await window.ceo.registryDeleteTeam(delTeam.dataset.team);
+    if (r && r.ok) { await loadRegistry(); renderTeamPanel(); }
+    return;
+  }
+  if (e.target.closest("#team-new")) {
+    const name = prompt("New team name:");
+    if (name && name.trim()) await teamSetMembers(name.trim(), []);
+    return;
+  }
+});
+panelContent().addEventListener("change", async (e) => {
+  if (e.target && e.target.id === "nav-mtg-team") {
+    const t = ((navMeetingOpts && navMeetingOpts.teams) || []).find((x) => x.name === e.target.value);
+    const ids = new Set((t && t.members) || []);
+    document.querySelectorAll(".nav-mtg-member").forEach((c) => { c.checked = ids.has(c.value); });
+    return;
+  }
+  if (e.target && e.target.classList && e.target.classList.contains("team-add") && e.target.value) {
+    const team = registryState.teams.find((x) => x.name === e.target.dataset.team);
+    const members = [...(team ? team.members : []), e.target.value];
+    await teamSetMembers(e.target.dataset.team, members);
+  }
+});
+
 $("#send").addEventListener("click", send);
 $("#chat-input").addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
 document.addEventListener("keydown", (e) => {
@@ -1095,5 +1812,8 @@ setInterval(async () => {
 
 (async function init() {
   setAgentState("idle");
+  setActiveNav(studioView);
+  wireAgentSurface();
+  renderArchitectureOverview();
   await refreshProjects();
 })();
