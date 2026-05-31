@@ -24,6 +24,7 @@ const domains = require("./core/domains");
 const user = require("./core/user");
 const soul = require("./core/soul");
 const hermes = require("./core/hermes");
+const meetings = require("./core/meetings");
 const aguiServer = require("./core/agui-server");
 const jobs = require("./core/jobs");
 const ticketPlanner = require("./core/ticket-planner");
@@ -998,6 +999,13 @@ ipcMain.handle("hermes:assignees", (_e, board) => hermes.assignees({ board }));
 ipcMain.handle("hermes:comment_task", (_e, commentInfo) => hermes.addComment(commentInfo));
 // AGUI: the local AG-UI server URL the renderer's HttpAgent connects to.
 ipcMain.handle("agui:url", () => aguiServer.url());
+
+// --- Meetings (A2A meeting engine in the harness) ---
+ipcMain.handle("meetings:options", () => meetings.options(session.project && session.project.path));
+ipcMain.handle("meetings:start", (_e, info = {}) =>
+  meetings.start({ ...info, projectPath: session.project && session.project.path }));
+ipcMain.handle("meetings:room", (_e, room) =>
+  meetings.room({ room, projectPath: session.project && session.project.path }));
 
 // --- IPC: local agent job queue ---
 ipcMain.handle("jobs:create_ticket_pack", async (_e, { board, ticketId, domain, instructions } = {}) => {

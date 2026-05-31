@@ -135,6 +135,7 @@
       <div class="flex items-center gap-1 bg-neutral-800/50 rounded-md p-0.5">
         <button id="tab-kanban" class="tab-btn px-3 py-1 text-xs font-medium rounded-md transition bg-neutral-700 text-neutral-100">Kanban</button>
         <button id="tab-agents" class="tab-btn px-3 py-1 text-xs font-medium rounded-md transition text-neutral-400 hover:text-neutral-200">Agents</button>
+        <button id="tab-meetings" class="tab-btn px-3 py-1 text-xs font-medium rounded-md transition text-neutral-400 hover:text-neutral-200">Meetings</button>
         <button id="tab-config" class="tab-btn px-3 py-1 text-xs font-medium rounded-md transition text-neutral-400 hover:text-neutral-200">Config</button>
       </div>
       
@@ -245,6 +246,53 @@
         <div class="px-3 py-1.5 text-[11px] uppercase tracking-wider text-neutral-500 border-b border-neutral-800/60">Configuration</div>
         <div class="flex-1 flex items-center justify-center">
           <div class="text-neutral-600 text-sm">Config panel moved to overlay (click Config in header)</div>
+        </div>
+      </div>
+
+      <!-- Meetings section: run an agenda-driven A2A meeting of agent members -->
+      <div id="section-meetings" class="hidden flex-1 min-w-0 flex">
+        <!-- Left: setup form -->
+        <div class="w-[360px] shrink-0 border-r border-neutral-800/60 flex flex-col overflow-auto p-4 space-y-3">
+          <div class="text-[11px] uppercase tracking-wider text-neutral-500">New meeting</div>
+          <label class="block text-xs text-neutral-400">Room name
+            <input id="mtg-room" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-cyan-500/50" placeholder="requirements-sync" />
+          </label>
+          <label class="block text-xs text-neutral-400">Agenda
+            <textarea id="mtg-agenda" rows="3" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-cyan-500/50" placeholder="What should the team work out?"></textarea>
+          </label>
+          <label class="block text-xs text-neutral-400">Good outcome (criteria)
+            <textarea id="mtg-criteria" rows="2" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-cyan-500/50" placeholder="What a good result looks like (optional)"></textarea>
+          </label>
+          <label class="block text-xs text-neutral-400">Team (optional)
+            <select id="mtg-team" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-cyan-500/50"></select>
+          </label>
+          <div class="text-xs text-neutral-400">Members
+            <div id="mtg-members" class="mt-1 space-y-1 max-h-[220px] overflow-auto rounded-md border border-neutral-800 bg-neutral-950/40 p-2"></div>
+            <div class="mt-1 text-[10px] text-neutral-600">Pick a team to auto-select, or check members individually.</div>
+          </div>
+          <label class="flex items-center gap-2 text-xs text-amber-300/90">
+            <input id="mtg-paid" type="checkbox" class="accent-amber-500" />
+            Use real agents (devin/grok) — costs credits
+          </label>
+          <div class="flex items-center gap-2">
+            <button id="mtg-start" class="text-sm bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-4 py-1.5 font-medium transition">Start meeting</button>
+            <span id="mtg-msg" class="text-xs text-neutral-500"></span>
+          </div>
+        </div>
+        <!-- Right: live transcript + requirements -->
+        <div class="flex-1 min-w-0 flex flex-col">
+          <div class="px-3 py-1.5 flex items-center gap-2 text-[11px] uppercase tracking-wider text-neutral-500 border-b border-neutral-800/60">
+            <span>Meeting Room</span>
+            <span id="mtg-room-label" class="font-mono text-neutral-400 normal-case"></span>
+            <span id="mtg-state" class="ml-auto normal-case"></span>
+          </div>
+          <div id="mtg-transcript" class="flex-1 overflow-auto p-4 space-y-2 text-sm">
+            <div class="text-neutral-600">No meeting yet. Set an agenda and members, then Start.</div>
+          </div>
+          <div id="mtg-requirements" class="hidden border-t border-neutral-800/60 max-h-[40%] overflow-auto p-4">
+            <div class="text-[11px] uppercase tracking-wider text-emerald-400/80 mb-2">Synthesized requirements</div>
+            <div id="mtg-requirements-body" class="prose prose-invert prose-sm max-w-none text-neutral-200"></div>
+          </div>
         </div>
       </div>
     </div>

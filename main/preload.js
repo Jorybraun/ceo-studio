@@ -72,6 +72,10 @@ contextBridge.exposeInMainWorld("ceo", {
   ceoCommentTask: (commentInfo) => ipcRenderer.invoke("hermes:comment_task", commentInfo),
   // AGUI: local AG-UI server URL the renderer's HttpAgent connects to.
   aguiUrl: () => ipcRenderer.invoke("agui:url"),
+  // Meetings (A2A meeting engine)
+  meetingOptions: () => ipcRenderer.invoke("meetings:options"),
+  meetingStart: (info) => ipcRenderer.invoke("meetings:start", info),
+  meetingRoom: (room) => ipcRenderer.invoke("meetings:room", room),
   costStatus: () => ipcRenderer.invoke("cost:status"),
   costKill: () => ipcRenderer.invoke("cost:kill"),
   costResume: () => ipcRenderer.invoke("cost:resume"),

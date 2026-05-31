@@ -381,10 +381,10 @@
     }
     
     // Show/hide sections
-    $("section-kanban").classList.add("hidden");
-    $("section-agents").classList.add("hidden");
-    $("section-config").classList.add("hidden");
-    $(`section-${tabName}`).classList.remove("hidden");
+    ["section-kanban", "section-agents", "section-config", "section-meetings"].forEach((s) => {
+      const el = $(s); if (el) el.classList.add("hidden");
+    });
+    const sec = $(`section-${tabName}`); if (sec) sec.classList.remove("hidden");
     
     // Show/hide control bars
     $("kanban-controls").classList.add("hidden");
@@ -394,6 +394,108 @@
     
     // Load data for the tab
     if (tabName === "agents") loadAgents();
+    if (tabName === "meetings") loadMeetings(); else stopMeetingPoll();
+  }
+
+  // --- Meetings tab ---
+  let meetingOpts = null;       // {agents, teams, personas}
+  let meetingPollTimer = null;
+  let activeMeetingRoom = null;
+
+  function stopMeetingPoll() {
+    if (meetingPollTimer) { clearInterval(meetingPollTimer); meetingPollTimer = null; }
+  }
+
+  async function loadMeetings() {
+    if (!ceo.meetingOptions) return;
+    if (!meetingOpts) {
+      try { meetingOpts = await ceo.meetingOptions(); } catch { meetingOpts = { agents: [], teams: [] }; }
+    }
+    const teamSel = $("mtg-team");
+    if (teamSel) {
+      teamSel.innerHTML = `<option value="">— none (pick members) —</option>` +
+        (meetingOpts.teams || []).map((t) => `<option value="${esc(t.name)}">${esc(t.name)} (${(t.members || []).length})</option>`).join("");
+    }
+    renderMeetingMembers();
+  }
+
+  function renderMeetingMembers(selectedIds) {
+    const host = $("mtg-members");
+    if (!host) return;
+    const agents = (meetingOpts && meetingOpts.agents) || [];
+    if (!agents.length) {
+      host.innerHTML = `<div class="text-[11px] text-neutral-600">No agents in registry (agents.json).</div>`;
+      return;
+    }
+    const sel = new Set(selectedIds || []);
+    host.innerHTML = agents.map((a) => `
+      <label class="flex items-center gap-2 text-xs text-neutral-300">
+        <input type="checkbox" class="mtg-member accent-cyan-500" value="${esc(a.id)}" ${sel.has(a.id) ? "checked" : ""} />
+        <span class="font-medium text-neutral-200">${esc(a.id)}</span>
+        <span class="text-[10px] text-neutral-500">${esc(a.provider || "echo")}${a.persona ? " · " + esc(a.persona) : ""}</span>
+      </label>`).join("");
+  }
+
+  function selectedMemberIds() {
+    return Array.from(document.querySelectorAll(".mtg-member:checked")).map((c) => c.value);
+  }
+
+  async function startMeeting() {
+    const msg = $("mtg-msg");
+    const room = ($("mtg-room") && $("mtg-room").value || "").trim();
+    const agenda = ($("mtg-agenda") && $("mtg-agenda").value || "").trim();
+    const criteria = ($("mtg-criteria") && $("mtg-criteria").value || "").trim();
+    const team = ($("mtg-team") && $("mtg-team").value) || "";
+    const members = selectedMemberIds().join(",");
+    const allowPaid = !!($("mtg-paid") && $("mtg-paid").checked);
+    if (!agenda) { if (msg) msg.textContent = "agenda required"; return; }
+    if (!team && !members) { if (msg) msg.textContent = "pick a team or members"; return; }
+    if (msg) msg.textContent = "starting…";
+    const info = { room: room || `meeting-${Date.now()}`, agenda, criteria, allowPaid };
+    if (team) info.team = team; else info.members = members;
+    let r = {};
+    try { r = await ceo.meetingStart(info); } catch (e) { r = { ok: false, reason: String(e) }; }
+    if (!r || !r.ok) { if (msg) msg.textContent = `failed: ${r ? r.reason : "unknown"}`; return; }
+    if (msg) msg.textContent = "running — watch the transcript →";
+    activeMeetingRoom = r.room;
+    const lbl = $("mtg-room-label"); if (lbl) lbl.textContent = r.room;
+    pollMeetingRoom();
+    stopMeetingPoll();
+    meetingPollTimer = setInterval(pollMeetingRoom, 2500);
+  }
+
+  async function pollMeetingRoom() {
+    if (!activeMeetingRoom || !ceo.meetingRoom) return;
+    let r = {};
+    try { r = await ceo.meetingRoom(activeMeetingRoom); } catch { return; }
+    if (!r || !r.ok) return;
+    const host = $("mtg-transcript");
+    if (host) {
+      const feed = r.feed || [];
+      host.innerHTML = feed.length ? feed.map((e) => {
+        const isFac = /facilitator|orchestrator/i.test(e.speaker);
+        return `<div class="rounded-lg border ${isFac ? "border-cyan-500/30 bg-cyan-950/10" : "border-neutral-800 bg-neutral-900/50"} p-2.5">
+          <div class="text-[11px] font-medium ${isFac ? "text-cyan-300" : "text-neutral-300"}">${esc(e.speaker)}</div>
+          <div class="mt-1 whitespace-pre-wrap text-[12px] text-neutral-300">${esc(e.body)}</div>
+        </div>`;
+      }).join("") : `<div class="text-neutral-600">Waiting for the meeting to begin…</div>`;
+    }
+    const state = $("mtg-state");
+    if (state) {
+      state.innerHTML = r.running
+        ? `<span class="text-amber-300">● running</span>`
+        : `<span class="text-emerald-400">✓ complete</span>`;
+    }
+    const reqWrap = $("mtg-requirements"), reqBody = $("mtg-requirements-body");
+    if (reqWrap && reqBody) {
+      if (r.requirements) {
+        reqWrap.classList.remove("hidden");
+        reqBody.innerHTML = window.marked ? window.marked.parse(r.requirements) : esc(r.requirements);
+      } else {
+        reqWrap.classList.add("hidden");
+      }
+    }
+    if (!r.running) stopMeetingPoll();
   }
 
   // --- Renderers ---
@@ -746,11 +848,22 @@
     const tabKanban = $("tab-kanban");
     const tabAgents = $("tab-agents");
     const tabConfig = $("tab-config");
+    const tabMeetings = $("tab-meetings");
     if (tabKanban) tabKanban.addEventListener("click", () => switchTab("kanban"));
     if (tabAgents) tabAgents.addEventListener("click", () => switchTab("agents"));
+    if (tabMeetings) tabMeetings.addEventListener("click", () => switchTab("meetings"));
     if (tabConfig) tabConfig.addEventListener("click", () => {
       switchTab("config");
       openConfig();
+    });
+
+    // Meetings wiring
+    const mtgStart = $("mtg-start");
+    if (mtgStart) mtgStart.addEventListener("click", startMeeting);
+    const mtgTeam = $("mtg-team");
+    if (mtgTeam) mtgTeam.addEventListener("change", (e) => {
+      const t = (meetingOpts && meetingOpts.teams || []).find((x) => x.name === e.target.value);
+      renderMeetingMembers(t ? t.members : []);
     });
     
     // Agent filter
