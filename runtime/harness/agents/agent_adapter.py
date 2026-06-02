@@ -99,6 +99,10 @@ def dispatch(provider_name: str, agent: str, room: str, task: str, *,
         "model": model, "session_id": res.session_id, "created_at": time.time(),
     })
     post_to_room(room, speaker_agent, res.reply)
+    if getattr(res, "error", False):
+        return {"ok": False, "reply": res.reply, "session_id": res.session_id,
+                "provider": provider_name, "seconds": round(time.time() - t0, 1),
+                "error": True}
     return {"ok": True, "reply": res.reply, "session_id": res.session_id,
             "provider": provider_name, "seconds": round(time.time() - t0, 1)}
 
@@ -120,7 +124,66 @@ def tell(agent: str, room: str, message: str, *, timeout: int = 600) -> dict:
     state["session_id"] = res.session_id or sid
     _save_state(room, agent, state)
     post_to_room(room, speaker_agent, res.reply)
+    if getattr(res, "error", False):
+        return {"ok": False, "reply": res.reply, "session_id": state["session_id"],
+                "provider": provider_name, "error": True}
     return {"ok": True, "reply": res.reply, "session_id": state["session_id"], "provider": provider_name}
+
+
+def converse(agent: str, room: str, message: str, *, provider: Optional[str] = None,
+             model: Optional[str] = None, persona: Optional[str] = None,
+             timeout: int = 600, post: bool = True,
+             interactive: bool = False) -> dict:
+    """One conversational turn with an agent *as a room participant*.
+
+    Same brain + same session substrate as dispatch()/tell() (and therefore the
+    A2A server executor in a2a_runtime), but tuned for a live chat room:
+      - resumes the agent's existing (room, agent) session if there is one,
+        else starts a fresh one (prepending the persona preamble on first turn);
+      - does NOT emit an `Orchestrator @agent TASK:` line — the human's message
+        already lives in the room. The agent's reply is posted as the agent's
+        own voice, and only when `post` is True (so callers can drop a `PASS`).
+    Guardrail-gated exactly like dispatch(). Returns
+    {ok, reply, session_id, provider} or {ok:False, reason}.
+    """
+    state = _load_state(room, agent)
+    sid = state.get("session_id")
+    provider_name = state.get("provider") or provider or "echo"
+    prov = _providers.get_provider(provider_name)
+
+    allowed, reason = cost_limits.can_spawn(
+        f"{provider_name}:{agent}", interactive=interactive,
+        paid=getattr(prov, "paid", False))
+    if not allowed:
+        return {"ok": False, "refused": True, "reason": reason}
+
+    wd = _workdir(room, agent)
+    if sid:
+        res = prov.tell(agent, message, session_id=sid,
+                        model=state.get("model") or model, workdir=wd, timeout=timeout)
+    else:
+        task = message
+        if persona:
+            from . import personas as personas_mod
+            preamble = personas_mod.persona_preamble(persona)
+            if preamble:
+                task = f"{preamble}\n{message}"
+        res = prov.dispatch(agent, task, model=model, workdir=wd, timeout=timeout)
+    cost_limits.record_spawn(f"{provider_name}:{agent}")
+
+    new_sid = res.session_id or sid
+    _save_state(room, agent, {
+        "agent": agent, "room": room, "provider": provider_name,
+        "model": state.get("model") or model, "session_id": new_sid,
+        "created_at": state.get("created_at") or time.time(),
+    })
+    reply = (res.reply or "").strip()
+    if post and reply:
+        post_to_room(room, agent, reply)
+    if getattr(res, "error", False):
+        return {"ok": False, "reply": reply, "session_id": new_sid,
+                "provider": provider_name, "error": True}
+    return {"ok": True, "reply": reply, "session_id": new_sid, "provider": provider_name}
 
 
 def list_agents(room: str) -> list[dict]:

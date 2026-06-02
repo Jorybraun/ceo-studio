@@ -1021,6 +1021,7 @@ function collectDomainWizardDraft() {
     overarchingGoal: $("#domain-goal")?.value.trim() || "",
     boundaries: splitLines($("#domain-responsibilities")?.value || ""),
     features: splitLines($("#domain-features")?.value || ""),
+    relationships: splitLines($("#domain-relationships")?.value || ""),
     coreAgents: [...document.querySelectorAll('input[name="domain-agent"]:checked')].map((x) => x.value).filter(Boolean),
     kanbanBoard: $("#domain-board")?.value || "",
     relativePath: $("#domain-path")?.value.trim() || "",
@@ -1035,6 +1036,7 @@ function applyDomainArchitectDraftToForm(session) {
   set("domain-goal", draft.overarchingGoal);
   set("domain-responsibilities", (draft.boundaries || draft.responsibilities || []).join("\n"));
   set("domain-features", (draft.features || draft.activeEpics || []).join("\n"));
+  set("domain-relationships", (draft.relationships || draft.interfaces || []).join("\n"));
   set("domain-path", draft.relativePath || (draft.name ? `domains/${slugifyName(draft.name)}` : ""));
   const board = $("#domain-board");
   if (board && draft.kanbanBoard) board.value = draft.kanbanBoard;
@@ -1057,27 +1059,39 @@ function renderDomainArchitectPanel(session = domainArchitectSession) {
   }
   const outline = session.outline || [];
   const current = session.currentQuestion || "Review the definition.";
+  const active = outline.find((item) => item.focused);
+  const transcript = session.transcript || [];
+  const deepDives = session.deepDives || [];
   host.innerHTML = `<div class="rounded-2xl border border-cyan-500/20 bg-cyan-950/10 p-4">
     <div class="flex items-center gap-2">
       <div class="text-[10px] uppercase tracking-wider text-cyan-300/80">Domain Architect</div>
       <span class="ml-auto rounded border border-neutral-700 bg-neutral-950/60 px-1.5 py-0.5 text-[10px] text-neutral-400">${session.readyToConfirm ? "ready" : "interviewing"}</span>
     </div>
     <div class="mt-3 rounded-xl border border-neutral-800 bg-neutral-950/50 p-3">
+      ${active ? `<div class="mb-2 rounded-lg border border-cyan-500/30 bg-cyan-950/20 px-2 py-1 text-[11px] text-cyan-100">Focused: ${esc(active.label)}</div>` : ""}
       <div class="text-xs font-medium text-neutral-200">${esc(current)}</div>
       <textarea id="domain-architect-answer" rows="4" class="mt-2 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" placeholder="Answer this question, then record it..."></textarea>
-      <button id="domain-architect-answer-save" ${session.readyToConfirm ? "disabled" : ""} class="mt-2 rounded-md border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800 disabled:opacity-40">Record answer</button>
+      <button id="domain-architect-answer-save" ${session.readyToConfirm && !active ? "disabled" : ""} class="mt-2 rounded-md border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800 disabled:opacity-40">Record answer</button>
     </div>
     <div class="mt-3 space-y-1.5">
-      ${outline.map((item) => `<div class="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950/45 px-2 py-1.5">
+      ${outline.map((item) => `<button class="domain-architect-outline w-full text-left flex items-center gap-2 rounded-lg border ${item.focused ? "border-cyan-500/60 bg-cyan-950/25" : "border-neutral-800 bg-neutral-950/45"} px-2 py-1.5 hover:border-cyan-500/40" data-field="${esc(item.key)}">
         <span class="h-2 w-2 rounded-full ${item.complete ? "bg-emerald-500" : "bg-amber-500"}"></span>
-        <span class="min-w-0 flex-1 truncate text-xs text-neutral-300">${esc(item.label)}</span>
+        <span class="min-w-0 flex-1">
+          <span class="block truncate text-xs text-neutral-300">${esc(item.label)}</span>
+          <span class="block truncate text-[10px] text-neutral-600">${esc(Array.isArray(item.value) ? item.value.join(", ") : item.value)}</span>
+        </span>
         <span class="text-[10px] text-neutral-600">${item.complete ? "captured" : "missing"}</span>
-      </div>`).join("")}
+      </button>`).join("")}
     </div>
     <div class="mt-3 flex flex-wrap gap-2">
       <button id="domain-architect-apply" class="rounded-md border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800">Apply draft</button>
       <button id="domain-architect-ask" class="rounded-md border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800">Ask Hermes</button>
+      <button id="domain-architect-deep-dive" ${active ? "" : "disabled"} class="rounded-md border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800 disabled:opacity-40">Deep dive</button>
       <button id="domain-architect-confirm" ${session.readyToConfirm ? "" : "disabled"} class="rounded-md bg-cyan-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-cyan-500 disabled:opacity-40">Confirm & create</button>
+    </div>
+    <div class="mt-3 grid grid-cols-2 gap-2 text-[10px] text-neutral-500">
+      <div class="rounded-lg border border-neutral-800 bg-neutral-950/35 px-2 py-1">Transcript turns: ${transcript.length}</div>
+      <div class="rounded-lg border border-neutral-800 bg-neutral-950/35 px-2 py-1">Deep dives: ${deepDives.length}</div>
     </div>
     <div id="domain-architect-msg" class="mt-2 min-h-4 text-[10px] text-neutral-500">${session.missing?.length ? `Missing: ${session.missing.join(", ")}` : "Ready for confirmation."}</div>
   </div>`;
@@ -1093,6 +1107,17 @@ async function startDomainArchitectInterview() {
   domainArchitectSession = r.session;
   renderDomainArchitectPanel();
   setVoiceStatus("Domain Architect interview started.");
+}
+
+async function focusDomainArchitectSection(field) {
+  if (!domainArchitectSession || !field || !window.ceo.domainArchitectFocus) return;
+  const r = await window.ceo.domainArchitectFocus({ id: domainArchitectSession.id, field });
+  if (!r || !r.ok) {
+    setVoiceStatus(`Domain Architect focus failed: ${r ? r.reason : "unknown"}`);
+    return;
+  }
+  domainArchitectSession = r.session;
+  renderDomainArchitectPanel();
 }
 
 async function saveDomainArchitectAnswer() {
@@ -1111,6 +1136,28 @@ async function saveDomainArchitectAnswer() {
   domainArchitectSession = r.session;
   applyDomainArchitectDraftToForm(domainArchitectSession);
   renderDomainArchitectPanel();
+}
+
+async function captureDomainArchitectDeepDive() {
+  const msg = $("#domain-architect-msg");
+  const note = $("#domain-architect-answer")?.value.trim() || "";
+  if (!domainArchitectSession || !window.ceo.domainArchitectDeepDive) return;
+  if (!domainArchitectSession.activeFocus) {
+    if (msg) msg.textContent = "Select an outline section first.";
+    return;
+  }
+  const r = await window.ceo.domainArchitectDeepDive({
+    id: domainArchitectSession.id,
+    field: domainArchitectSession.activeFocus,
+    note,
+  });
+  if (!r || !r.ok) {
+    if (msg) msg.textContent = `deep dive failed: ${r ? r.reason : "unknown"}`;
+    return;
+  }
+  domainArchitectSession = r.session;
+  renderDomainArchitectPanel();
+  setVoiceStatus("Deep dive captured as an Agenda Item proposal.");
 }
 
 async function askHermesDomainArchitect() {
@@ -1221,6 +1268,10 @@ async function openDomainWizard(seed = {}) {
           <span class="text-[10px] uppercase tracking-wider text-neutral-600">Initial features / capabilities</span>
           <textarea id="domain-features" rows="4" placeholder="One per line: handoff workflow, meeting artifact flow, scheduling integration..." class="mt-2 w-full rounded-xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-neutral-100 outline-none focus:border-cyan-500">${esc((seed.features || seed.initialFeatures || []).join("\n"))}</textarea>
         </label>
+        <label class="block">
+          <span class="text-[10px] uppercase tracking-wider text-neutral-600">Relationships / dependencies</span>
+          <textarea id="domain-relationships" rows="3" placeholder="One per line: domains, boards, agents, systems, or teams this connects to..." class="mt-2 w-full rounded-xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-neutral-100 outline-none focus:border-cyan-500">${esc((seed.relationships || seed.interfaces || []).join("\n"))}</textarea>
+        </label>
       </section>
 
       <aside class="space-y-3">
@@ -1261,6 +1312,7 @@ async function saveDomainFromWizard() {
   const overarchingGoal = $("#domain-goal")?.value.trim() || "";
   const responsibilities = splitLines($("#domain-responsibilities")?.value || "");
   const features = splitLines($("#domain-features")?.value || "");
+  const relationships = splitLines($("#domain-relationships")?.value || "");
   const coreAgents = [...document.querySelectorAll('input[name="domain-agent"]:checked')].map((x) => x.value).filter(Boolean);
   const kanbanBoard = $("#domain-board")?.value || null;
   const relativePath = $("#domain-path")?.value.trim() || `domains/${slugifyName(name)}`;
@@ -1274,6 +1326,7 @@ async function saveDomainFromWizard() {
     priorities: overarchingGoal ? [overarchingGoal] : [],
     activeEpics: features,
     features,
+    relationships,
     boundaries: responsibilities,
     responsibilities,
     coreAgents,
@@ -1430,12 +1483,16 @@ async function createTask(boardOverride = null) {
 // --- Studio nav rail: the left rail opens workspace panels --------------
 // Each nav item renders a view into the main content panel (#panel-content-body).
 // Views: domain (existing planning board), board (Kanban), tasks (flat list),
-// teams (registry teams), channels (rooms/DMs), meetings (working session).
+// agents (registry roster), teams (registry teams), channels (rooms/DMs),
+// meetings (working session).
 let studioView = "domain";
 let navMeetingOpts = null;     // cached {agents, teams, personas} for the meetings view
 let navMeetingRoom = null;
 let navMeetingTimer = null;
 let navMeetingMeta = null;
+let navMeetingCreateOpen = false;
+let navMeetingPastRooms = [];
+let navMeetingScheduled = [];
 const NAV_COL_ORDER = ["planning", "triage", "bug", "todo", "ready", "running", "blocked", "scheduled", "review", "done"];
 
 function setActiveNav(view) {
@@ -1512,8 +1569,9 @@ async function renderTasksView() {
     </div>`).join("")}</div>`;
 }
 
-// --- Registry (agents + teams) — the single source of truth for the Team panel.
+// --- Registry (agents + teams) — single source of truth for Agents/Teams.
 let registryState = { agents: [], teams: [], personas: [], providers: [], models: {} };
+let meetingRoomsState = [];
 
 async function loadRegistry() {
   const [reg, per, prov, mods] = await Promise.all([
@@ -1538,17 +1596,22 @@ function agentSubtitle(a) {
   return `${persona} · ${brain}`;
 }
 
-async function renderTeamsView() {
-  setPanelTitle("Team");
-  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading team…</div>';
+async function renderAgentsView() {
+  setPanelTitle("Agents");
+  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading agents...</div>';
   await loadRegistry();
-  renderTeamPanel();
+  renderAgentsPanel();
 }
 
-function renderTeamPanel() {
-  const { agents, teams } = registryState;
-  const agentById = new Map(agents.map((a) => [a.id, a]));
+async function renderTeamsView() {
+  setPanelTitle("Teams");
+  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading teams...</div>';
+  await loadRegistry();
+  renderTeamsPanel();
+}
 
+function renderAgentsPanel() {
+  const { agents } = registryState;
   const roster = agents.length ? agents.map((a) => `
     <button class="team-agent-card text-left rounded-xl border border-neutral-800 bg-neutral-900/60 p-3 hover:border-cyan-500/40 transition" data-agent="${esc(a.id)}">
       <div class="flex items-center gap-2">
@@ -1560,6 +1623,20 @@ function renderTeamPanel() {
       ${(a.capabilities || []).length ? `<div class="mt-2 flex flex-wrap gap-1">${a.capabilities.slice(0, 3).map((c) => `<span class="text-[9px] bg-neutral-800 text-neutral-400 px-1.5 py-0.5 rounded">${esc(c)}</span>`).join("")}</div>` : ""}
     </button>`).join("") : navEmpty("No agents yet. Click “New agent” to hire one.");
 
+  panelContent().innerHTML = `
+    <div class="space-y-4">
+      <div class="flex items-center gap-2">
+        <span class="text-sm font-semibold text-neutral-100">Agents</span>
+        <span class="text-[11px] text-neutral-500">${agents.length} agent${agents.length === 1 ? "" : "s"}</span>
+        <button id="agent-new" class="ml-auto text-xs bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-3 py-1 font-medium transition">+ New agent</button>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">${roster}</div>
+    </div>`;
+}
+
+function renderTeamsPanel() {
+  const { agents, teams } = registryState;
+  const agentById = new Map(agents.map((a) => [a.id, a]));
   const teamCards = teams.length ? teams.map((t) => {
     const members = (t.members || []).map((id) => {
       const a = agentById.get(id);
@@ -1588,24 +1665,21 @@ function renderTeamPanel() {
   }).join("") : navEmpty("No teams yet. Click “New team” to assemble one from your roster.");
 
   panelContent().innerHTML = `
-    <div class="space-y-5">
-      <div>
-        <div class="mb-2 flex items-center gap-2">
-          <span class="text-sm font-semibold text-neutral-100">Roster</span>
-          <span class="text-[11px] text-neutral-500">${agents.length} agent${agents.length === 1 ? "" : "s"}</span>
-          <button id="agent-new" class="ml-auto text-xs bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-3 py-1 font-medium transition">+ New agent</button>
-        </div>
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">${roster}</div>
+    <div class="space-y-4">
+      <div class="flex items-center gap-2">
+        <span class="text-sm font-semibold text-neutral-100">Teams</span>
+        <span class="text-[11px] text-neutral-500">${teams.length} team${teams.length === 1 ? "" : "s"}</span>
+        <span class="text-[11px] text-neutral-600">${agents.length} available agents</span>
+        <button id="team-new" class="ml-auto text-xs bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 rounded-md px-3 py-1 font-medium transition">+ New team</button>
       </div>
-      <div>
-        <div class="mb-2 flex items-center gap-2">
-          <span class="text-sm font-semibold text-neutral-100">Teams</span>
-          <span class="text-[11px] text-neutral-500">${teams.length} team${teams.length === 1 ? "" : "s"}</span>
-          <button id="team-new" class="ml-auto text-xs bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 rounded-md px-3 py-1 font-medium transition">+ New team</button>
-        </div>
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">${teamCards}</div>
-      </div>
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">${teamCards}</div>
     </div>`;
+}
+
+function renderRegistryPanel() {
+  if (studioView === "agents") return renderAgentsPanel();
+  if (studioView === "teams") return renderTeamsPanel();
+  return renderAgentsPanel();
 }
 
 // --- Personas library view (file-backed markdown, project + domain scoped) --
@@ -1645,7 +1719,7 @@ async function renderPersonasView() {
         <button id="persona-generate" class="ml-auto text-xs bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-3 py-1 font-medium transition">✦ Generate with Gemma</button>
         <button id="persona-new" class="text-xs bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 rounded-md px-3 py-1 font-medium transition">+ Blank</button>
       </div>
-      <div class="text-[11px] text-neutral-600">Personas saved here are assignable to agents in Teams → New/Edit agent.</div>
+      <div class="text-[11px] text-neutral-600">Personas saved here are assignable to agents in Agents -> New/Edit agent.</div>
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">${cards}</div>
     </div>`;
 }
@@ -1885,19 +1959,19 @@ async function saveAgentModal(existingId) {
     const a = registryState.agents.find((x) => x.id === selectedAgentId);
     await renderAgentDetail(a);
   } else {
-    renderTeamPanel();
+    renderRegistryPanel();
   }
 }
 
 async function deleteAgentFromModal(id) {
   if (!confirm(`Delete agent "${id}"? This also removes it from any team.`)) return;
   const r = await window.ceo.registryDeleteAgent(id);
-  if (r && r.ok) { closeAgentModal(); closeAgentSurface(); await loadRegistry(); renderTeamPanel(); }
+  if (r && r.ok) { closeAgentModal(); closeAgentSurface(); await loadRegistry(); renderRegistryPanel(); }
 }
 
 async function teamSetMembers(name, members) {
   const r = await window.ceo.registrySaveTeam(name, members);
-  if (r && r.ok) { await loadRegistry(); renderTeamPanel(); }
+  if (r && r.ok) { await loadRegistry(); renderRegistryPanel(); }
   return r;
 }
 
@@ -2098,7 +2172,7 @@ function setAgentInputMode(mode) {
 // or attach timing — the ✕ must ALWAYS close the panel.
 function wireAgentSurface() {
   document.addEventListener("click", (e) => {
-    if (e.target.closest("#as-close")) { closeAgentSurface(); renderTeamPanel(); return; }
+    if (e.target.closest("#as-close")) { closeAgentSurface(); renderRegistryPanel(); return; }
     if (e.target.closest("#as-tab-terminal")) { setAgentSurfaceTab("terminal"); return; }
     if (e.target.closest("#as-tab-logs")) { setAgentSurfaceTab("logs"); return; }
     if (e.target.closest("#as-mode-room")) { setAgentInputMode("room"); return; }
@@ -2109,7 +2183,7 @@ function wireAgentSurface() {
     if (e.key === "Enter" && e.target && e.target.id === "as-input") { sendAgentKeys(); return; }
     if (e.key === "Escape" && selectedAgentId) {
       const surf = document.getElementById("agent-surface");
-      if (surf && !surf.classList.contains("hidden")) { closeAgentSurface(); renderTeamPanel(); }
+      if (surf && !surf.classList.contains("hidden")) { closeAgentSurface(); renderRegistryPanel(); }
     }
   });
 }
@@ -2120,29 +2194,426 @@ async function renderChannelsView() {
   await loadRegistry();
   const teams = registryState.teams;
   const agents = registryState.agents;
+  let meetingRooms = [];
+  try {
+    const opts = window.ceo.meetingOptions ? await window.ceo.meetingOptions() : null;
+    meetingRooms = (opts && opts.rooms) || [];
+  } catch { meetingRooms = []; }
+  meetingRoomsState = meetingRooms;
+  const activeKey = channelState ? channelState.key : "ceo";
+  const itemCls = (key) => `channel-item w-full text-left flex items-center gap-2 rounded-md px-3 py-2 text-sm transition ${key === activeKey ? "bg-neutral-800 text-neutral-100" : "text-neutral-300 hover:bg-neutral-800/70"}`;
+
+  // Board team-logs — each Kanban board is a channel whose feed is the team's
+  // shared work log (the autonomy runner posts milestones here) + chat.
+  let boards = [];
+  try { const r = await window.ceo.ceoBoards(); boards = (r && r.boards) || (Array.isArray(r) ? r : []); } catch { boards = []; }
+  const boardRooms = boards.map((b) => {
+    const slug = b.slug || b;
+    return `<button class="${itemCls(`board:${slug}`)}" data-channel="board:${esc(slug)}">
+      <span class="text-neutral-500">▤</span><span>${esc(b.name || slug)}</span>
+      <span class="ml-auto text-[10px] text-neutral-600">team log</span>
+    </button>`;
+  }).join("") || '<div class="px-3 py-2 text-xs text-neutral-600">No boards yet.</div>';
+
+  const ceoItem = `<button class="${itemCls("ceo")}" data-channel="ceo">
+      <span class="text-red-400">★</span><span>Project CEO</span>
+      <span class="ml-auto text-[10px] text-neutral-600">default</span>
+    </button>`;
   const groupRooms = teams.map((t) => `
-    <button class="channel-item w-full text-left flex items-center gap-2 rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition" data-channel="team:${esc(t.name)}">
+    <button class="${itemCls(`team:${t.name}`)}" data-channel="team:${esc(t.name)}">
       <span class="text-neutral-500">#</span><span>${esc(t.name)}</span>
       <span class="ml-auto text-[10px] text-neutral-600">${(t.members || []).length} agents</span>
     </button>`).join("") || '<div class="px-3 py-2 text-xs text-neutral-600">No team channels yet.</div>';
+  const adHocRooms = meetingRooms
+    .filter((r) => r && r.room && !r.channel)
+    .slice(0, 12)
+    .map((r) => {
+      const key = `meeting:${r.room}`;
+      return `<button class="${itemCls(key)}" data-channel="${esc(key)}">
+        <span class="text-neutral-500">⧉</span><span class="min-w-0 flex-1 truncate">${esc(r.room)}</span>
+        <span class="ml-auto shrink-0 text-[10px] ${r.done ? "text-emerald-500" : "text-amber-500"}">${r.done ? "done" : "running"}</span>
+      </button>`;
+    }).join("") || '<div class="px-3 py-2 text-xs text-neutral-600">No meeting rooms yet.</div>';
   const dms = agents.map((a) => `
-    <button class="channel-item w-full text-left flex items-center gap-2 rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition" data-channel="dm:${esc(a.id)}">
+    <button class="${itemCls(`dm:${a.id}`)}" data-channel="dm:${esc(a.id)}">
       <span class="text-neutral-500">◌</span><span>${esc(a.name || a.id)}</span>
       <span class="ml-auto text-[10px] text-neutral-600">${esc(a.provider || "vertex")}</span>
     </button>`).join("") || '<div class="px-3 py-2 text-xs text-neutral-600">No agents in registry.</div>';
   panelContent().innerHTML = `
     <div class="space-y-4 max-w-2xl">
+      <div class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-1">${ceoItem}</div>
+      <div>
+        <div class="mb-1 px-1 text-[11px] uppercase tracking-wider text-neutral-500">Team logs (boards)</div>
+        <div class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-1">${boardRooms}</div>
+      </div>
       <div>
         <div class="mb-1 px-1 text-[11px] uppercase tracking-wider text-neutral-500">Group channels</div>
         <div class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-1">${groupRooms}</div>
       </div>
       <div>
+        <div class="mb-1 px-1 text-[11px] uppercase tracking-wider text-neutral-500">Meeting rooms</div>
+        <div class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-1">${adHocRooms}</div>
+      </div>
+      <div>
         <div class="mb-1 px-1 text-[11px] uppercase tracking-wider text-neutral-500">Direct messages</div>
         <div class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-1">${dms}</div>
       </div>
-      <div class="px-1 text-[11px] text-neutral-600">Channels will open a live room in the chat panel on the right. (Room wiring is the next step.)</div>
+      <div class="px-1 text-[11px] text-neutral-600">One panel, many channels. Pick the CEO, a board's team log, a team, or a DM — the right panel switches to that conversation. Boards show live work milestones as agents build.</div>
     </div>`;
 }
+
+// --- Channel surface: a live team room in the right panel ---------------------
+// A "channel" is a team (group of agents) or a DM (one agent). Opening it shows
+// a room where the team discusses a brief (A2A meeting), the human/CEO can post
+// in, and you can add more agents to the channel.
+let channelState = null; // { key, kind, name, room, members:[ids], ceoInRoom }
+let channelTimer = null;
+
+function channelRoomName(key) {
+  return `chan-${String(key).replace(/[^a-zA-Z0-9._-]+/g, "-")}`.toLowerCase();
+}
+
+function channelMembers(kind, id) {
+  if (kind === "team") {
+    const team = (registryState.teams || []).find((t) => t.name === id);
+    return (team && team.members) || [];
+  }
+  if (kind === "board") return []; // resolved async (live swarm) in openChannel
+  return [id]; // DM
+}
+
+// For a board team-log channel, the chat participants are the agents actually
+// working that board (the live swarm); fall back to the registry if idle.
+async function boardChannelMembers(slug) {
+  try {
+    const r = await window.ceo.ceoSwarm(slug);
+    const workers = (r && (r.workers || r.swarm)) || [];
+    const ids = [...new Set(workers.map((w) => w.agentId || w.agent || w.id).filter(Boolean))];
+    if (ids.length) return ids;
+  } catch { /* ignore */ }
+  return (registryState.agents || []).map((a) => a.id).slice(0, 8);
+}
+
+// Switch the one right panel back to the default CEO conversation.
+function switchToCeoChannel() {
+  closeChannelSurface();
+  $("#chat-input")?.focus();
+  if ($("#panel-title")?.textContent === "Channels") renderChannelsView();
+}
+
+async function openChannel(key) {
+  if (!key) return;
+  await loadRegistry();
+  const [kind, ...rest] = key.split(":");
+  const id = rest.join(":");
+  const name = kind === "team" ? id
+    : kind === "board" ? id
+    : kind === "meeting" ? id
+    : (registryState.agents.find((a) => a.id === id)?.name || id);
+  const meetingRoom = kind === "meeting" ? (meetingRoomsState || []).find((r) => r.room === id) : null;
+  const meetingParticipants = meetingRoom
+    ? (meetingRoom.participants || []).filter((p) => registryState.agents.some((a) => a.id === p))
+    : [];
+  const members = kind === "meeting" ? meetingParticipants
+    : kind === "board" ? await boardChannelMembers(id)
+    : channelMembers(kind, id);
+  channelState = {
+    key, kind, id, name,
+    room: kind === "meeting" ? id : channelRoomName(key),
+    members,
+    ceoInRoom: false,
+    live: false,
+  };
+  document.getElementById("agent-surface")?.classList.add("hidden");
+  const surf = document.getElementById("channel-surface");
+  if (surf) surf.classList.remove("hidden");
+  const nameEl = document.getElementById("chan-name");
+  if (nameEl) nameEl.textContent = name + (kind === "dm" ? " (DM)" : kind === "board" ? " · team log" : kind === "meeting" ? " · meeting" : "");
+  renderChannelMembers();
+  renderChannelComposerSelects();
+  await pollChannel();
+  if (channelTimer) clearInterval(channelTimer);
+  channelTimer = setInterval(pollChannel, 2500);
+  // Make the channel live: start the persistent A2A room loop so agents reply
+  // to anything posted here (real providers only — never the echo placeholder).
+  await startChannelLoop();
+}
+
+// Start (or re-start) the live A2A room loop for the open channel.
+async function startChannelLoop() {
+  if (!channelState) return false;
+  if (!channelState.members.length) {
+    renderChannelSystemMessage("No agents are assigned to this channel yet.");
+    return false;
+  }
+  try {
+    const r = await window.ceo.roomLoopStart({
+      room: channelState.room,
+      members: channelState.members.join(","),
+      criteria: "Shared understanding: who owns what, risks, open questions surfaced and answered, agreed next steps.",
+      allowPaid: true, // real agents only — never the echo placeholder provider
+      maxFollowups: 1, // bounded agent-to-agent back-and-forth
+    });
+    if (!r || !r.ok) {
+      renderChannelSystemMessage(`Could not start live room loop: ${r ? r.reason : "unknown"}`);
+      const state = document.getElementById("chan-state");
+      if (state) state.textContent = "· loop failed";
+      return false;
+    }
+    channelState.live = true;
+    return true;
+  } catch (e) {
+    renderChannelSystemMessage(`Could not start live room loop: ${String(e && e.message ? e.message : e)}`);
+    const state = document.getElementById("chan-state");
+    if (state) state.textContent = "· loop failed";
+    return false;
+  }
+}
+
+function closeChannelSurface() {
+  if (channelTimer) { clearInterval(channelTimer); channelTimer = null; }
+  if (channelState) { try { window.ceo.roomLoopStop(channelState.room); } catch { /* ignore */ } }
+  channelState = null;
+  document.getElementById("channel-surface")?.classList.add("hidden");
+}
+
+function renderChannelMembers() {
+  const host = document.getElementById("chan-members");
+  if (!host || !channelState) return;
+  const chips = channelState.members.map((id) => {
+    const a = registryState.agents.find((x) => x.id === id);
+    const label = (a && (a.name || a.id)) || id;
+    const prov = (a && a.provider) || "?";
+    return `<span class="inline-flex items-center gap-1 rounded-full border border-neutral-700 bg-neutral-900 px-2 py-0.5 text-[11px] text-neutral-200">
+      <span class="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>${esc(label)}<span class="text-neutral-600">${esc(prov)}</span></span>`;
+  }).join("");
+  const ceoChip = channelState.ceoInRoom
+    ? `<span class="inline-flex items-center gap-1 rounded-full border border-red-700/60 bg-red-950/30 px-2 py-0.5 text-[11px] text-red-300"><span class="w-1.5 h-1.5 rounded-full bg-red-400"></span>CEO</span>`
+    : "";
+  const empty = channelState.kind === "meeting"
+    ? `<span class="text-[11px] text-neutral-600">Meeting transcript loaded from the harness room log.</span>`
+    : `<span class="text-[11px] text-neutral-600">No members yet — add an agent.</span>`;
+  host.innerHTML = (ceoChip + chips) || empty;
+}
+
+function renderChannelComposerSelects() {
+  if (!channelState) return;
+  const speaker = document.getElementById("chan-speaker");
+  const to = document.getElementById("chan-to");
+  if (speaker) {
+    const opts = ['<option value="You">You</option>'];
+    if (channelState.ceoInRoom) opts.push('<option value="CEO">CEO</option>');
+    speaker.innerHTML = opts.join("");
+  }
+  if (to) {
+    const opts = ['<option value="">→ whole team</option>'];
+    for (const id of channelState.members) {
+      const a = registryState.agents.find((x) => x.id === id);
+      opts.push(`<option value="${esc(id)}">→ ${esc((a && (a.name || a.id)) || id)}</option>`);
+    }
+    to.innerHTML = opts.join("");
+  }
+}
+
+function renderChannelFeed(feed) {
+  const host = document.getElementById("chan-feed");
+  if (!host) return;
+  const nearBottom = host.scrollHeight - host.scrollTop - host.clientHeight < 80;
+  const previousTop = host.scrollTop;
+  if (!feed || !feed.length) {
+    host.innerHTML = `<div class="text-neutral-600 text-xs">No messages yet. Paste a brief below and hit <span class="text-cyan-400">Discuss brief →</span> to get the team talking.</div>`;
+    return;
+  }
+  host.innerHTML = feed.map((e) => {
+    const body = e.body || "";
+    // Work-event milestones (posted by the autonomy runner / review gate) read as
+    // a compact LOG line, not a chat bubble — this channel is the team's log.
+    if (isWorkEvent(body)) {
+      const glyph = body.trim().charAt(0);
+      const tone = /^[✗⛔]/.test(body) ? "text-red-300" : /^[✅✓]/.test(body) ? "text-emerald-300" : "text-amber-300";
+      return `<div class="flex items-start gap-2 px-1 py-0.5 font-mono text-[11px] ${tone}">
+        <span>${esc(glyph)}</span>
+        <span class="text-neutral-500">${esc(e.speaker || "")}</span>
+        <span class="flex-1 text-neutral-300">${esc(body.trim().slice(1).trim())}</span>
+      </div>`;
+    }
+    const human = /^(you|ceo)$/i.test(e.speaker || "");
+    const tone = human ? "border-red-700/40 bg-red-950/20" : "border-neutral-800 bg-neutral-900/50";
+    return `<div class="rounded-lg border ${tone} px-3 py-2">
+      <div class="mb-0.5 text-[11px] font-medium ${human ? "text-red-300" : "text-cyan-300"}">${esc(e.speaker || "agent")}</div>
+      <div class="text-[13px] text-neutral-200 whitespace-pre-wrap leading-relaxed">${esc(body)}</div>
+    </div>`;
+  }).join("");
+  host.scrollTop = nearBottom ? host.scrollHeight : previousTop;
+}
+
+function renderChannelSystemMessage(message) {
+  renderChannelFeed([{ speaker: "system", body: message || "Channel error." }]);
+}
+
+// A team-log work milestone starts with a status glyph emitted by the runner.
+function isWorkEvent(body) {
+  return /^\s*[▶✓✗✅⛔]/.test(String(body || ""));
+}
+
+async function pollChannel() {
+  if (!channelState) return;
+  let r = {};
+  try {
+    r = await window.ceo.meetingRoom(channelState.room);
+  } catch (e) {
+    renderChannelSystemMessage(`Could not read room: ${String(e && e.message ? e.message : e)}`);
+    const state = document.getElementById("chan-state");
+    if (state) state.textContent = "· room error";
+    return;
+  }
+  renderChannelFeed((r && r.feed) || []);
+  const state = document.getElementById("chan-state");
+  if (state) state.textContent = channelState && channelState.live
+    ? "· live A2A"
+    : channelState && channelState.kind === "meeting"
+      ? (r && r.running ? "· meeting running" : "· meeting log")
+      : (r && r.started ? "· idle" : "");
+}
+
+async function startChannelDiscussion() {
+  if (!channelState) return;
+  const briefEl = document.getElementById("chan-brief");
+  const brief = briefEl && briefEl.value.trim();
+  if (!brief) { briefEl?.focus(); return; }
+  const btn = document.getElementById("chan-discuss");
+  if (btn) { btn.disabled = true; btn.textContent = "Posting…"; }
+  // Ensure the live A2A loop is running, then drop the brief in as a whole-team
+  // message. The loop fans it out to members (each replies only if it concerns
+  // their role) and writes their replies back into the room transcript.
+  const loopReady = await startChannelLoop();
+  const speaker = channelState.ceoInRoom ? "CEO" : "You";
+  let r = {};
+  try {
+    const body = await withChannelContext(`Team — let's discuss this brief:\n\n${brief}`);
+    r = await window.ceo.meetingPost(channelState.room, speaker, body);
+  } catch (e) { r = { ok: false, reason: String(e) }; }
+  if (btn) { btn.disabled = false; btn.textContent = "Discuss brief →"; }
+  if (!r || !r.ok) {
+    renderChannelFeed([{ speaker: "system", body: `Could not post brief: ${r ? r.reason : "unknown"}` }]);
+    return;
+  }
+  if (briefEl) briefEl.value = "";
+  if (!loopReady) renderChannelSystemMessage("Brief posted, but the live A2A room loop did not start. Restart the app if this says no handler is registered.");
+  setTimeout(pollChannel, 600);
+}
+
+// Build the same context the CEO chat injects — referenced artifacts/files
+// (the context tray) + a short project/domain header — so room agents share the
+// CEO's situational awareness of what the human is pointing at.
+async function referencedContextBlock() {
+  const parts = [];
+  if (currentProject) {
+    parts.push(`Project: ${currentProject.name}${currentDomain && currentDomain !== "All" ? ` · domain: ${currentDomain}` : ""}`);
+  }
+  if (ceoContextTray.length) {
+    const loaded = await Promise.all(ceoContextTray.slice(0, 4).map(readContextItem));
+    parts.push("The human is referencing these:");
+    for (const it of loaded) {
+      parts.push(`- ${it.title}${it.path ? ` (${it.path})` : ""}:\n${String(it.text || "").slice(0, 800)}`);
+    }
+  }
+  return parts.length ? parts.join("\n") : "";
+}
+
+// Prepend the shared context to a room message (capped, only when present).
+async function withChannelContext(text) {
+  const ctx = await referencedContextBlock();
+  return ctx ? `${text}\n\n----- context -----\n${ctx}` : text;
+}
+
+async function sendChannelMessage() {
+  if (!channelState) return;
+  const input = document.getElementById("chan-input");
+  const text = input && input.value.trim();
+  if (!text) return;
+  const send = document.getElementById("chan-send");
+  const speaker = document.getElementById("chan-speaker")?.value || "You";
+  const to = document.getElementById("chan-to")?.value || "";
+  const addressed = to ? `@${to} ${text}` : text;
+  if (send) { send.disabled = true; send.textContent = "Sending..."; }
+  let r = null;
+  try {
+    const body = await withChannelContext(addressed);
+    r = await window.ceo.meetingPost(channelState.room, speaker, body);
+  } catch (e) {
+    r = { ok: false, reason: String(e && e.message ? e.message : e) };
+  }
+  if (send) { send.disabled = false; send.textContent = "Send"; }
+  if (!r || !r.ok) {
+    if (input) input.value = text;
+    renderChannelSystemMessage(`Could not post message: ${r ? r.reason : "unknown"}`);
+    const state = document.getElementById("chan-state");
+    if (state) state.textContent = "· post failed";
+    return;
+  }
+  input.value = "";
+  setTimeout(pollChannel, 200);
+}
+
+function toggleCeoInRoom() {
+  if (!channelState) return;
+  channelState.ceoInRoom = !!document.getElementById("chan-ceo")?.checked;
+  renderChannelMembers();
+  renderChannelComposerSelects();
+}
+
+async function addAgentToChannel() {
+  if (!channelState) return;
+  await loadRegistry();
+  const candidates = (registryState.agents || []).filter((a) => !channelState.members.includes(a.id));
+  if (!candidates.length) { alert("All registry agents are already in this channel."); return; }
+  const pick = prompt(
+    `Add an agent to #${channelState.name}.\nAvailable:\n` + candidates.map((a) => `- ${a.id} (${a.provider})`).join("\n") + "\n\nEnter agent id:",
+    candidates[0].id,
+  );
+  if (!pick) return;
+  const id = pick.trim();
+  if (!candidates.some((a) => a.id === id)) { alert(`Unknown agent id: ${id}`); return; }
+  const next = [...channelState.members, id];
+  if (channelState.kind === "team") {
+    try {
+      const r = await window.ceo.registrySaveTeam(channelState.id, next);
+      if (!r || !r.ok) { alert("Failed to add agent: " + (r ? r.reason : "unknown")); return; }
+    } catch (e) { alert("Failed to add agent: " + String(e)); return; }
+  }
+  channelState.members = next;
+  renderChannelMembers();
+  renderChannelComposerSelects();
+  // Note the change as a non-human speaker so it doesn't trigger a routing round,
+  // then restart the live loop so the new member is included in the roster.
+  await window.ceo.meetingPost(channelState.room, "Facilitator", `Added @${id} to the channel.`).catch(() => {});
+  if (channelState.live) {
+    try { await window.ceo.roomLoopStop(channelState.room); } catch { /* ignore */ }
+    channelState.live = false;
+    await startChannelLoop();
+  }
+  setTimeout(pollChannel, 200);
+}
+
+// Channel surface controls live in panel2 (outside panelContent). Delegate on
+// document so they stay live across re-renders.
+document.addEventListener("click", (e) => {
+  if (e.target.closest("#chan-close")) { closeChannelSurface(); return; }
+  if (e.target.closest("#chan-discuss")) { startChannelDiscussion(); return; }
+  if (e.target.closest("#chan-send")) { sendChannelMessage(); return; }
+  if (e.target.closest("#chan-add")) { addAgentToChannel(); return; }
+});
+document.addEventListener("change", (e) => {
+  if (e.target && e.target.id === "chan-ceo") toggleCeoInRoom();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target && e.target.id === "chan-input") { sendChannelMessage(); return; }
+  if (e.key === "Escape" && channelState) {
+    const surf = document.getElementById("channel-surface");
+    if (surf && !surf.classList.contains("hidden")) closeChannelSurface();
+  }
+});
 
 function stopNavMeetingPoll() { if (navMeetingTimer) { clearInterval(navMeetingTimer); navMeetingTimer = null; } }
 
@@ -2305,6 +2776,54 @@ function meetingContextAgendaBlock(items) {
   ].join("\n\n");
 }
 
+function fmtMeetingTime(value) {
+  if (!value) return "unscheduled";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function meetingDateTimeLocal(value) {
+  const d = value ? new Date(value) : new Date(Date.now() + 5 * 60 * 1000);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function renderUpcomingMeetings(meetings = []) {
+  const rows = meetings.filter((m) => m.status !== "started" && m.status !== "cancelled");
+  if (!rows.length) return `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 p-3 text-xs text-neutral-600">No upcoming meetings scheduled.</div>`;
+  return rows.map((m) => `
+    <div class="rounded-lg border border-neutral-800 bg-neutral-950/45 p-3">
+      <div class="flex items-start gap-3">
+        <div class="min-w-0 flex-1">
+          <div class="truncate text-sm font-medium text-neutral-100">${esc(m.title || "Untitled meeting")}</div>
+          <div class="mt-1 text-[11px] text-neutral-500">${esc(fmtMeetingTime(m.scheduledFor))} · ${esc(m.domain || "All")} · ${esc(m.recurrence || "none")}</div>
+          <div class="mt-2 line-clamp-2 text-xs text-neutral-400">${esc(m.agenda || "")}</div>
+        </div>
+        <div class="flex shrink-0 gap-1">
+          <button class="nav-mtg-run-scheduled rounded-md bg-cyan-600 px-2 py-1 text-[11px] text-white hover:bg-cyan-500" data-mtg-id="${esc(m.id)}">Start</button>
+          <button class="nav-mtg-delete-scheduled rounded-md border border-neutral-700 px-2 py-1 text-[11px] text-neutral-300 hover:bg-neutral-800" data-mtg-id="${esc(m.id)}">Delete</button>
+        </div>
+      </div>
+    </div>`).join("");
+}
+
+function renderPastMeetings(rooms = []) {
+  const rows = rooms.filter((r) => r && r.room && !r.channel).slice(0, 12);
+  if (!rows.length) return `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 p-3 text-xs text-neutral-600">No past meeting rooms yet.</div>`;
+  return rows.map((r) => `
+    <button class="nav-mtg-open-room block w-full rounded-lg border border-neutral-800 bg-neutral-950/45 p-3 text-left hover:border-cyan-500/40 hover:bg-cyan-950/10"
+      data-room="${esc(r.room)}">
+      <div class="flex items-center gap-2">
+        <span class="min-w-0 flex-1 truncate text-sm font-medium text-neutral-100">${esc(r.room)}</span>
+        <span class="rounded border border-neutral-700 px-1.5 py-0.5 text-[10px] ${r.done ? "text-emerald-400" : "text-amber-300"}">${r.done ? "done" : "running"}</span>
+      </div>
+      <div class="mt-1 text-[11px] text-neutral-500">${esc(fmtMeetingTime(r.updatedAt))} · ${Number(r.messages || 0)} messages</div>
+      <div class="mt-2 truncate text-xs text-neutral-500">${esc((r.participants || r.speakers || []).slice(0, 5).join(", ") || "room transcript")}</div>
+    </button>`).join("");
+}
+
 async function renderMeetingsView() {
   setPanelTitle("Meetings");
   stopNavMeetingPoll();
@@ -2314,6 +2833,8 @@ async function renderMeetingsView() {
     loadRegistry(),
   ]);
   navMeetingOpts = mergeMeetingRoster(meetingOptions || {});
+  navMeetingScheduled = (meetingOptions && meetingOptions.scheduled) || [];
+  navMeetingPastRooms = (meetingOptions && meetingOptions.rooms) || [];
   const teams = navMeetingOpts.teams;
   const agents = navMeetingOpts.agents;
   const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
@@ -2326,9 +2847,34 @@ async function renderMeetingsView() {
         <span class="min-w-0 flex-1 truncate text-xs text-neutral-300">${esc(item.title || item.path)}</span>
       </div>`).join("")
     : `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2 text-xs text-neutral-600">No selected domain context.</div>`;
+  const createOpenCls = navMeetingCreateOpen ? "" : "hidden";
+  const defaultWhen = meetingDateTimeLocal();
   panelContent().innerHTML = `
     <div class="space-y-4">
-      <div class="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(340px,0.95fr)]">
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="min-w-0 flex-1">
+          <div class="text-lg font-semibold text-neutral-100">Meetings</div>
+          <div class="mt-1 text-xs text-neutral-500">Schedule working rooms, launch agent discussions, and reopen past transcripts.</div>
+        </div>
+        <button id="nav-mtg-toggle-create" class="rounded-md bg-cyan-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-cyan-500">${navMeetingCreateOpen ? "Close Create" : "Create Meeting"}</button>
+      </div>
+      <div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
+        <section class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+          <div class="mb-3 flex items-center gap-2">
+            <div class="text-sm font-semibold text-neutral-100">Upcoming Meetings</div>
+            <span class="rounded border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">${navMeetingScheduled.filter((m) => m.status !== "started" && m.status !== "cancelled").length}</span>
+          </div>
+          <div class="space-y-2">${renderUpcomingMeetings(navMeetingScheduled)}</div>
+        </section>
+        <section class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+          <div class="mb-3 flex items-center gap-2">
+            <div class="text-sm font-semibold text-neutral-100">Past Meetings</div>
+            <span class="rounded border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">${navMeetingPastRooms.filter((r) => r && r.room && !r.channel).length}</span>
+          </div>
+          <div class="space-y-2">${renderPastMeetings(navMeetingPastRooms)}</div>
+        </section>
+      </div>
+      <div id="nav-mtg-create-panel" class="${createOpenCls} grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(340px,0.95fr)]">
         <section class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
           <div class="mb-3 flex flex-wrap items-center gap-2">
             <div class="min-w-0 flex-1">
@@ -2345,6 +2891,22 @@ async function renderMeetingsView() {
           <label class="mt-3 block text-xs text-neutral-400">Expected outcome
             <input id="nav-mtg-criteria" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-800/70 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" placeholder="Artifact, decision, proposal, or repair brief expected from this session" />
           </label>
+          <div class="mt-3 grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_140px]">
+            <label class="block text-xs text-neutral-400">Title
+              <input id="nav-mtg-title" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-800/70 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" placeholder="Planning room, test review, domain audit..." />
+            </label>
+            <label class="block text-xs text-neutral-400">Recurrence
+              <select id="nav-mtg-recurrence" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-800/70 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500">
+                <option value="none">none</option>
+                <option value="daily">daily</option>
+                <option value="weekly">weekly</option>
+                <option value="monthly">monthly</option>
+              </select>
+            </label>
+          </div>
+          <label class="mt-3 block text-xs text-neutral-400">Scheduled for
+            <input id="nav-mtg-when" type="datetime-local" value="${esc(defaultWhen)}" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-800/70 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" />
+          </label>
           <div class="mt-3 rounded-xl border border-cyan-500/20 bg-cyan-950/10 p-3">
             <div class="mb-2 flex items-center gap-2">
               <div class="text-xs font-medium text-cyan-100">Selected Context</div>
@@ -2360,7 +2922,8 @@ async function renderMeetingsView() {
             <input id="nav-mtg-paid" type="checkbox" class="accent-amber-500" /> Allow paid providers for this session
           </label>
           <div class="mt-4 flex flex-wrap items-center gap-2">
-            <button id="nav-mtg-start" class="rounded-md bg-cyan-600 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-cyan-500">Start Meeting</button>
+            <button id="nav-mtg-start" class="rounded-md bg-cyan-600 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-cyan-500">Start Now</button>
+            <button id="nav-mtg-schedule" class="rounded-md border border-cyan-600/70 px-4 py-1.5 text-sm font-medium text-cyan-200 transition hover:bg-cyan-950/30">Schedule</button>
             <span id="nav-mtg-msg" class="text-xs text-neutral-500"></span>
           </div>
         </section>
@@ -2382,7 +2945,7 @@ async function renderMeetingsView() {
         <div class="flex items-center gap-2 text-[11px] uppercase tracking-wider text-neutral-500">
           <span>Live Room</span><span id="nav-mtg-room" class="font-mono text-neutral-400 normal-case">${esc(navMeetingRoom || "")}</span><span id="nav-mtg-state" class="ml-auto normal-case"></span>
         </div>
-        <div id="nav-mtg-transcript" class="mt-3 space-y-2 text-sm"><div class="rounded-lg border border-neutral-800 bg-neutral-950/45 p-3 text-neutral-600">No meeting started.</div></div>
+        <div id="nav-mtg-transcript" class="mt-3 max-h-[520px] overflow-auto space-y-2 pr-1 text-sm"><div class="rounded-lg border border-neutral-800 bg-neutral-950/45 p-3 text-neutral-600">No meeting started.</div></div>
         <div id="nav-mtg-req" class="hidden mt-4 border-t border-neutral-800/60 pt-3">
           <div class="mb-1 flex items-center gap-2">
             <div class="text-[11px] uppercase tracking-wider text-emerald-400/80">Saved Result</div>
@@ -2401,27 +2964,96 @@ async function renderMeetingsView() {
 
 async function startNavMeeting() {
   const msg = $("#nav-mtg-msg");
-  const agenda = ($("#nav-mtg-agenda") && $("#nav-mtg-agenda").value || "").trim();
-  const criteria = ($("#nav-mtg-criteria") && $("#nav-mtg-criteria").value || "").trim();
-  const team = ($("#nav-mtg-team") && $("#nav-mtg-team").value) || "";
-  const members = Array.from(document.querySelectorAll(".nav-mtg-member:checked")).map((c) => c.value).join(",");
-  const allowPaid = !!($("#nav-mtg-paid") && $("#nav-mtg-paid").checked);
-  if (!agenda) { if (msg) msg.textContent = "goal required"; return; }
-  if (!team && !members) { if (msg) msg.textContent = "pick a team or members"; return; }
-  if (msg) msg.textContent = "reading context...";
-  const sourceContext = await selectedMeetingContext();
-  const contextBlock = meetingContextAgendaBlock(sourceContext);
-  const meetingAgenda = contextBlock ? `${agenda}\n\n${contextBlock}` : agenda;
+  const draft = await collectMeetingDraft();
+  if (!draft.ok) { if (msg) msg.textContent = draft.reason; return; }
   if (msg) msg.textContent = "starting...";
-  const info = { room: `session-${Date.now()}`, agenda: meetingAgenda, criteria, allowPaid };
-  if (team) info.team = team; else info.members = members;
   let r = {};
-  try { r = await window.ceo.meetingStart(info); } catch (e) { r = { ok: false, reason: String(e) }; }
+  try { r = await window.ceo.meetingStart(draft.info); } catch (e) { r = { ok: false, reason: String(e) }; }
   if (!r || !r.ok) { if (msg) msg.textContent = `failed: ${r ? r.reason : "unknown"}`; return; }
   if (msg) msg.textContent = "running - watch below";
   navMeetingRoom = r.room;
-  navMeetingMeta = { domain: currentDomain, agenda, participants: team || members, expectedOutcome: criteria, sourceContext, saved: false, artifactPath: "" };
+  navMeetingMeta = {
+    domain: currentDomain,
+    agenda: draft.agenda,
+    participants: draft.team || draft.members,
+    expectedOutcome: draft.criteria,
+    sourceContext: draft.sourceContext,
+    saved: false,
+    artifactPath: "",
+  };
   const lbl = $("#nav-mtg-room"); if (lbl) lbl.textContent = r.room;
+  pollNavMeeting();
+  stopNavMeetingPoll();
+  navMeetingTimer = setInterval(pollNavMeeting, 2500);
+}
+
+async function collectMeetingDraft() {
+  const agenda = ($("#nav-mtg-agenda") && $("#nav-mtg-agenda").value || "").trim();
+  const criteria = ($("#nav-mtg-criteria") && $("#nav-mtg-criteria").value || "").trim();
+  const title = ($("#nav-mtg-title") && $("#nav-mtg-title").value || "").trim() || agenda.split(/\n/)[0].slice(0, 80) || "Working meeting";
+  const scheduledLocal = ($("#nav-mtg-when") && $("#nav-mtg-when").value || "").trim();
+  const scheduledFor = scheduledLocal ? new Date(scheduledLocal).toISOString() : new Date().toISOString();
+  const recurrence = ($("#nav-mtg-recurrence") && $("#nav-mtg-recurrence").value) || "none";
+  const team = ($("#nav-mtg-team") && $("#nav-mtg-team").value) || "";
+  const members = Array.from(document.querySelectorAll(".nav-mtg-member:checked")).map((c) => c.value).join(",");
+  const allowPaid = !!($("#nav-mtg-paid") && $("#nav-mtg-paid").checked);
+  if (!agenda) return { ok: false, reason: "agenda required" };
+  if (!team && !members) return { ok: false, reason: "pick a team or members" };
+  const sourceContext = await selectedMeetingContext();
+  const contextBlock = meetingContextAgendaBlock(sourceContext);
+  const meetingAgenda = contextBlock ? `${agenda}\n\n${contextBlock}` : agenda;
+  const info = { room: `session-${Date.now()}`, agenda: meetingAgenda, criteria, allowPaid };
+  if (team) info.team = team; else info.members = members;
+  return { ok: true, title, scheduledFor, recurrence, agenda, meetingAgenda, criteria, team, members, allowPaid, sourceContext, info };
+}
+
+async function scheduleNavMeeting() {
+  const msg = $("#nav-mtg-msg");
+  const draft = await collectMeetingDraft();
+  if (!draft.ok) { if (msg) msg.textContent = draft.reason; return; }
+  const meeting = {
+    title: draft.title,
+    domain: currentDomain || "All",
+    scheduledFor: draft.scheduledFor,
+    recurrence: draft.recurrence,
+    agenda: draft.meetingAgenda,
+    criteria: draft.criteria,
+    team: draft.team,
+    members: draft.members,
+    allowPaid: draft.allowPaid,
+    sourceContext: draft.sourceContext,
+  };
+  let r = {};
+  try { r = await window.ceo.meetingSchedule(meeting); } catch (e) { r = { ok: false, reason: String(e) }; }
+  if (!r || !r.ok) { if (msg) msg.textContent = `schedule failed: ${r ? r.reason : "unknown"}`; return; }
+  navMeetingCreateOpen = false;
+  await renderMeetingsView();
+}
+
+async function startScheduledMeeting(id) {
+  if (!id) return;
+  let r = {};
+  try { r = await window.ceo.meetingScheduleStart(id); } catch (e) { r = { ok: false, reason: String(e) }; }
+  if (!r || !r.ok) { alert(`Could not start scheduled meeting: ${r ? r.reason : "unknown"}`); return; }
+  navMeetingRoom = r.room;
+  navMeetingMeta = null;
+  await renderMeetingsView();
+  pollNavMeeting();
+  stopNavMeetingPoll();
+  navMeetingTimer = setInterval(pollNavMeeting, 2500);
+}
+
+async function deleteScheduledMeeting(id) {
+  if (!id) return;
+  try { await window.ceo.meetingScheduleDelete(id); } catch { /* ignore */ }
+  await renderMeetingsView();
+}
+
+async function openPastMeetingRoom(room) {
+  if (!room) return;
+  navMeetingRoom = room;
+  navMeetingMeta = null;
+  await renderMeetingsView();
   pollNavMeeting();
   stopNavMeetingPoll();
   navMeetingTimer = setInterval(pollNavMeeting, 2500);
@@ -2435,6 +3067,8 @@ async function pollNavMeeting() {
   const host = $("#nav-mtg-transcript");
   if (host) {
     const feed = r.feed || [];
+    const nearBottom = host.scrollHeight - host.scrollTop - host.clientHeight < 80;
+    const previousTop = host.scrollTop;
     host.innerHTML = feed.length ? feed.map((it) => {
       const isFac = /facilitator|orchestrator/i.test(it.speaker);
       return `<div class="rounded-lg border ${isFac ? "border-cyan-500/30 bg-cyan-950/10" : "border-neutral-800 bg-neutral-900/50"} p-2.5">
@@ -2442,6 +3076,7 @@ async function pollNavMeeting() {
         <div class="mt-1 whitespace-pre-wrap text-[12px] text-neutral-300">${esc(it.body)}</div>
       </div>`;
     }).join("") : `<div class="text-neutral-600">Waiting for the session to begin…</div>`;
+    host.scrollTop = nearBottom ? host.scrollHeight : previousTop;
   }
   const state = $("#nav-mtg-state");
   if (state) state.innerHTML = r.running ? `<span class="text-amber-300">● running</span>` : `<span class="text-emerald-400">✓ complete</span>`;
@@ -2477,6 +3112,7 @@ async function openView(view) {
   switch (studioView) {
     case "board": return renderBoardView();
     case "tasks": return renderTasksView();
+    case "agents": return renderAgentsView();
     case "teams": return renderTeamsView();
     case "personas": return renderPersonasView();
     case "channels": return renderChannelsView();
@@ -2549,18 +3185,28 @@ window.ceoUI = {
     await renderStudioBoard(currentDomain);
     window.CEOConvai?.syncContext?.(`domain → ${currentDomain}`);
   },
-  // Voice agent render control: drive the left nav and the Team panel.
+  // Voice agent render control: drive the left nav and the agent/team panels.
   openView: (view) => openView(view),
+  async openChannel(key) {
+    await openView("channels");
+    await openChannel(key);
+    return true;
+  },
+  async openMeetingRoom(room) {
+    await openView("channels");
+    await openChannel(`meeting:${room}`);
+    return true;
+  },
   async openAgentDetail(idOrName) {
     await loadRegistry();
     const a = registryState.agents.find((x) => x.id === idOrName || x.name === idOrName);
     if (!a) return false;
-    studioView = "teams";
-    setActiveNav("teams");
+    studioView = "agents";
+    setActiveNav("agents");
     await openAgentDetail(a.id);
     return true;
   },
-  refreshTeam() { if (studioView === "teams") renderTeamPanel(); },
+  refreshTeam() { if (studioView === "agents" || studioView === "teams") renderRegistryPanel(); },
 };
 
 // --- wiring ---
@@ -2591,6 +3237,13 @@ $("#file-tree").addEventListener("click", (e) => {
   if (node) showFile(node.dataset.path);
 });
 panelContent().addEventListener("click", async (e) => {
+  const channel = e.target.closest(".channel-item");
+  if (channel) {
+    const key = channel.dataset.channel;
+    if (key === "ceo") switchToCeoChannel();
+    else await openChannel(key);
+    return;
+  }
   const task = e.target.closest(".studio-task-card");
   if (task) {
     await openTaskInStudio({
@@ -2635,12 +3288,21 @@ panelContent().addEventListener("click", async (e) => {
     await saveDomainArchitectAnswer();
     return;
   }
+  const outlineNode = e.target.closest(".domain-architect-outline");
+  if (outlineNode) {
+    await focusDomainArchitectSection(outlineNode.dataset.field);
+    return;
+  }
   if (e.target.closest("#domain-architect-apply")) {
     applyDomainArchitectDraftToForm(domainArchitectSession);
     return;
   }
   if (e.target.closest("#domain-architect-ask")) {
     await askHermesDomainArchitect();
+    return;
+  }
+  if (e.target.closest("#domain-architect-deep-dive")) {
+    await captureDomainArchitectDeepDive();
     return;
   }
   if (e.target.closest("#domain-architect-confirm")) {
@@ -2748,9 +3410,21 @@ panelContent().addEventListener("click", async (e) => {
 document.querySelectorAll("#studio-nav .nav-item").forEach((b) => {
   b.addEventListener("click", () => openView(b.dataset.view));
 });
-// Meetings + Team panel controls (delegated, since panels re-render on open).
+// Meetings + Agents/Teams panel controls (delegated, since panels re-render on open).
 panelContent().addEventListener("click", async (e) => {
+  if (e.target.closest("#nav-mtg-toggle-create")) {
+    navMeetingCreateOpen = !navMeetingCreateOpen;
+    await renderMeetingsView();
+    return;
+  }
   if (e.target.closest("#nav-mtg-start")) { startNavMeeting(); return; }
+  if (e.target.closest("#nav-mtg-schedule")) { scheduleNavMeeting(); return; }
+  const scheduledStart = e.target.closest(".nav-mtg-run-scheduled");
+  if (scheduledStart) { startScheduledMeeting(scheduledStart.dataset.mtgId); return; }
+  const scheduledDelete = e.target.closest(".nav-mtg-delete-scheduled");
+  if (scheduledDelete) { deleteScheduledMeeting(scheduledDelete.dataset.mtgId); return; }
+  const pastRoom = e.target.closest(".nav-mtg-open-room");
+  if (pastRoom) { openPastMeetingRoom(pastRoom.dataset.room); return; }
   const tmpl = e.target.closest(".nav-mtg-template");
   if (tmpl) { applyMeetingTemplate(tmpl.dataset.template); return; }
   const teamCard = e.target.closest(".nav-mtg-team-card");
@@ -2763,12 +3437,12 @@ panelContent().addEventListener("click", async (e) => {
   if (e.target.closest("#pe-delete")) { deletePersonaFromEditor(); return; }
   const personaCard = e.target.closest(".persona-card");
   if (personaCard) { openPersonaEditor(personaCard.dataset.id); return; }
-  // Team panel: roster + team management
+  // Agents/Teams panels: roster + team management
   if (e.target.closest("#agent-new")) { openAgentModal(null); return; }
   const card = e.target.closest(".team-agent-card");
   if (card) { openAgentDetail(card.dataset.agent); return; }
   // Agent detail view buttons
-  if (e.target.closest("#agent-back")) { closeAgentSurface(); renderTeamPanel(); return; }
+  if (e.target.closest("#agent-back")) { closeAgentSurface(); renderRegistryPanel(); return; }
   if (e.target.closest("#agent-edit")) { openAgentModal(selectedAgentId); return; }
   if (e.target.closest("#agent-mount")) { mountSelectedAgent(); return; }
   if (e.target.closest("#agent-unmount")) { unmountSelectedAgent(); return; }
@@ -2783,7 +3457,7 @@ panelContent().addEventListener("click", async (e) => {
   if (delTeam) {
     if (!confirm(`Delete team "${delTeam.dataset.team}"?`)) return;
     const r = await window.ceo.registryDeleteTeam(delTeam.dataset.team);
-    if (r && r.ok) { await loadRegistry(); renderTeamPanel(); }
+    if (r && r.ok) { await loadRegistry(); renderRegistryPanel(); }
     return;
   }
   if (e.target.closest("#team-new")) {

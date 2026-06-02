@@ -86,6 +86,27 @@ async function main() {
         const panel = document.getElementById("domain-architect-panel");
         return panel && panel.textContent.includes("Ready for confirmation.");
       });
+      const featureNode = [...document.querySelectorAll(".domain-architect-outline")].find((node) => node.textContent.includes("Initial features"));
+      if (!featureNode) throw new Error("Domain Architect outline node missing");
+      featureNode.click();
+      await waitFor(() => {
+        const panel = document.getElementById("domain-architect-panel");
+        return panel && panel.textContent.includes("Focused: Initial features");
+      });
+      const refine = document.getElementById("domain-architect-answer");
+      refine.value = "Also capture transcript-rich handoff and review-phase deep-dive proposals.";
+      document.getElementById("domain-architect-answer-save").click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await waitFor(() => {
+        const panel = document.getElementById("domain-architect-panel");
+        return panel && panel.textContent.includes("Also capture transcript-rich handoff");
+      });
+      document.getElementById("domain-architect-answer").value = "Explore recursive document linking from selected outline nodes.";
+      document.getElementById("domain-architect-deep-dive").click();
+      await waitFor(() => {
+        const panel = document.getElementById("domain-architect-panel");
+        return panel && panel.textContent.includes("Deep dives: 1");
+      });
       const confirm = document.getElementById("domain-architect-confirm");
       return {
         ok: true,
@@ -93,11 +114,13 @@ async function main() {
         ready: !confirm.disabled,
         name: document.getElementById("domain-name") && document.getElementById("domain-name").value,
         purpose: document.getElementById("domain-purpose") && document.getElementById("domain-purpose").value,
+        focusedOutline: !!document.querySelector(".domain-architect-outline"),
+        deepDiveCaptured: (document.getElementById("domain-architect-panel") && document.getElementById("domain-architect-panel").textContent || "").includes("Deep dives: 1"),
         panel: (document.getElementById("domain-architect-panel") && document.getElementById("domain-architect-panel").textContent || "").slice(0, 1200),
       };
     })()`);
     console.log(JSON.stringify(result, null, 2));
-    if (!result || !result.ok || !result.ready) process.exitCode = 1;
+    if (!result || !result.ok || !result.ready || !result.focusedOutline || !result.deepDiveCaptured) process.exitCode = 1;
   } finally {
     await client.close();
   }

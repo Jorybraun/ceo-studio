@@ -63,6 +63,25 @@ function resolveWindow(session, preferred) {
   return wins.find((w) => w !== "watcher") || wins[0] || preferred || "main";
 }
 
+/**
+ * Explain WHY a launch produced no session. launch-agent exits before creating
+ * the tmux session on a guardrail denial (e.g. "max concurrent agents reached"),
+ * a disabled/non-launchable agent, or a missing profile — but the only signal
+ * was a generic "tmux session did not start". Surface the real cause from the
+ * captured output so the cockpit shows something actionable.
+ */
+function failureReason(output) {
+  const text = (output || "").trim();
+  if (!text) return "tmux session did not start (see output)";
+  const guardrail = text.match(/Spawn refused by cost guardrail:\s*(.+)/i);
+  if (guardrail) return `spawn refused by guardrail: ${guardrail[1].trim()}`;
+  const err = text.match(/^Error:\s*(.+)$/im);
+  if (err) return err[1].trim();
+  const lines = text.split("\n").map((s) => s.trim()).filter(Boolean);
+  const last = lines[lines.length - 1];
+  return last ? `tmux session did not start: ${last}` : "tmux session did not start (see output)";
+}
+
 /** The window a freshly-launched agent actually runs in, per its launch mode. */
 function liveWindow(plan) {
   if (plan && plan.launch_mode === "watcher_only") return plan.watcher_window || "watcher";
@@ -110,7 +129,7 @@ function mount(projectPath, id) {
     room: plan.canonical_room || plan.default_room || "discovery",
     speaker: plan.room_speaker || id,
     output,
-    reason: ok ? undefined : "tmux session did not start (see output)",
+    reason: ok ? undefined : failureReason(output),
   };
 }
 

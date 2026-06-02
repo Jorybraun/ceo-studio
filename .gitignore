@@ -35,3 +35,8 @@ dogfood-output/
 
 # Harness runtime session / guardrail ledger state
 runtime/harness/agent-tmux/
+runtime/harness/sessions/
+sessions/
+
+# Editor workspace state
+.obsidian/

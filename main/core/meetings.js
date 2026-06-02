@@ -30,6 +30,12 @@ function roomsDir(projectPath) {
 function roomDir(projectPath, room) {
   return path.join(roomsDir(projectPath), room);
 }
+function meetingsDir(projectPath) {
+  return path.join(harnessRoot(projectPath), "brain", "meetings");
+}
+function schedulePath(projectPath) {
+  return path.join(meetingsDir(projectPath), "scheduled.json");
+}
 
 /** Get list of currently mounted agents (active tmux sessions). */
 function mountedAgents() {
@@ -79,12 +85,189 @@ function options(projectPath) {
     agents,
     teams: Object.entries(cfg.teams || {}).map(([name, ids]) => ({ name, members: ids })),
     personas: Array.isArray(personas) ? personas : [],
+    rooms: listRooms(projectPath, allAgents),
+    scheduled: listScheduled(projectPath).meetings,
     mounted, // Include mounted list for UI debugging
   };
 }
 
+function _readJson(file, fallback) {
+  try {
+    if (!fs.existsSync(file)) return fallback;
+    return JSON.parse(fs.readFileSync(file, "utf-8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function _writeJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(value, null, 2), "utf-8");
+}
+
+function _meetingId() {
+  return `mtg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function _normalizeScheduled(info = {}) {
+  const now = new Date().toISOString();
+  const title = String(info.title || "").trim() || "Untitled meeting";
+  const scheduledFor = String(info.scheduledFor || "").trim() || now;
+  return {
+    id: String(info.id || _meetingId()),
+    title,
+    domain: String(info.domain || "All"),
+    scheduledFor,
+    recurrence: String(info.recurrence || "none"),
+    status: String(info.status || "scheduled"),
+    agenda: String(info.agenda || ""),
+    criteria: String(info.criteria || ""),
+    team: String(info.team || ""),
+    members: String(info.members || ""),
+    allowPaid: !!info.allowPaid,
+    sourceContext: Array.isArray(info.sourceContext) ? info.sourceContext : [],
+    room: String(info.room || ""),
+    createdAt: String(info.createdAt || now),
+    updatedAt: now,
+  };
+}
+
+function listScheduled(projectPath) {
+  const data = _readJson(schedulePath(projectPath), []);
+  const meetings = (Array.isArray(data) ? data : [])
+    .map((m) => _normalizeScheduled(m))
+    .sort((a, b) => String(a.scheduledFor).localeCompare(String(b.scheduledFor)));
+  return { ok: true, meetings };
+}
+
+function saveScheduled(projectPath, meetings) {
+  _writeJson(schedulePath(projectPath), meetings);
+  return { ok: true, meetings };
+}
+
+function scheduleMeeting({ projectPath, meeting } = {}) {
+  const current = listScheduled(projectPath).meetings;
+  const next = _normalizeScheduled(meeting || {});
+  if (!next.agenda.trim()) return { ok: false, reason: "agenda required" };
+  if (!next.team && !next.members.trim()) return { ok: false, reason: "pick members or a team" };
+  const updated = current.filter((m) => m.id !== next.id).concat(next);
+  saveScheduled(projectPath, updated);
+  return { ok: true, meeting: next };
+}
+
+function updateScheduled({ projectPath, id, patch } = {}) {
+  const current = listScheduled(projectPath).meetings;
+  const idx = current.findIndex((m) => m.id === id);
+  if (idx < 0) return { ok: false, reason: "scheduled meeting not found" };
+  const next = _normalizeScheduled({ ...current[idx], ...(patch || {}), id });
+  current[idx] = next;
+  saveScheduled(projectPath, current);
+  return { ok: true, meeting: next };
+}
+
+function deleteScheduled({ projectPath, id } = {}) {
+  const current = listScheduled(projectPath).meetings;
+  const next = current.filter((m) => m.id !== id);
+  saveScheduled(projectPath, next);
+  return { ok: true, deleted: current.length !== next.length };
+}
+
+function _nextRecurringTime(iso, recurrence) {
+  if (!recurrence || recurrence === "none") return "";
+  const d = new Date(iso || Date.now());
+  if (Number.isNaN(d.getTime())) return "";
+  if (recurrence === "daily") d.setDate(d.getDate() + 1);
+  else if (recurrence === "weekly") d.setDate(d.getDate() + 7);
+  else if (recurrence === "monthly") d.setMonth(d.getMonth() + 1);
+  else return "";
+  return d.toISOString();
+}
+
+function startScheduled({ projectPath, id } = {}) {
+  const current = listScheduled(projectPath).meetings;
+  const meeting = current.find((m) => m.id === id);
+  if (!meeting) return { ok: false, reason: "scheduled meeting not found" };
+  const room = _safeRoom(meeting.room) || _safeRoom(`${meeting.title}-${Date.now()}`) || `meeting-${Date.now()}`;
+  const started = start({
+    projectPath,
+    room,
+    agenda: meeting.agenda,
+    criteria: meeting.criteria,
+    members: meeting.members,
+    team: meeting.team,
+    allowPaid: meeting.allowPaid,
+  });
+  if (!started || !started.ok) return started;
+  const now = new Date().toISOString();
+  const next = current.map((m) => m.id === id
+    ? { ...m, status: "started", room: started.room, startedAt: now, updatedAt: now }
+    : m);
+  const nextTime = _nextRecurringTime(meeting.scheduledFor, meeting.recurrence);
+  if (nextTime) {
+    next.push(_normalizeScheduled({
+      ...meeting,
+      id: _meetingId(),
+      room: "",
+      status: "scheduled",
+      scheduledFor: nextTime,
+      createdAt: now,
+    }));
+  }
+  saveScheduled(projectPath, next);
+  return { ...started, meeting: { ...meeting, status: "started", room: started.room, startedAt: now } };
+}
+
+function listRooms(projectPath, allAgents = []) {
+  const root = roomsDir(projectPath);
+  if (!fs.existsSync(root)) return [];
+  const agentIds = new Set((allAgents || []).map((a) => a && a.id).filter(Boolean));
+  let names = [];
+  try {
+    names = fs.readdirSync(root, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name)
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+  return names.map((name) => {
+    const dir = roomDir(projectPath, name);
+    const logPath = path.join(dir, "chat.log");
+    const reqPath = path.join(dir, "requirements.md");
+    let feed = [];
+    let mtimeMs = 0;
+    try {
+      const stat = fs.statSync(logPath);
+      mtimeMs = stat.mtimeMs || 0;
+      feed = _parseLog(fs.readFileSync(logPath, "utf-8"));
+    } catch { /* ignore */ }
+    const speakers = [...new Set(feed.map((e) => e.speaker).filter(Boolean))];
+    const participants = speakers.filter((s) => agentIds.has(s));
+    const done = fs.existsSync(reqPath) || feed.some((e) => /MEETING SYNTHESIS/.test(e.body || ""));
+    return {
+      room: name,
+      messages: feed.length,
+      speakers,
+      participants,
+      updatedAt: mtimeMs ? new Date(mtimeMs).toISOString() : null,
+      done,
+      hasRequirements: fs.existsSync(reqPath),
+      channel: name.startsWith("chan-"),
+    };
+  }).sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+}
+
 function _safeRoom(room) {
   return String(room || "").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Deterministic room name for a board's team-log channel. The autonomy runner
+ * posts work milestones here and the cockpit opens the same room when you click
+ * the board's channel — so a channel literally IS the team's shared work log.
+ */
+function boardRoom(board) {
+  return _safeRoom(`chan-board-${board}`) || "chan-board";
 }
 
 /**
@@ -121,6 +304,79 @@ function start({ projectPath, room, agenda, criteria, members, team, orchestrato
   }
 }
 
+// Track live room-loop daemons by safe room name so we can stop them and avoid
+// double-spawning. Children are NOT detached, so they die with the app.
+const roomLoops = new Map();
+
+/**
+ * Start a persistent live room loop so a channel becomes a real A2A
+ * conversation: agents reply to messages posted into the room until it is
+ * stopped. Idempotent per room. Real providers require allowPaid.
+ */
+function startRoomLoop({ projectPath, room, members, team, criteria, allowPaid, maxFollowups, idleExit, gbrain } = {}) {
+  const bin = agentBin(projectPath);
+  if (!fs.existsSync(bin)) return { ok: false, reason: "harness bin/agent not found" };
+  const safeRoom = _safeRoom(room);
+  if (!safeRoom) return { ok: false, reason: "room required" };
+  if (!team && !(members && String(members).trim())) {
+    return { ok: false, reason: "pick members or a team" };
+  }
+  const existing = roomLoops.get(safeRoom);
+  if (existing && existing.exitCode === null && existing.signalCode === null) {
+    return { ok: true, room: safeRoom, already: true };
+  }
+
+  const args = ["room", "--room", safeRoom];
+  if (team) args.push("--team", String(team));
+  else args.push("--members", String(members));
+  if (criteria && String(criteria).trim()) args.push("--criteria", String(criteria));
+  if (Number.isFinite(maxFollowups)) args.push("--max-followups", String(maxFollowups));
+  if (Number.isFinite(idleExit)) args.push("--idle-exit", String(idleExit));
+  // gbrain shared memory is on by default; pass --no-gbrain only when explicitly disabled.
+  if (gbrain === false) args.push("--no-gbrain");
+
+  const env = envWithPython();
+  if (allowPaid) env.CEO_ALLOW_PAID = "1";
+
+  try {
+    const child = spawn(bin, args, { cwd: harnessRoot(projectPath), env, stdio: "ignore" });
+    roomLoops.set(safeRoom, child);
+    child.on("exit", () => { if (roomLoops.get(safeRoom) === child) roomLoops.delete(safeRoom); });
+    return { ok: true, room: safeRoom, started: true };
+  } catch (e) {
+    return { ok: false, reason: `failed to start room loop: ${e.message}` };
+  }
+}
+
+/** Stop a live room loop for a room (if running). */
+function stopRoomLoop({ room } = {}) {
+  const safeRoom = _safeRoom(room);
+  if (!safeRoom) return { ok: false, reason: "room required" };
+  const child = roomLoops.get(safeRoom);
+  if (child) {
+    try { child.kill("SIGTERM"); } catch { /* ignore */ }
+    roomLoops.delete(safeRoom);
+    return { ok: true, room: safeRoom, stopped: true };
+  }
+  return { ok: true, room: safeRoom, stopped: false };
+}
+
+/** Whether a live room loop is currently running for a room. */
+function roomLoopStatus({ room } = {}) {
+  const safeRoom = _safeRoom(room);
+  const child = roomLoops.get(safeRoom);
+  const running = !!(child && child.exitCode === null && child.signalCode === null);
+  return { ok: true, room: safeRoom, running };
+}
+
+/** Stop every live room loop (call on app shutdown). */
+function stopAllRoomLoops() {
+  for (const [, child] of roomLoops) {
+    try { child.kill("SIGTERM"); } catch { /* ignore */ }
+  }
+  roomLoops.clear();
+}
+
 /** Parse a harness chat.log into structured entries.
  * Entries start with an ISO timestamp header: `[2026-..T..Z] Speaker: body`.
  * Anchoring on the timestamp (not any `[...]`) avoids splitting on bracketed
@@ -145,6 +401,29 @@ function _parseLog(text) {
   return out;
 }
 
+/**
+ * Append a human/CEO message directly into a room's chat.log so it shows up in
+ * the live transcript alongside the agents. This is how a person (or the CEO)
+ * drops into a team channel mid-discussion to steer it. Writes the same
+ * `[<iso>] <speaker>: <body>` format _parseLog reads.
+ */
+function post({ projectPath, room, speaker, body } = {}) {
+  const safeRoom = _safeRoom(room);
+  if (!safeRoom) return { ok: false, reason: "room required" };
+  if (!String(body || "").trim()) return { ok: false, reason: "message required" };
+  const dir = roomDir(projectPath, safeRoom);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const logPath = path.join(dir, "chat.log");
+    if (!fs.existsSync(logPath)) fs.writeFileSync(logPath, `# ${safeRoom} Team Room\n\n`, "utf-8");
+    const line = `[${new Date().toISOString()}] ${String(speaker || "You").trim()}: ${String(body).trim()}\n`;
+    fs.appendFileSync(logPath, line, "utf-8");
+    return { ok: true, room: safeRoom };
+  } catch (e) {
+    return { ok: false, reason: e.message };
+  }
+}
+
 /** Live transcript + requirements + running state for a meeting room. */
 function room({ projectPath, room } = {}) {
   const safeRoom = _safeRoom(room);
@@ -164,4 +443,8 @@ function room({ projectPath, room } = {}) {
   return { ok: true, room: safeRoom, feed, requirements, running: !done, started: true };
 }
 
-module.exports = { options, start, room, roomDir, harnessRoot, mountedAgents };
+module.exports = {
+  options, start, post, room, roomDir, harnessRoot, mountedAgents, boardRoom,
+  listScheduled, scheduleMeeting, updateScheduled, deleteScheduled, startScheduled,
+  startRoomLoop, stopRoomLoop, roomLoopStatus, stopAllRoomLoops,
+};

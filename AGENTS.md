@@ -6,8 +6,9 @@ Read this before touching the model/provider/chat layer, orchestration layer, or
 
 - The conversational **CEO is the Hermes agent** (provider configured in Hermes, e.g. `xai-oauth`), authed via OAuth/funded. It is an agent in the Hermes registry, not a raw API model.
 - There is **no `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` required for the conversational CEO**. Never wire a keyed OpenAI/Anthropic provider as the CEO. Never reintroduce `OPENAI_API_KEY=...` to make CEO chat work.
-- All CEO chat/think paths route through the Hermes relay: `main/core/hermes.js` `ask()` -> `hermes chat -q`. Renderer chat (`window.ceo.ask` -> IPC `agent:ask`) delegates to this relay. Voice uses the same relay.
+- All CEO chat/think paths route through the Hermes relay: `main/core/hermes.js` (`ask()` / `askCeo()`) -> `hermes chat -q`. Renderer chat (`window.ceo.ask` -> IPC `agent:ask`) delegates to this relay. Voice uses the same relay.
 - The Hermes CEO owns the brain/memory/soul (`~/.hermes/SOUL.md`) and tools. CEO Studio is a face + cockpit on top of it.
+- **The CEO is a unified, mountable agent.** It is registered as the `ceo` agent in `runtime/harness/agents/agents.json` (`provider: hermes`, `launch_mode: hermes_profile`, empty `profile` = the **default Hermes profile = OAuth**, `room: discovery`, `tmux_session: pipe-ceo`). So it is mountable and viewable as a tmux terminal exactly like other agents. The chat box is unified with that mounted session: `agent:ask` -> `hermes.askCeo()` runs the relay in the CEO agent's workdir and persists the rolling Hermes session id to the same state file the harness `agent_adapter` uses (`<workspace>/brain/rooms/discovery/agents/ceo.json`), so the chat box, the viewable terminal, and a programmatic `bin/agent` dispatch (provider hermes, agent `ceo`) converge on one durable CEO session. Empty profile = no `-p` flag = no API key; never give the `ceo` agent a keyed provider.
 - `main/core/llm.js` `createProvider()` exists only for the optional autonomous Document Agent feature. It is not the conversational CEO. Leave `CEO_MODEL_PROVIDER=null` unless that specific feature is being wired; even then prefer a Hermes-backed provider over API keys.
 
 ## Models / Providers
@@ -15,6 +16,12 @@ Read this before touching the model/provider/chat layer, orchestration layer, or
 - Orchestrator + workers run on the provider selected in Hermes (currently `xai-oauth` for this setup unless explicitly changed).
 - Provider choice is an operational configuration decision; keep it explicit and documented when changed.
 - Utility model paths must be explicitly documented as utility-only, not CEO chat.
+
+## Mounted Agents Are Persona-Aware
+
+- "Mounting" an agent runs `runtime/harness/bin/launch-agent --name <id>`, which starts the agent's provider CLI in a tmux session (the human-typeable "main" window) plus a persona-aware `domain-room watch` watcher window. Per the accepted tmux decision (`runtime/harness/architecture/TMUX_AGENT_ORCHESTRATION_RESEARCH_AND_DECISION.md`), **tmux is only the TTY/visibility adapter; the agent registry is canonical and launches are idempotent.** Do not regress that.
+- The INTERACTIVE session (what a human types into) must operate in-character from its first message — not just the watcher. launch-agent seeds the persona brief (`personas.persona_preamble`) as an always-on context file (`AGENTS.md` + `CLAUDE.md`) into the agent's per-(room,agent) workdir (`<workspace>/brain/rooms/<room>/agents/<agent>/`, git-ignored) and launches the external CLI in that workdir, so cwd-aware CLIs (devin/claude) load it as always-on context. The mechanism + helpers live in `runtime/harness/agents/personas.py` (`agent_context_markdown`, `seed_agent_context`).
+- This complements the existing programmatic path (`agent_adapter.converse`/`dispatch`), which already prepends `persona_preamble` on the first turn.
 
 ## Swarm / Kanban Cockpit
 

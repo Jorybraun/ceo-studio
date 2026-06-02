@@ -133,4 +133,41 @@ async function ingest({ title, content, project, domain, metadata } = {}, env = 
   return { ok: true, result: parsed, endpoint: "gbrain capture", slug };
 }
 
-module.exports = { cfg, configured, prepareEnv, status, query, ingest };
+// Relative path (POSIX, repo-root anchored) to the committed gbrain MCP
+// launcher. Devin reads mcpServers from .devin/config.json and runs the command
+// from the repo root, so a relative command resolves correctly.
+const PROJECT_MCP_REL = "runtime/harness/bin/gbrain-mcp";
+
+/**
+ * Ensure the project's .devin/config.json wires the gbrain MCP server so every
+ * Devin agent working in this repo auto-connects to the shared project brain
+ * (no per-agent setup). Idempotent + non-destructive: only adds the `gbrain`
+ * entry when missing and preserves any existing config. Only wires when the
+ * project actually ships the launcher, so we never point Devin at a missing
+ * command in unrelated projects opened by the cockpit.
+ */
+function ensureProjectWiring(projectPath) {
+  if (!projectPath) return { ok: false, reason: "no project path" };
+  const launcher = path.join(projectPath, PROJECT_MCP_REL.split("/").join(path.sep));
+  if (!fs.existsSync(launcher)) {
+    return { ok: true, wired: false, reason: "project has no gbrain-mcp launcher" };
+  }
+  const cfgDir = path.join(projectPath, ".devin");
+  const cfgPath = path.join(cfgDir, "config.json");
+  let cfg = {};
+  try {
+    if (fs.existsSync(cfgPath)) cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8")) || {};
+  } catch { cfg = {}; }
+  cfg.mcpServers = cfg.mcpServers || {};
+  if (cfg.mcpServers.gbrain) return { ok: true, wired: true, alreadyPresent: true };
+  cfg.mcpServers.gbrain = { command: `./${PROJECT_MCP_REL}`, transport: "stdio" };
+  try {
+    fs.mkdirSync(cfgDir, { recursive: true });
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+    return { ok: true, wired: true, created: true };
+  } catch (e) {
+    return { ok: false, reason: e.message };
+  }
+}
+
+module.exports = { cfg, configured, prepareEnv, status, query, ingest, ensureProjectWiring, PROJECT_MCP_REL };

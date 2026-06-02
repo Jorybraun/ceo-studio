@@ -167,7 +167,8 @@
         </div>
         <span class="rounded-full border border-neutral-700 bg-neutral-900/80 px-2 py-0.5 text-[10px] uppercase tracking-wider text-neutral-400">${esc(agent.type)}</span>
         <span class="rounded-full border ${terminal.alive ? "border-emerald-500/40 text-emerald-300" : "border-amber-500/30 text-amber-300"} bg-neutral-950/70 px-2 py-0.5 text-[10px] uppercase tracking-wider">${alive}</span>
-        <button id="agent-terminal-refresh" class="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-800">Refresh terminal</button>
+        ${terminal.available && !terminal.alive ? `<button id="agent-terminal-mount" class="rounded-md border border-cyan-700/60 bg-cyan-950/30 px-2 py-1 text-xs text-cyan-200 hover:bg-cyan-900/40">Mount</button>` : ""}
+        <button id="agent-terminal-refresh" class="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-800">Refresh</button>
       </div>
       <div class="grid grid-cols-1 gap-3 p-4 lg:grid-cols-[260px_minmax(0,1fr)]">
         <div class="space-y-2 text-xs">
@@ -202,8 +203,17 @@
   async function refreshSelectedAgentTerminal() {
     const output = $("agent-terminal-output");
     if (!output || !selectedAgentId || !ceo.agentTerminalSnapshot) return;
-    const r = await ceo.agentTerminalSnapshot(selectedAgentId);
-    output.textContent = r && r.ok ? (r.output || "(empty)") : `Terminal unavailable: ${r ? r.reason : "unknown"}`;
+    output.textContent = "Loading terminal...";
+    try {
+      const r = await ceo.agentTerminalSnapshot(selectedAgentId);
+      if (r && r.ok) {
+        output.textContent = r.output || "(empty)";
+      } else {
+        output.textContent = `Terminal unavailable: ${r ? r.reason : "unknown"}\n\nThis agent may not have a tmux session mounted yet.`;
+      }
+    } catch (e) {
+      output.textContent = `Error loading terminal: ${String(e)}`;
+    }
     output.scrollTop = output.scrollHeight;
   }
 
@@ -892,7 +902,7 @@
     statusTimer = setInterval(refreshStatus, 10000);
 
     // Task click handler - select it for planning in the right rail.
-    document.addEventListener("click", (e) => {
+    document.addEventListener("click", async (e) => {
       const taskCard = e.target.closest(".task-card");
       if (taskCard) {
         selectTask({
@@ -929,9 +939,36 @@
         }
       }
 
+      const agentInspect = e.target.closest(".agent-inspect");
+      if (agentInspect) {
+        selectAgent(agentInspect.dataset.agentId);
+        return;
+      }
+
       const agentCard = e.target.closest(".agent-card");
       if (agentCard) {
         selectAgent(agentCard.dataset.agentId);
+      }
+
+      const terminalMount = e.target.closest("#agent-terminal-mount");
+      if (terminalMount) {
+        // Try to mount the agent's tmux session
+        if (window.ceo.registryMount && selectedAgentId) {
+          const msg = document.getElementById("agent-persona-msg");
+          if (msg) msg.textContent = "mounting...";
+          try {
+            const r = await window.ceo.registryMount(selectedAgentId);
+            if (r && r.ok) {
+              if (msg) msg.textContent = "mounted";
+              await loadAgents();
+            } else {
+              if (msg) msg.textContent = `mount failed: ${r ? r.reason : "unknown"}`;
+            }
+          } catch (e) {
+            if (msg) msg.textContent = `mount error: ${String(e)}`;
+          }
+        }
+        return;
       }
 
       const terminalRefresh = e.target.closest("#agent-terminal-refresh");

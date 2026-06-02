@@ -89,6 +89,13 @@ function normalizeAgent(spec) {
     memory_key: spec.memory_key || null,
     tmux_session: spec.tmux_session || null,
     tmux_window: spec.tmux_window || "main",
+    // Explicit launch override + Hermes profile. These drive launch-agent's
+    // mode (e.g. the conversational CEO is launch_mode "hermes_profile" with an
+    // empty profile = the default Hermes/OAuth session). Carried through so a
+    // mount-time update (which rewrites the agent) never strips them. Empty
+    // string is meaningful for `profile` (= default Hermes), so use ?? not ||.
+    launch_mode: spec.launch_mode || null,
+    profile: spec.profile == null ? null : String(spec.profile),
     enabled: spec.enabled !== false,
   };
 }
@@ -160,6 +167,14 @@ function _persistAgent(arr, agent) {
   if (agent.memory_key) slim.memory_key = agent.memory_key;
   if (agent.tmux_session) slim.tmux_session = agent.tmux_session;
   if (agent.tmux_window && agent.tmux_window !== "main") slim.tmux_window = agent.tmux_window;
+  if (agent.room) slim.room = agent.room;
+  // Persist an explicit launch mode + Hermes profile so they survive rewrites.
+  // An empty-string profile is meaningful (default Hermes / CEO), so only the
+  // launch_mode gate matters — when launch_mode is set we record the profile too.
+  if (agent.launch_mode) {
+    slim.launch_mode = agent.launch_mode;
+    if (agent.profile != null) slim.profile = agent.profile;
+  }
   if (agent.enabled === false) slim.enabled = false;
   const i = arr.findIndex((a) => slugify(a.id || a.name) === agent.id);
   if (i >= 0) arr[i] = slim; else arr.push(slim);

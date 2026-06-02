@@ -84,6 +84,12 @@ def load_config() -> dict:
                     "command": spec.get("command"),
                     "paid": spec.get("paid"),
                     "memory_key": spec.get("memory_key"),
+                    # Explicit launch override (else derived from provider). Lets a
+                    # declarative agent be a mounted Hermes-profile session — e.g.
+                    # the conversational CEO (launch_mode=hermes_profile, empty
+                    # profile = default Hermes/OAuth, owns ~/.hermes/SOUL.md).
+                    "launch_mode": spec.get("launch_mode"),
+                    "profile": spec.get("profile"),
                 }
         for name, ids in (data.get("teams", {}) or {}).items():
             if name not in teams and isinstance(ids, list):

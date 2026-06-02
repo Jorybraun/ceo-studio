@@ -1,5 +1,16 @@
 # Channels Feature Testing Log
 
+> **HISTORICAL** — This log captures the channel system when it was a
+> non-functional UI shell. The channel system has since been rebuilt into live
+> A2A rooms and now lives in its own domain. The authoritative, current
+> documentation and testing criteria are:
+> - Domain: `domains/channels/` (`definition.md`, `index.md`, `AGENTS.md`)
+> - Testing criteria: `domains/channels/testing-criteria.md`
+> - Feature spec: `domains/channels/docs/features/live-a2a-channels.md`
+>
+> Keep this file for the historical record; do not add new channel test results
+> here — add them to `domains/channels/testing-criteria.md`.
+
 **Date**: 2026-06-02  
 **Tester**: Devin CLI (dogfood testing)  
 **Domain**: Teams  
@@ -28,12 +39,27 @@
 - This is explicitly documented as unimplemented
 - **Critical Issue**: Channels are a static list with no actual room functionality
 
-### 3. Agent Mounting via UI ❌
-**Status**: FAIL
-- Attempting to mount agents via UI fails with: "mount failed: tmux session did not start (see output)"
-- Error occurs for both echo providers and hermes providers
-- No detailed error output shown to help debug
-- **Root Cause**: Cost guardrail limit (5/5 concurrent agents) or tmux configuration issue
+### 3. Agent Mounting via UI ✅ (RESOLVED)
+**Status**: FIXED (was FAIL)
+- Original symptom: "mount failed: tmux session did not start (see output)" for any agent.
+- **Real root cause** (diagnosed): NOT a tmux problem. The cost guardrail's
+  `count_running_agents()` counted *every* tmux session on the machine, including
+  unrelated scratch shells (`agent-chat`, `agent-orchestration`). With 3 real
+  agents + 2 scratch sessions it read 5/5 and denied the spawn; `launch-agent`
+  then exited before creating the session, and `mount()` reported the generic
+  "tmux session did not start". The error message hid the true reason.
+- **Fix**:
+  1. `config/cost_limits.py` — `count_running_agents()` now counts only agent
+     sessions matching the `pipe-*` naming convention (`AGENT_SESSION_PREFIX`,
+     override `CEO_AGENT_SESSION_PREFIX`, set "" for legacy count-all).
+  2. `main/core/mount.js` — `mount()` now surfaces the real failure via
+     `failureReason()` (e.g. "spawn refused by guardrail: ... (5/5)") instead of
+     the generic tmux message.
+- **Verified**: guardrail status dropped 5→3 running agents; `docs-steward`
+  mounts successfully; regression test added
+  (`tests/test_cost_limits.py::test_count_running_agents_only_counts_pipe_sessions`).
+- **Note**: the hourly spawn cap (`MAX_SPAWNS_PER_HOUR`, default 12) is a separate
+  limit and can still block bursts of mounts.
 
 ### 4. Agent Mounting via CLI ⚠️
 **Status**: PARTIAL

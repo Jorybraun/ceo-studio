@@ -11,6 +11,7 @@
     "smoke:electron": "node scripts/smoke-electron-cdp.js",
     "smoke:domain-architect": "node scripts/smoke-domain-architect-cdp.js",
     "qa:self": "node scripts/self-qa-cdp.js",
+    "qa:agents": "python3 scripts/dogfood-agent-roster.py",
     "autonomy:dry-run": "node scripts/start-autonomy.js --slug ceo-studio --dry-run --once",
     "autonomy:once": "node scripts/start-autonomy.js --slug ceo-studio --once --max 1",
     "autonomy:start": "node scripts/start-autonomy.js --slug ceo-studio --loop",

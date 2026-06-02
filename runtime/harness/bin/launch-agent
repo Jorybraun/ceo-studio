@@ -88,6 +88,19 @@ ensure_watcher_window() {
     fi
 }
 
+# Seed the persona brief as always-on context (AGENTS.md / CLAUDE.md) into the
+# agent's per-(room,agent) workdir, so a mounted INTERACTIVE provider session
+# (devin/claude — the tmux "main" window a human types into) operates fully
+# in-character from its very first message, not just the persona watcher.
+# Echoes the workdir to launch the CLI in (so the CLI picks up the context as
+# its cwd). Echoes nothing on no-persona or any failure (caller keeps its cwd).
+seed_persona_workdir() {
+    local room="$1" agent="$2" persona="$3"
+    [[ -z "$persona" ]] && return 0
+    PYTHONPATH="$HARNESS_ROOT" HARNESS_WORKSPACE="${HARNESS_WORKSPACE:-}" \
+        python3 "$HARNESS_ROOT/agents/personas.py" seed "$room" "$agent" "$persona" 2>/dev/null
+}
+
 echo "=== Launching agent: $AGENT_ID ==="
 echo "Display name: $DISPLAY_NAME"
 echo "Domain: $CANONICAL_ROOM"
@@ -135,11 +148,6 @@ python3 "$HARNESS_ROOT/config/cost_limits.py" check "$AGENT_ID" --interactive --
 
 case "$LAUNCH_MODE" in
     hermes_profile)
-        if [[ -z "$PROFILE" ]]; then
-            echo "Error: Registry entry '$AGENT_ID' uses launch_mode=hermes_profile but has no profile." >&2
-            exit 1
-        fi
-
         if ! tmux has-session -t "$(tmux_session_target "$TMUX_SESSION")" 2>/dev/null; then
             tmux new-session -d -s "$TMUX_SESSION" -n "$TMUX_WINDOW"
             echo "Created new tmux session: $TMUX_SESSION"
@@ -147,8 +155,21 @@ case "$LAUNCH_MODE" in
             echo "Reusing existing session: $TMUX_SESSION"
         fi
 
-        echo "Launching Hermes profile '$PROFILE' inside ${TMUX_SESSION}:${TMUX_WINDOW}..."
-        tmux send-keys -t "=$(printf '%s:%s' "$TMUX_SESSION" "$TMUX_WINDOW")" "cd $HARNESS_ROOT && hermes --profile $PROFILE" C-m
+        # An empty profile means the DEFAULT Hermes profile (no -p flag) — this
+        # is the conversational CEO (OAuth/funded, owns ~/.hermes/SOUL.md). A
+        # named profile launches that specific Hermes worker.
+        if [[ -n "$PROFILE" ]]; then
+            HERMES_CMD="hermes --profile $PROFILE"
+            echo "Launching Hermes profile '$PROFILE' inside ${TMUX_SESSION}:${TMUX_WINDOW}..."
+        else
+            HERMES_CMD="hermes"
+            echo "Launching default Hermes (conversational CEO) inside ${TMUX_SESSION}:${TMUX_WINDOW}..."
+        fi
+        # Best-effort persona seed for profiled agents (harmless if Hermes does
+        # not read cwd context). The CEO carries identity via its Hermes SOUL,
+        # so it has no persona and nothing is written for it.
+        seed_persona_workdir "$CANONICAL_ROOM" "$AGENT_ID" "$PERSONA" >/dev/null
+        tmux send-keys -t "=$(printf '%s:%s' "$TMUX_SESSION" "$TMUX_WINDOW")" "cd $HARNESS_ROOT && $HERMES_CMD" C-m
         echo "Starting persona-enabled room watcher in window '$WATCHER_WINDOW'..."
         ensure_watcher_window "$TMUX_SESSION" "$WATCHER_WINDOW" "$WATCH_CMD"
         ;;
@@ -166,8 +187,19 @@ case "$LAUNCH_MODE" in
             # "external" agent had no brain and could never communicate. Now we
             # actually start the registry command in the main window (the spawn
             # already passed the cost guardrail above).
+            #
+            # Persona-awareness: seed the persona brief as always-on context into
+            # the agent's per-(room,agent) workdir and launch the CLI there, so
+            # the INTERACTIVE session (what the user types into) is in-character
+            # from message one — not just the watcher window.
+            AGENT_RUN_CWD="$AGENT_CWD"
+            SEEDED_WD="$(seed_persona_workdir "$CANONICAL_ROOM" "$AGENT_ID" "$PERSONA")"
+            if [[ -n "$SEEDED_WD" && -d "$SEEDED_WD" ]]; then
+                AGENT_RUN_CWD="$SEEDED_WD"
+                echo "Seeded persona '$PERSONA' context into $SEEDED_WD (interactive session loads it as always-on context)."
+            fi
             echo "Starting external agent command in ${TMUX_SESSION}:${TMUX_WINDOW}: $COMMAND"
-            tmux send-keys -t "=$(printf '%s:%s' "$TMUX_SESSION" "$TMUX_WINDOW")" "cd $(printf '%q' "$AGENT_CWD") && $COMMAND" C-m
+            tmux send-keys -t "=$(printf '%s:%s' "$TMUX_SESSION" "$TMUX_WINDOW")" "cd $(printf '%q' "$AGENT_RUN_CWD") && $COMMAND" C-m
         else
             echo "No registry command configured for '$AGENT_ID'."
             echo "Prefer a provider-backed adapter instead (recommended): ./bin/agent dispatch --provider <p> --agent $AGENT_ID --room $CANONICAL_ROOM --task \"...\""

@@ -87,6 +87,35 @@ def cmd_meeting(args):
     print(result["requirements"])
 
 
+def cmd_room(args):
+    # The live room loop drives members through agent_adapter (the same brains
+    # the A2A servers wrap), so it needs no a2a-sdk re-exec of its own.
+    #
+    # Room turns are EPHEMERAL conversational provider calls (run synchronously,
+    # one at a time) — they never create a long-lived tmux session. So the
+    # "max concurrent tmux agents" proxy must not gate them (otherwise the room
+    # goes silent whenever the user happens to have agents mounted). Spend is
+    # still fully bounded by the kill switch, the paid gate (CEO_ALLOW_PAID),
+    # and the per-cycle / hourly spawn caps, which all remain active.
+    os.environ.setdefault("CEO_GUARDRAIL_DISABLE_TMUX", "1")
+    from agents import room_loop
+    from agents import meeting as meeting_mod
+    if args.team:
+        members = meeting_mod.members_for_team(args.team)
+        if not members:
+            sys.exit(f"error: team '{args.team}' not found in agents.json (or empty)")
+    else:
+        members = meeting_mod.parse_members(args.members or "")
+    if not members:
+        sys.exit("error: provide --members (e.g. 'ba,architect') or --team <name>")
+    room_loop.run_room_loop(
+        room=args.room, members=members, criteria=args.criteria or "",
+        max_followups=args.max_followups, idle_exit=args.idle_exit,
+        poll=args.poll, timeout=args.timeout,
+        gbrain=args.gbrain, gbrain_limit=args.gbrain_limit,
+        gbrain_ceiling=args.gbrain_ceiling)
+
+
 def cmd_dispatch(args):
     # A human at a TTY may dispatch paid providers; automated callers can't (unless CEO_ALLOW_PAID=1).
     r = agent_adapter.dispatch(args.provider, args.agent, args.room, args.task,
@@ -172,6 +201,26 @@ def main():
                     help="optional provider that synthesizes requirements (else deterministic)")
     mt.add_argument("--timeout", type=int, default=600)
     mt.set_defaults(func=cmd_meeting)
+
+    rl = sub.add_parser("room", help="Run a persistent live A2A room: members reply to room messages until stopped")
+    rl.add_argument("--room", default="discovery")
+    rl.add_argument("--members", default=None,
+                    help="comma list of ids (resolved via agents.json) or id[:provider[:persona]]")
+    rl.add_argument("--team", default=None, help="named team from agents.json (alternative to --members)")
+    rl.add_argument("--criteria", default="", help="what a good outcome looks like (steers relevance)")
+    rl.add_argument("--max-followups", dest="max_followups", type=int, default=1,
+                    help="bounded agent-to-agent follow-up depth (0 disables A2A back-and-forth)")
+    rl.add_argument("--idle-exit", dest="idle_exit", type=int, default=0,
+                    help="seconds of inactivity before auto-exit (0 = run until killed)")
+    rl.add_argument("--poll", type=float, default=2.0, help="seconds between log polls")
+    rl.add_argument("--timeout", type=int, default=600)
+    rl.add_argument("--no-gbrain", dest="gbrain", action="store_false",
+                    help="disable gbrain shared memory (capture + recall); on by default, auto-skips if gbrain is unhealthy")
+    rl.add_argument("--gbrain-limit", dest="gbrain_limit", type=int, default=5,
+                    help="max gbrain results recalled per turn")
+    rl.add_argument("--gbrain-ceiling", dest="gbrain_ceiling", type=int, default=4000,
+                    help="context ceiling: max characters of brain context injected per turn (0 = no cap)")
+    rl.set_defaults(func=cmd_room, gbrain=True)
 
     args = ap.parse_args()
     args.func(args)

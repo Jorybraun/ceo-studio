@@ -5,6 +5,18 @@
 set -euo pipefail
 
 PORT="${CEO_STUDIO_REMOTE_DEBUG_PORT:-9222}"
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Clean slate: a fresh launch should leave no prior instance behind. Kill any
+# existing CEO Studio Electron processes from THIS repo (scoped by repo path so
+# we never touch unrelated Electron apps), then free the debug port if anything
+# is still holding it. Guards (|| true) keep `set -e` happy when nothing matches.
+echo "🧹 Stopping any existing CEO Studio instances…"
+pkill -f "${REPO_DIR}/node_modules/electron" 2>/dev/null || true
+pkill -f "${REPO_DIR}/node_modules/.bin/electron" 2>/dev/null || true
+PORT_PIDS="$(lsof -ti "tcp:${PORT}" 2>/dev/null || true)"
+[ -n "${PORT_PIDS}" ] && kill ${PORT_PIDS} 2>/dev/null || true
+sleep 1
 
 echo "🚀 Launching CEO Studio with CDP remote debugging on port ${PORT}"
 echo ""

@@ -114,6 +114,7 @@ function outline(session) {
       label: field.label,
       complete: populated,
       value: field.list ? listify(value) : text(value),
+      focused: session.activeFocus === field.key,
     };
   });
 }
@@ -125,11 +126,17 @@ function save(projectSlug, session) {
 
 function hydrate(session) {
   const field = nextField(session.draft);
+  const active = session.activeFocus ? FIELDS.find((f) => f.key === session.activeFocus) : null;
+  const reviewQuestion = active
+    ? `Reviewing ${active.label}. What should change, what should we capture, or should we deep dive?`
+    : "Review the definition. Click any section to refine it, deep dive, or confirm creation.";
   return {
     ...session,
     missing: missingFields(session.draft),
-    currentQuestion: field ? field.question : "Review the definition. If this captures it, confirm creation.",
+    phase: field ? "interview" : "review",
+    currentQuestion: field ? field.question : reviewQuestion,
     currentField: field ? field.key : null,
+    activeFocus: active ? active.key : null,
     outline: outline(session),
     readyToConfirm: !field,
   };
@@ -155,6 +162,8 @@ function start(projectSlug, seed = {}) {
     draft,
     transcript: [],
     capturedEntities: [],
+    reviewNotes: [],
+    deepDives: [],
   });
 }
 
@@ -177,7 +186,7 @@ function inferEntities(answer) {
 function answer(projectSlug, id, answerText, fieldKey = null) {
   const session = get(projectSlug, id);
   if (!session) return { ok: false, reason: "Domain Architect session not found" };
-  const field = FIELDS.find((f) => f.key === (fieldKey || session.currentField));
+  const field = FIELDS.find((f) => f.key === (fieldKey || session.currentField || session.activeFocus));
   if (!field) return { ok: false, reason: "No active field to answer" };
   const value = text(answerText);
   if (!value) return { ok: false, reason: "answer required" };
@@ -192,7 +201,13 @@ function answer(projectSlug, id, answerText, fieldKey = null) {
     draft: nextDraft,
     transcript: [
       ...(session.transcript || []),
-      { at: now, field: field.key, question: field.question, answer: value },
+      {
+        at: now,
+        phase: session.currentField ? "interview" : "review",
+        field: field.key,
+        question: session.currentField ? field.question : `Focused refinement: ${field.label}`,
+        answer: value,
+      },
     ],
     capturedEntities: [
       ...(session.capturedEntities || []),
@@ -200,6 +215,69 @@ function answer(projectSlug, id, answerText, fieldKey = null) {
     ],
   };
   return { ok: true, session: save(projectSlug, updated) };
+}
+
+function focus(projectSlug, id, fieldKey) {
+  const session = get(projectSlug, id);
+  if (!session) return { ok: false, reason: "Domain Architect session not found" };
+  const field = FIELDS.find((f) => f.key === fieldKey);
+  if (!field) return { ok: false, reason: "Unknown outline section" };
+  const now = new Date().toISOString();
+  const updated = {
+    ...session,
+    activeFocus: field.key,
+    updatedAt: now,
+    reviewNotes: [
+      ...(session.reviewNotes || []),
+      { at: now, type: "focus", field: field.key, label: field.label },
+    ],
+  };
+  return { ok: true, session: save(projectSlug, updated) };
+}
+
+function deepDive(projectSlug, id, info = {}) {
+  const session = get(projectSlug, id);
+  if (!session) return { ok: false, reason: "Domain Architect session not found" };
+  const field = FIELDS.find((f) => f.key === (info.field || session.activeFocus));
+  if (!field) return { ok: false, reason: "Select an outline section before deep dive" };
+  const note = text(info.note || info.body || "");
+  const draftValue = session.draft ? session.draft[field.key] : "";
+  const now = new Date().toISOString();
+  const title = text(info.title) || `Deep dive: ${field.label}`;
+  const deepDiveItem = {
+    id: `deep-dive-${now.replace(/[^0-9]/g, "").slice(0, 14)}-${field.key}`,
+    at: now,
+    field: field.key,
+    title,
+    note,
+    parentValue: Array.isArray(draftValue) ? draftValue : text(draftValue),
+    agendaItem: {
+      type: "decomposition",
+      title,
+      source: id,
+      parentRef: field.key,
+      humanAttention: true,
+      body: [
+        `Review-phase deep dive requested for ${field.label}.`,
+        note ? `User/context note: ${note}` : "",
+      ].filter(Boolean).join("\n"),
+    },
+  };
+  const updated = {
+    ...session,
+    activeFocus: field.key,
+    updatedAt: now,
+    deepDives: [...(session.deepDives || []), deepDiveItem],
+    capturedEntities: [
+      ...(session.capturedEntities || []),
+      { type: "deep-dive-agenda-candidate", text: `${title}: ${note || field.label}`, capturedAt: now },
+    ],
+    transcript: [
+      ...(session.transcript || []),
+      { at: now, phase: "review", field: field.key, question: `Deep dive requested: ${field.label}`, answer: note || title },
+    ],
+  };
+  return { ok: true, session: save(projectSlug, updated), deepDive: deepDiveItem };
 }
 
 function updateDraft(projectSlug, id, patch = {}) {
@@ -213,6 +291,13 @@ function updateDraft(projectSlug, id, patch = {}) {
 function confirmationPackage(projectSlug, id) {
   const session = get(projectSlug, id);
   if (!session) return { ok: false, reason: "Domain Architect session not found" };
+  const entityAgenda = (session.capturedEntities || []).map((entity) => ({
+    type: entity.type.includes("meeting") ? "meeting" : entity.type.includes("subdomain") ? "scoping decision" : entity.type.includes("deep-dive") ? "decomposition" : "feature",
+    title: `Follow up on ${entity.type.replace(/-/g, " ")}`,
+    source: session.id,
+    body: entity.text,
+  }));
+  const deepDiveAgenda = (session.deepDives || []).map((item) => item.agendaItem).filter(Boolean);
   return {
     ok: true,
     session,
@@ -224,12 +309,19 @@ function confirmationPackage(projectSlug, id) {
       createScaffold: true,
       createHandoff: true,
       userConfirmed: true,
-      agendaItems: (session.capturedEntities || []).map((entity) => ({
-        type: entity.type.includes("meeting") ? "meeting" : entity.type.includes("subdomain") ? "scoping decision" : "feature",
-        title: `Follow up on ${entity.type.replace(/-/g, " ")}`,
-        source: session.id,
-        body: entity.text,
-      })),
+      userConfirmationStatement: "User confirmed the Domain Architect review package in the app.",
+      rawTranscript: session.transcript || [],
+      capturedEntities: session.capturedEntities || [],
+      reviewNotes: session.reviewNotes || [],
+      deepDives: session.deepDives || [],
+      sourceBundle: [
+        "domains/domain-lifecycle/docs/design/domain-creation-process.md",
+        "domains/domain-lifecycle/docs/design/handoff-protocol.md",
+        "domains/domain-lifecycle/docs/design/agent-scoping-model.md",
+        "domains/domain-lifecycle/docs/personas/domain-architect.md",
+        "domains/domain-lifecycle/docs/personas/agenda-agent.md",
+      ],
+      agendaItems: [...entityAgenda, ...deepDiveAgenda],
     },
   };
 }
@@ -239,6 +331,8 @@ module.exports = {
   start,
   get,
   answer,
+  focus,
+  deepDive,
   updateDraft,
   confirmationPackage,
   missingFields,

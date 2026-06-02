@@ -163,6 +163,28 @@ function bullets(items, fallback = "- TBD") {
   return list.length ? list.map((item) => `- ${item}`).join("\n") : fallback;
 }
 
+function entityLines(items) {
+  if (!Array.isArray(items)) return listify(items);
+  return items.map((item) => {
+    if (item && typeof item === "object") {
+      const type = item.type ? `${item.type}: ` : "";
+      return `${type}${item.text || item.title || item.name || JSON.stringify(item)}`.trim();
+    }
+    return String(item || "").trim();
+  }).filter(Boolean);
+}
+
+function transcriptMarkdown(transcript = []) {
+  if (!Array.isArray(transcript) || !transcript.length) return "_No raw transcript captured._";
+  return transcript.map((turn, idx) => [
+    `### ${idx + 1}. ${turn.phase || "interview"} / ${turn.field || "general"}`,
+    `- At: ${turn.at || "unknown"}`,
+    `- Prompt: ${turn.question || "unknown"}`,
+    "",
+    turn.answer || "",
+  ].join("\n")).join("\n\n");
+}
+
 function definitionMarkdown(def) {
   return `# Domain: ${def.name}
 
@@ -446,6 +468,10 @@ function defineDomain(slug, domainDef, { projectPath = null, createScaffold = tr
     source: { system: "domain-lifecycle", path: definition.artifactPaths.definition, actor: definition.ownerPersona || null },
   });
   if (createHandoff && projectPath) {
+    const sourceBundle = Array.isArray(domainDef.sourceBundle) ? domainDef.sourceBundle : [];
+    const captured = domainDef.capturedEntities && domainDef.capturedEntities.length
+      ? domainDef.capturedEntities
+      : definition.features;
     createHandoffRecord({
       projectSlug: slug,
       projectPath,
@@ -453,10 +479,18 @@ function defineDomain(slug, domainDef, { projectPath = null, createScaffold = tr
       title: `${definition.name} creation handoff`,
       status: "pending",
       userConfirmation: !!domainDef.userConfirmed,
-      capturedEntities: definition.features,
+      userConfirmationStatement: domainDef.userConfirmationStatement || "",
+      capturedEntities: captured,
       suggestedAgendaItems: agendaItems.length ? agendaItems : definition.features.map((f) => normalizeAgendaItem({ title: f, source: "domain-creation", type: "feature" })),
-      sourceLinks: [definition.artifactPaths.definition, definition.artifactPaths.capturedAgendaItems],
-      body: "Created from the confirmed domain package. Agenda Agent should triage these proposals before any Kanban materialization.",
+      sourceLinks: [definition.artifactPaths.definition, definition.artifactPaths.capturedAgendaItems, ...sourceBundle],
+      rawArtifacts: sourceBundle,
+      rawTranscript: domainDef.rawTranscript || [],
+      body: [
+        "Created from the confirmed Domain Architect package.",
+        "Agenda Agent should triage these proposals before any Kanban materialization.",
+        domainDef.reviewNotes && domainDef.reviewNotes.length ? `${domainDef.reviewNotes.length} review interactions were captured.` : "",
+        domainDef.deepDives && domainDef.deepDives.length ? `${domainDef.deepDives.length} deep-dive request(s) were captured as proposal-only agenda items.` : "",
+      ].filter(Boolean).join("\n"),
     });
   }
   return hydrateDomain(slug, definition, { projectPath });
@@ -679,19 +713,32 @@ function handoffMarkdown(handoff) {
 - Domain: ${handoff.domain}
 - Status: ${handoff.status}
 - Created: ${handoff.createdAt}
+- From Agent: ${handoff.fromAgent || "domain-architect"}
+- To Agent: ${handoff.toAgent || "agenda-agent"}
+- Triggered By: ${handoff.triggeredBy || "domain-creation-confirmation"}
+- Human Visible: ${handoff.humanVisible === false ? "no" : "yes"}
 - User confirmation: ${handoff.userConfirmation ? "yes" : "no"}
 
 ## Summary
 ${handoff.body || "No summary captured."}
 
+## User Confirmation Statement
+${handoff.userConfirmationStatement || (handoff.userConfirmation ? "User confirmed this handoff package." : "No explicit confirmation statement captured.")}
+
 ## Source Links
 ${bullets(handoff.sourceLinks, "- None")}
+
+## Raw Artifacts
+${bullets(handoff.rawArtifacts, "- None")}
 
 ## Captured Entities
 ${bullets(handoff.capturedEntities, "- None")}
 
 ## Suggested Agenda Items
 ${handoff.suggestedAgendaItems.length ? handoff.suggestedAgendaItems.map((item) => `- [ ] (${item.type}) ${item.title}`).join("\n") : "- None"}
+
+## Raw Transcript
+${transcriptMarkdown(handoff.rawTranscript)}
 `;
 }
 
@@ -724,7 +771,25 @@ function parseHandoff(filePath, projectPath) {
   };
 }
 
-function createHandoffRecord({ projectSlug, projectPath, domain, title, status = "pending", userConfirmation = false, sourceLinks = [], capturedEntities = [], suggestedAgendaItems = [], body = "" }) {
+function createHandoffRecord({
+  projectSlug,
+  projectPath,
+  domain,
+  title,
+  status = "pending",
+  userConfirmation = false,
+  userConfirmationStatement = "",
+  sourceLinks = [],
+  rawArtifacts = [],
+  capturedEntities = [],
+  suggestedAgendaItems = [],
+  rawTranscript = [],
+  fromAgent = "domain-architect",
+  toAgent = "agenda-agent",
+  triggeredBy = "domain-creation-confirmation",
+  humanVisible = true,
+  body = "",
+}) {
   const def = getDomain(projectSlug, domain, { projectPath });
   if (!def) return { ok: false, reason: "Domain not found" };
   const dir = path.join(projectPath, def.relativePath, "handoffs");
@@ -737,10 +802,17 @@ function createHandoffRecord({ projectSlug, projectPath, domain, title, status =
     domain: def.slug,
     status,
     createdAt: now,
+    fromAgent,
+    toAgent,
+    triggeredBy,
+    humanVisible,
     userConfirmation,
+    userConfirmationStatement,
     sourceLinks: listify(sourceLinks),
-    capturedEntities: listify(capturedEntities),
+    rawArtifacts: listify(rawArtifacts),
+    capturedEntities: entityLines(capturedEntities),
     suggestedAgendaItems: (suggestedAgendaItems || []).map(normalizeAgendaItem),
+    rawTranscript: Array.isArray(rawTranscript) ? rawTranscript : [],
     body,
   };
   const file = path.join(dir, `${id}.md`);

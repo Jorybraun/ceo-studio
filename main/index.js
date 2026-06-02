@@ -283,6 +283,23 @@ function openProjectSession(projectId) {
     console.log("Domain ingestion failed:", e.message);
   }
   
+  // Brain provisioning (lightweight): ensure every Devin agent in this repo can
+  // reach the shared project brain by wiring the gbrain MCP server into
+  // .devin/config.json (idempotent), then check brain reachability and log it.
+  // We do NOT manage the gbrain DB/container here — that stays explicit.
+  let gbrainWiring = null;
+  try {
+    gbrainWiring = gbrain.ensureProjectWiring(project.path);
+    if (gbrainWiring.created) console.log("[gbrain] wired gbrain MCP into .devin/config.json");
+  } catch (e) {
+    console.warn("[gbrain] ensureProjectWiring failed:", e.message);
+  }
+  // Fire-and-forget health probe so the brain's reachability is visible at open
+  // without blocking project load (the renderer can also call gbrain:status).
+  Promise.resolve(gbrain.status())
+    .then((s) => console.log(`[gbrain] brain ${s && s.available ? "reachable" : "UNAVAILABLE"}${s && s.reason ? ` (${s.reason})` : ""}`))
+    .catch(() => { /* never block project open on a brain probe */ });
+
   const cost = new CostMeter(project.slug);
   const { provider, note } = createProvider();
   session.project = project;
@@ -296,6 +313,7 @@ function openProjectSession(projectId) {
     providerNote: note,
     providerId: provider.id || "null",
     context: brain.loadContext(project.slug),
+    gbrain: gbrainWiring,
   };
 }
 
@@ -535,6 +553,16 @@ ipcMain.handle("domain_architect:get", (_e, id) => {
 ipcMain.handle("domain_architect:answer", (_e, info = {}) => {
   if (!session.project) return { ok: false, reason: "No project open" };
   return domainArchitect.answer(session.project.slug, info.id, info.answer, info.field);
+});
+
+ipcMain.handle("domain_architect:focus", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "No project open" };
+  return domainArchitect.focus(session.project.slug, info.id, info.field);
+});
+
+ipcMain.handle("domain_architect:deep_dive", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "No project open" };
+  return domainArchitect.deepDive(session.project.slug, info.id, info);
 });
 
 ipcMain.handle("domain_architect:update", (_e, info = {}) => {
@@ -1492,6 +1520,21 @@ ipcMain.handle("meetings:start", (_e, info = {}) =>
   meetings.start({ ...info, projectPath: session.project && session.project.path }));
 ipcMain.handle("meetings:room", (_e, room) =>
   meetings.room({ room, projectPath: session.project && session.project.path }));
+ipcMain.handle("meetings:post", (_e, { room, speaker, body } = {}) =>
+  meetings.post({ room, speaker, body, projectPath: session.project && session.project.path }));
+ipcMain.handle("meetings:schedule", (_e, meeting = {}) =>
+  meetings.scheduleMeeting({ meeting, projectPath: session.project && session.project.path }));
+ipcMain.handle("meetings:schedule_update", (_e, { id, patch } = {}) =>
+  meetings.updateScheduled({ id, patch, projectPath: session.project && session.project.path }));
+ipcMain.handle("meetings:schedule_delete", (_e, id) =>
+  meetings.deleteScheduled({ id, projectPath: session.project && session.project.path }));
+ipcMain.handle("meetings:schedule_start", (_e, id) =>
+  meetings.startScheduled({ id, projectPath: session.project && session.project.path }));
+// Live room loop: a persistent A2A conversation in a room (agents reply to posts).
+ipcMain.handle("meetings:room_loop_start", (_e, info = {}) =>
+  meetings.startRoomLoop({ ...info, projectPath: session.project && session.project.path }));
+ipcMain.handle("meetings:room_loop_stop", (_e, room) => meetings.stopRoomLoop({ room }));
+ipcMain.handle("meetings:room_loop_status", (_e, room) => meetings.roomLoopStatus({ room }));
 
 // --- IPC: local agent job queue ---
 ipcMain.handle("jobs:create_ticket_pack", async (_e, { board, ticketId, domain, instructions } = {}) => {
@@ -1632,8 +1675,12 @@ ipcMain.handle("cost:resume", () => { if (session.cost) session.cost.resume(); r
 // --- IPC: agent chat ---
 // The CEO IS the Hermes agent (codex, OAuth-funded). There is NO API key and
 // none is required: route the chat through the Hermes relay, the same funded
-// brain the voice path uses. (The old DocumentAgent/OpenAI provider path is kept
-// only for the autonomous doc-edit feature, not the conversational CEO.)
+// brain the voice path uses. The chat is unified with the MOUNTED CEO agent
+// (`ceo` in the registry): askCeo() runs in the CEO agent's workdir and resumes
+// the durable session id shared with its mounted terminal + the harness adapter,
+// so the chat box, the viewable terminal, and `bin/agent` dispatch are one CEO
+// session. (The old DocumentAgent/OpenAI provider path is kept only for the
+// autonomous doc-edit feature, not the conversational CEO.)
 ipcMain.handle("agent:ask", async (_e, prompt) => {
   // Honor the local kill switch / cost guardrail before reaching the CEO.
   if (session.cost && !session.cost.canProceed().ok) {
@@ -1648,7 +1695,7 @@ ipcMain.handle("agent:ask", async (_e, prompt) => {
   const msg = contextBits.length ? `[Context: ${contextBits.join(" | ")}]
 
 ${prompt}` : prompt;
-  const r = await hermes.ask(msg);
+  const r = await hermes.askCeo(msg, { projectPath: _projPath() });
   const cost = session.cost ? session.cost.status() : null;
   if (!r.ok) return { text: r.reason || "CEO unavailable.", error: true, cost };
   return { text: r.reply, cost, halted: false };
@@ -2026,6 +2073,8 @@ if (!gotLock) {
   app.on("before-quit", () => {
     // Clean up GBrain server when quitting
     stopGBrainServer();
+    // Stop any live A2A room-loop daemons.
+    try { meetings.stopAllRoomLoops(); } catch { /* ignore */ }
   });
 }
 

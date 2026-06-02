@@ -25,7 +25,7 @@ const PROJECT_PATH = "/tmp/fake-repo";
 
 // A reusable fake-deps factory. `calls` records side effects for assertions.
 function makeDeps(overrides = {}) {
-  const calls = { assign: [], setStatus: [], comment: [], spawn: [], decompose: [], selfRepair: [], verify: 0 };
+  const calls = { assign: [], setStatus: [], comment: [], spawn: [], decompose: [], selfRepair: [], verify: 0, work: [] };
   const board = overrides.board || { ok: true, columns: {} };
   const deps = {
     hermes: {
@@ -46,6 +46,7 @@ function makeDeps(overrides = {}) {
     spawnWorker: (a) => { calls.spawn.push(a); return { ok: true, pid: 4242 }; },
     readLogTail: () => "worker finished cleanly",
     verify: () => { calls.verify++; return overrides.verifyResult || { ok: true, results: [{ cmd: "npm test", ok: true, tail: "" }] }; },
+    postWork: (a) => { calls.work.push(a); return { ok: true }; },
   };
   return { deps, calls };
 }
@@ -61,6 +62,7 @@ function basePolicy(extra = {}) {
   ok("ready devin task spawns a worker", calls.spawn.length === 1 && calls.spawn[0].model === "swe-1.6");
   ok("spawned task is set to running", calls.setStatus.some((s) => s.taskId === "t1" && s.status === "running"));
   ok("run record reports a spawn", r.spawned === 1);
+  ok("spawn posts a 'started' work-event to the team log", calls.work.some((w) => w.board === "ceo-studio" && w.speaker === "builder" && /started/.test(w.body)));
 })();
 
 // 2. unassigned actionable task -> assigned to orchestration-routed registry agent
@@ -77,6 +79,7 @@ function basePolicy(extra = {}) {
   ok("review gate runs verification", calls.verify === 1);
   ok("passing verify promotes to done", calls.setStatus.some((s) => s.taskId === "t3" && s.status === "done"));
   ok("passing verify files no self-repair bug", calls.selfRepair.length === 0);
+  ok("done posts a 'Done' work-event to the team log", calls.work.some((w) => /Done/.test(w.body)));
 })();
 
 // 3b. review + verify FAIL -> blocked + self-repair (never a fake pass)
@@ -86,6 +89,7 @@ function basePolicy(extra = {}) {
   ok("failing verify blocks the task", calls.setStatus.some((s) => s.taskId === "t4" && s.status === "blocked"));
   ok("failing verify files a self-repair bug", calls.selfRepair.length >= 1);
   ok("failing verify NEVER marks done", !calls.setStatus.some((s) => s.taskId === "t4" && s.status === "done"));
+  ok("blocked posts a 'blocked' work-event to the team log", calls.work.some((w) => /blocked/.test(w.body)));
 })();
 
 // 4. dry-run -> proposes, never mutates

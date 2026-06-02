@@ -64,15 +64,22 @@ class CodexProvider(AgentProvider):
              use_last: bool, workdir: Path, timeout: int) -> tuple[str, Optional[str], Optional[str]]:
         workdir.mkdir(parents=True, exist_ok=True)
         last_file = Path(tempfile.mkstemp(prefix="codex-last-", suffix=".txt")[1])
-        cmd = [_codex_bin(), "exec"]
-        if resume:
-            cmd += ["resume", resume]
-        elif use_last:
-            cmd += ["resume", "--last"]
-        cmd += ["--skip-git-repo-check", "--json", "-C", str(workdir),
-                "-o", str(last_file)]
-        if model:
-            cmd += ["-m", model]
+        if resume or use_last:
+            # `codex exec resume` has its own option parser and does not accept
+            # `-C/--cd`; the subprocess cwd below provides the working root.
+            cmd = [_codex_bin(), "exec", "resume", "--skip-git-repo-check",
+                   "--json", "-o", str(last_file)]
+            if model:
+                cmd += ["-m", model]
+            if use_last:
+                cmd += ["--last"]
+            elif resume:
+                cmd += [resume]
+        else:
+            cmd = [_codex_bin(), "exec", "--skip-git-repo-check", "--json",
+                   "-C", str(workdir), "-o", str(last_file)]
+            if model:
+                cmd += ["-m", model]
         cmd += [prompt]
         try:
             res = subprocess.run(cmd, cwd=str(workdir), capture_output=True, text=True,

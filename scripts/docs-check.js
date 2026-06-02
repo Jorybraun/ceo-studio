@@ -30,6 +30,7 @@ const autonomyRunner = read("runtime/harness/architecture/AUTONOMY_RUNNER_PLAN.m
 const docsPolicy = read("runtime/harness/architecture/DOCS_STEWARDSHIP_AND_HANDOFF.md");
 const dogfoodSkill = read("runtime/harness/skills/dogfood/SKILL.md");
 const agentsJson = JSON.parse(read("runtime/harness/agents/agents.json"));
+const tmuxDecision = read("runtime/harness/architecture/TMUX_AGENT_ORCHESTRATION_RESEARCH_AND_DECISION.md");
 const domainLifecycleIndex = "domains/domain-lifecycle/docs/design/system-overview.md";
 
 check("AGENTS states Hermes CEO rule", /The CEO Is Hermes/i.test(agents) && /There Is No API Key/i.test(agents));
@@ -65,6 +66,15 @@ check("package check runs docs:check", includes("package.json", "npm run docs:ch
 check("Domain lifecycle design docs exist (from June 2026 discussion)", exists(domainLifecycleIndex) && exists("domains/domain-lifecycle/docs/design/domain-creation-process.md") && exists("domains/domain-lifecycle/docs/personas/domain-architect.md"));
 check("Domain lifecycle tracks meeting and calendar capability", exists("domains/domain-lifecycle/docs/features/meeting-follow-up-sessions.md") && exists("domains/domain-lifecycle/agendas/README.md") && exists("domains/domain-lifecycle/requirements/README.md"));
 check("New critical personas registered in agents.json (design placeholders)", (agentsJson.agents || []).some((a) => a.id === "domain-architect") && (agentsJson.agents || []).some((a) => a.id === "agenda-agent") && (agentsJson.agents || []).some((a) => a.id === "ba-document-guard"));
+check("agents.json registers the CEO as a default-Hermes (OAuth, no key) mounted agent", (agentsJson.agents || []).some((a) => {
+  return a.id === "ceo"
+    && a.provider === "hermes"
+    && a.launch_mode === "hermes_profile"
+    && (a.profile === "" || a.profile == null);
+}));
+check("AGENTS documents the unified, mountable CEO + askCeo relay", /mountable agent/i.test(agents) && /askCeo/.test(agents) && /no `-p` flag = no API key|empty `profile`/i.test(agents));
+check("AGENTS documents persona-aware mounted interactive sessions", /Mounted Agents Are Persona-Aware/i.test(agents) && /seed_agent_context|always-on context/i.test(agents));
+check("tmux decision doc keeps registry canonical + records CEO/persona implementation", /Implementation notes \(CEO Studio\)/.test(tmuxDecision) && /Registry is canonical/i.test(tmuxDecision) && /conversational CEO is a registry agent/i.test(tmuxDecision));
 
 const failed = checks.filter((c) => !c.ok);
 for (const c of checks) {

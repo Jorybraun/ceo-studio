@@ -172,6 +172,16 @@ Self-repair flow:
    - self-repair bug creation on simulated failure
 7. Update docs and `npm run docs:check`.
 
+## Team-log channels (work milestones)
+
+Each Kanban board has a **team-log channel** — a standing room (`meetings.boardRoom(slug)` → `chan-board-<slug>`) that the cockpit opens when you click the board in the Channels list. The runner posts milestone **work-events** into that room as agents build, so the whole team (and the human) get shared insight into work in flight, alongside chat:
+
+- **▶ started** — when a worker is dispatched on a task (EXECUTE).
+- **✓ finished … awaiting review** / **✗ hit an error** — when a worker is reaped.
+- **✅ … Done** / **⛔ … blocked** — the review/test gate outcome.
+
+These are posted via the injectable `postWork` dep (`defaultPostWork` → `meetings.post`); it is best-effort and side-effect-only — the team log is a convenience surface, never a gate, so a posting failure never affects a cycle. The cockpit renders these as compact log lines (distinct from chat) and the persistent A2A room loop lets you ask members `@agent what are you doing?` on demand (answered from the visible log + the agent's room session; live worker-session introspection is a future extension).
+
 ## Definition Of Done
 
 The autonomy runner is not complete until evidence proves:

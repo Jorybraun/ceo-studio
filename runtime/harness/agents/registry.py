@@ -265,8 +265,21 @@ def _declarative_agents() -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for aid, spec in (cfg.get("agents") or {}).items():
         provider = str(spec.get("provider") or "echo")
-        mode, command = _launch_for(provider, spec)
         room = str(spec.get("room") or "discovery")
+        profile = str(spec.get("profile") or "").strip()
+        explicit_mode = str(spec.get("launch_mode") or "").strip()
+        if explicit_mode in VALID_LAUNCH_MODES:
+            # The agent declares its own launch mode (e.g. the conversational
+            # CEO: hermes_profile with an empty profile = default Hermes/OAuth).
+            mode = explicit_mode
+            if mode == "hermes_profile":
+                command = "hermes" + (f" --profile {shlex.quote(profile)}" if profile else "")
+            elif mode == "external":
+                _, command = _launch_for(provider, spec)
+            else:
+                command = ""
+        else:
+            mode, command = _launch_for(provider, spec)
         out[aid] = {
             "id": aid,
             "display_name": spec.get("name") or aid,
@@ -278,7 +291,7 @@ def _declarative_agents() -> dict[str, dict[str, Any]]:
             "tmux_window": spec.get("tmux_window") or "main",
             "watcher_window": "watcher",
             "launch_mode": mode,
-            "profile": "",
+            "profile": profile,
             "command": command,
             "capabilities": list(spec.get("capabilities") or []),
             "mission": spec.get("description") or "",
@@ -323,7 +336,14 @@ def _normalise_agent(key: str, data: dict[str, Any]) -> dict[str, Any]:
     tmux_session = str(agent.get("tmux_session") or f"pipe-{agent_id}")
     tmux_window = str(agent.get("tmux_window") or "main")
     watcher_window = str(agent.get("watcher_window") or "watcher")
-    profile = str(agent.get("profile") or (agent_id if launch_mode == "hermes_profile" else ""))
+    # Preserve an explicitly-provided profile, even when it is the empty string
+    # (empty + hermes_profile = the DEFAULT Hermes profile, i.e. the
+    # conversational CEO). Only fall back to the agent id when no profile key was
+    # set at all, so built-in hermes_profile agents keep their implicit profile.
+    if agent.get("profile") is None:
+        profile = agent_id if launch_mode == "hermes_profile" else ""
+    else:
+        profile = str(agent.get("profile"))
     command = str(agent.get("command") or "")
     capabilities = list(agent.get("capabilities") or [])
     health_policy = dict(agent.get("health_policy") or DEFAULT_HEALTH_POLICY)

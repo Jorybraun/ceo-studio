@@ -182,6 +182,10 @@ async def run_meeting(*, room: str, agenda: str, members: list[Member],
                 passes.append(m.id)
             else:
                 contributions[m.id] = reply
+                # Log every contribution to the shared room as it happens, so the
+                # room transcript IS the conversation (not just START/SYNTHESIS).
+                with contextlib.suppress(Exception):
+                    agent_adapter.post_to_room(room, m.id, reply)
         
         # For mounted agents, note they participate via room (no A2A client)
         for m in mounted:

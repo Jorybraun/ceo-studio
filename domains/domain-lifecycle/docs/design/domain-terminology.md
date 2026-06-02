@@ -76,6 +76,11 @@ The phase after the initial interview where the user can click on parts of the d
 ### Recursive Document Linking / Deep Dive
 The ability, during the review phase, to click on a section of a domain definition and create a linked child document to explore that topic in more depth. This supports recursive decomposition without losing context.
 
+### Meeting
+A scheduled, time-boxed session with a defined purpose, usually tied to one or more Agenda Items. Meetings can include human participants, one or more agents, a clear agenda, and structured output such as decisions, action items, or refined requirements.
+
+Meetings can be lightweight agent-only working sessions or full user-involved sessions. In the future, this may include real video calls with transcription.
+
 ---
 
 *This document should be updated whenever new terms are introduced or existing definitions are clarified.*

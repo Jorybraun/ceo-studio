@@ -619,15 +619,17 @@ function addComment({ board, taskId, body, author = "CEO Studio" }) {
   return _kanban(board, ["comment", "--author", author, taskId, body], 30000);
 }
 
-/** One `hermes chat -q` invocation. Resolves with {ok, reply, sessionId, raw, sessionMiss, reason}. */
-function _runChat(msg, resume, timeoutMs) {
+/** One `hermes chat -q` invocation. Resolves with {ok, reply, sessionId, raw, sessionMiss, reason}.
+ * `cwd` (optional) runs the CLI in the CEO agent's workdir so the cockpit chat
+ * shares a working directory with the mounted CEO terminal + harness adapter. */
+function _runChat(msg, resume, timeoutMs, cwd) {
   return new Promise((resolve) => {
     const prof = profile();
     const args = [...(prof ? ["-p", prof] : []), "chat", "-q", msg, "-Q", "--yolo", "--accept-hooks"];
     if (resume) args.push("--resume", resume);
     let out = "", err = "", done = false, child;
     try {
-      child = spawn(bin(), args, { env: process.env });
+      child = spawn(bin(), args, { env: process.env, ...(cwd ? { cwd } : {}) });
     } catch (e) {
       return resolve({ ok: false, reason: `Failed to reach CEO: ${e.message}` });
     }
@@ -719,6 +721,91 @@ async function askStream(message, { timeoutMs = 180000, onDelta } = {}) {
   return { ok: true, reply: res.reply, session: _sessionId };
 }
 
+// ---------------------------------------------------------------------------
+// The CEO as a unified, mounted agent
+//
+// The CEO is registered in the harness registry as the `ceo` agent (provider
+// hermes, launch_mode hermes_profile, room discovery — see
+// runtime/harness/agents/agents.json). That makes it mountable + viewable as a
+// tmux terminal exactly like any other agent. To make the cockpit chat box "the
+// same thing" as that mounted session, askCeo() runs the Hermes relay in the
+// CEO agent's per-(room,agent) workdir and persists the rolling session id to
+// the SAME state file the harness agent_adapter uses
+// (<workspace>/brain/rooms/discovery/agents/ceo.json). So whether you talk to
+// the CEO from the chat box, dispatch to it via `bin/agent` (provider hermes,
+// agent ceo), or view its mounted terminal, they converge on one durable Hermes
+// session. Still pure Hermes/OAuth — no API key, degrades gracefully.
+// ---------------------------------------------------------------------------
+const CEO_AGENT_ID = "ceo";
+const CEO_ROOM = "discovery";
+
+function _ceoAgentsBase(projectPath) {
+  const base = projectPath || process.env.HARNESS_WORKSPACE
+    || path.join(__dirname, "..", "..", "runtime", "harness");
+  return path.join(base, "brain", "rooms", CEO_ROOM, "agents");
+}
+function _ceoWorkdir(projectPath) {
+  return path.join(_ceoAgentsBase(projectPath), CEO_AGENT_ID);
+}
+function _ceoStatePath(projectPath) {
+  return path.join(_ceoAgentsBase(projectPath), `${CEO_AGENT_ID}.json`);
+}
+/** The persisted Hermes session id shared with the harness agent_adapter. */
+function _loadCeoSession(projectPath) {
+  try {
+    const s = JSON.parse(fs.readFileSync(_ceoStatePath(projectPath), "utf-8"));
+    const sid = s && s.session_id;
+    // Ignore the adapter's cwd-only placeholder; only real ids can --resume.
+    return sid && !String(sid).startsWith("hermes-cwd:") ? sid : null;
+  } catch { return null; }
+}
+/** Persist the rolling CEO session id in the adapter-compatible state shape. */
+function _saveCeoSession(projectPath, sessionId) {
+  if (!sessionId) return;
+  try {
+    const p = _ceoStatePath(projectPath);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    let prev = {};
+    try { prev = JSON.parse(fs.readFileSync(p, "utf-8")); } catch { /* fresh */ }
+    fs.writeFileSync(p, JSON.stringify({
+      agent: CEO_AGENT_ID, room: CEO_ROOM, provider: "hermes",
+      model: prev.model || null, session_id: sessionId,
+      created_at: prev.created_at || Date.now() / 1000,
+    }, null, 2));
+  } catch { /* best-effort durability; chat still works in-memory */ }
+}
+
+/**
+ * Relay a chat turn to the mounted CEO Hermes session. Same OAuth-funded brain
+ * as ask(), but anchored to the `ceo` registry agent: runs in its workdir and
+ * resumes the durable session id shared with the mounted terminal + harness
+ * adapter. Preserves graceful degradation (returns {ok:false, reason} when
+ * Hermes is absent) and the no-API-key rule (default Hermes profile = OAuth).
+ */
+async function askCeo(message, { timeoutMs = 180000, projectPath = null } = {}) {
+  if (!installed()) return { ok: false, reason: "Hermes CLI not found" };
+  let msg = String(message || "").trim();
+  if (!msg) return { ok: false, reason: "Empty message" };
+  if (_focusedTask) {
+    msg = `[Context: We're discussing task "${_focusedTask.taskTitle}" (ID: ${_focusedTask.taskId}, status: ${_focusedTask.taskStatus}, board: ${_focusedTask.board})]\n\n${msg}`;
+  }
+  const wd = _ceoWorkdir(projectPath);
+  try { fs.mkdirSync(wd, { recursive: true }); } catch { /* fall back to no cwd */ }
+  // Resume the durable CEO session: in-memory rolling id first (shared with the
+  // voice/AGUI faces), else the id persisted alongside the mounted agent.
+  let sid = _sessionId || _loadCeoSession(projectPath);
+  let res = await _runChat(msg, sid, timeoutMs, wd);
+  if (sid && res.sessionMiss) {
+    sid = null;
+    res = await _runChat(msg, null, timeoutMs, wd);
+  }
+  const newSid = res.sessionId || sid;
+  if (res.sessionId) _sessionId = res.sessionId; // keep continuity even on error
+  _saveCeoSession(projectPath, newSid);
+  if (!res.ok) return { ok: false, reason: _friendly(res.reason), raw: res.reason, partial: res.partial };
+  return { ok: true, reply: res.reply, session: newSid };
+}
+
 /**
  * Relay a message to the live Hermes CEO and return its reply. Keeps a single
  * rolling session so context persists. This is what the voice agent calls —
@@ -775,5 +862,5 @@ module.exports = {
   getConfig, setModel, listProfiles, setProfile, gatewayStart, gatewayStop,
   setPersonality,
   focusTask, addTask, assignTask, taskAction, dispatch, setTaskStatus, taskLog, assignees, addComment,
-  ask, askStream,
+  ask, askCeo, askStream,
 };

@@ -232,8 +232,20 @@ architectSession = domainArchitect.answer(added.slug, architectSession.id, "Meet
 architectSession = domainArchitect.answer(added.slug, architectSession.id, "Domains, Teams, Agenda Agent, Hermes CEO.").session;
 architectSession = domainArchitect.answer(added.slug, architectSession.id, "domain-architect, agenda-agent, docs-steward").session;
 ok("Domain Architect reaches confirmation readiness", architectSession.readyToConfirm === true && architectSession.missing.length === 0);
+const focusedArchitect = domainArchitect.focus(added.slug, architectSession.id, "features");
+ok("Domain Architect can focus a clickable outline section", focusedArchitect.ok && focusedArchitect.session.activeFocus === "features");
+architectSession = domainArchitect.answer(added.slug, architectSession.id, "Also capture saved synthesis artifacts and follow-up agenda proposals.").session;
+ok("Domain Architect supports review-phase refinement", architectSession.transcript.some((turn) => turn.phase === "review" && turn.field === "features"));
+const deepDive = domainArchitect.deepDive(added.slug, architectSession.id, { field: "features", note: "Explore recursive document linking after high-level definition." });
+ok("Domain Architect captures deep dives as agenda candidates", deepDive.ok && deepDive.session.deepDives.length === 1 && deepDive.session.capturedEntities.some((e) => e.type === "deep-dive-agenda-candidate"));
+architectSession = deepDive.session;
 const architectPackage = domainArchitect.confirmationPackage(added.slug, architectSession.id);
 ok("Domain Architect builds confirmed domain package", architectPackage.ok && architectPackage.domainPackage.name === "Meetings" && architectPackage.domainPackage.createHandoff === true);
+ok("Domain Architect confirmation package carries raw transcript and deep dive agenda", architectPackage.domainPackage.rawTranscript.length >= 1 && architectPackage.domainPackage.agendaItems.some((item) => item.type === "decomposition"));
+const architectCreatedDomain = domainsCore.defineDomain(added.slug, architectPackage.domainPackage, { projectPath: proj, createScaffold: true, createHandoff: true });
+const architectHandoffs = domainsCore.listHandoffs({ projectPath: proj, domain: architectCreatedDomain.slug }).handoffs;
+const architectHandoffText = fs.readFileSync(path.join(proj, architectHandoffs[0].path), "utf-8");
+ok("Domain Architect handoff persists transcript and protocol fields", /## Raw Transcript/.test(architectHandoffText) && /From Agent: domain-architect/.test(architectHandoffText));
 
 // --- orchestration org structure ---
 ok("orchestration normalizes blocked lane aliases", orchestrationOrg.normalizeLane("Review / Blocked") === "blocked");
@@ -424,6 +436,32 @@ ok("mount lookup resolves project agents without project harness",
 ok("mount lookup carries Devin model command",
   devinPlan && devinPlan.command === "devin --model gemini-3-flash" && devinPlan.memory_key === "discover:pm");
 
+// --- CEO is a unified, mountable agent (still Hermes/OAuth, no API key) ---
+const ceoAgent = registry.read(regProj).agents.find((a) => a.id === "ceo");
+ok("registry registers the ceo agent backed by Hermes", !!ceoAgent && ceoAgent.provider === "hermes");
+ok("ceo agent is a default-Hermes profile session (empty profile = OAuth, no key)",
+  ceoAgent && ceoAgent.launch_mode === "hermes_profile" && ceoAgent.profile === "");
+// updateAgent must not strip the CEO's launch_mode/profile when the cockpit
+// rewrites the agent at mount time (tmux_session caching).
+const ceoProj = fs.mkdtempSync(path.join(os.tmpdir(), "ceo-proj-"));
+registry.createAgent(ceoProj, {
+  id: "ceo", name: "CEO", provider: "hermes",
+  launch_mode: "hermes_profile", profile: "", room: "discovery",
+});
+registry.updateAgent(ceoProj, "ceo", { tmux_session: "pipe-ceo", tmux_window: "main" });
+const ceoAfter = registry.read(ceoProj).agents.find((a) => a.id === "ceo");
+ok("mount-time update preserves CEO launch_mode + empty profile",
+  ceoAfter && ceoAfter.launch_mode === "hermes_profile" && ceoAfter.profile === "" && ceoAfter.tmux_session === "pipe-ceo");
+// The harness registry must resolve the CEO as a launchable hermes_profile
+// session whose command is the default Hermes (no -p flag = the OAuth CEO).
+const ceoPlan = mount.lookup(regProj, "ceo");
+ok("mount lookup resolves the CEO as a launchable Hermes-profile agent",
+  ceoPlan && ceoPlan.id === "ceo" && ceoPlan.launch_mode === "hermes_profile" && ceoPlan.launchable === true);
+ok("CEO launch command is the default Hermes (no API key, OAuth)",
+  ceoPlan && ceoPlan.command === "hermes" && ceoPlan.profile === "");
+// The cockpit chat routes through the CEO Hermes relay (askCeo), not a keyed model.
+ok("hermes module exposes the unified CEO chat relay askCeo", typeof hermes.askCeo === "function");
+
 // --- provider (offline default) + agent cost-gating ---
 const { provider } = createProvider({});
 ok("default provider is NullProvider (offline)", provider instanceof NullProvider);
@@ -440,6 +478,15 @@ ok("createUtilityProvider prefers gateway when CF_* set", utilGw.provider instan
 ok("createUtilityProvider gateway default model is Gemma", utilGw.provider.model === "google/gemma-4-26b-a4b-it-maas");
 const utilNull = createUtilityProvider({});
 ok("createUtilityProvider is NullProvider when unconfigured", utilNull.provider instanceof NullProvider);
+
+// --- live A2A room loop lifecycle (validation only; no agent is spawned) ---
+const meetings = require("../main/core/meetings");
+const REPO_ROOT = path.resolve(__dirname, "..");
+const rlNoMembers = meetings.startRoomLoop({ projectPath: REPO_ROOT, room: "test-room" });
+ok("room loop requires members or a team", rlNoMembers.ok === false && /members or a team/.test(rlNoMembers.reason));
+ok("room loop requires a room name", meetings.startRoomLoop({ projectPath: REPO_ROOT, members: "a,b" }).ok === false);
+ok("room loop reports not running for an unopened room", meetings.roomLoopStatus({ room: "test-room" }).running === false);
+ok("stop room loop on an unopened room is a no-op", meetings.stopRoomLoop({ room: "test-room" }).stopped === false);
 
 (async () => {
   const killMeter = new CostMeter(added.slug, { maxSessionUsd: 100, maxDayUsd: 100 });

@@ -84,7 +84,7 @@
 
   <!-- Two agent-controlled panels -->
   <main class="flex-1 flex min-h-0 px-3 pb-3 gap-3">
-    <!-- Studio nav rail: opens the workspace panels (Domain, Board, Tasks, Teams, Channels, Meetings) -->
+    <!-- Studio nav rail: opens the workspace panels (Domain, Board, Tasks, Agents, Teams, Channels, Meetings) -->
     <nav id="studio-nav" class="w-[176px] shrink-0 overflow-auto rounded-xl border border-neutral-800 bg-neutral-900/40 p-2 flex flex-col gap-1">
       <div class="px-2 pt-1 pb-1 text-[11px] uppercase tracking-wider text-neutral-500">Workspace</div>
       <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="domain">
@@ -97,8 +97,11 @@
         <span class="text-neutral-500">☑</span><span>Tasks</span>
       </button>
       <div class="mt-2 px-2 pt-1 pb-1 text-[11px] uppercase tracking-wider text-neutral-500">Team</div>
+      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="agents">
+        <span class="text-neutral-500">⦿</span><span>Agents</span>
+      </button>
       <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="teams">
-        <span class="text-neutral-500">⦿</span><span>Teams</span>
+        <span class="text-neutral-500">▦</span><span>Teams</span>
       </button>
       <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="personas">
         <span class="text-neutral-500">✦</span><span>Personas</span>
@@ -150,7 +153,7 @@
                 class="bg-red-600 hover:bg-red-500 text-white rounded-lg px-4 py-2 text-sm font-medium transition">Send</button>
       </div>
 
-      <!-- Agent live surface: shown when an agent is selected from the Team panel.
+      <!-- Agent live surface: shown when an agent is selected from the Agents panel.
            Terminal tab = live tmux capture-pane; Logs tab = the agent's room transcript. -->
       <div id="agent-surface" class="hidden absolute inset-0 z-20 rounded-xl bg-neutral-950/97 backdrop-blur flex flex-col">
         <div class="flex items-center gap-2 px-3 py-2 border-b border-neutral-800">
@@ -173,6 +176,47 @@
                  class="flex-1 bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-xs text-neutral-100 placeholder-neutral-600 focus:outline-none focus:ring-1 focus:ring-cyan-500/60"
                  placeholder="Message this agent in its room (as CEO)…" />
           <button id="as-send" class="bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg px-3 py-2 text-xs font-medium transition">Send</button>
+        </div>
+      </div>
+
+      <!-- Channel surface: a live TEAM ROOM. Open a channel from the Channels panel
+           to discuss a brief here — the team posts updates, asks each other
+           questions, and the CEO can drop in to direct them. -->
+      <div id="channel-surface" class="hidden absolute inset-0 z-20 rounded-xl bg-neutral-950/97 backdrop-blur flex flex-col">
+        <div class="flex items-center gap-2 px-3 py-2 border-b border-neutral-800">
+          <span class="text-neutral-500">#</span>
+          <span id="chan-name" class="text-sm font-medium text-neutral-100 truncate">channel</span>
+          <span id="chan-state" class="text-[10px] text-neutral-500"></span>
+          <button id="chan-add" title="Add agents to this channel"
+                  class="ml-auto text-[11px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 rounded px-2 py-1 transition">+ Agent</button>
+          <button id="chan-close" title="Back to CEO chat"
+                  class="text-xs bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 rounded px-2 py-1 transition">✕</button>
+        </div>
+        <div id="chan-members" class="flex flex-wrap items-center gap-1.5 px-3 py-2 border-b border-neutral-800/70 bg-neutral-950/40"></div>
+        <div id="chan-feed" class="flex-1 overflow-auto p-3 space-y-3 text-sm"></div>
+
+        <!-- Brief working session: kick off an A2A discussion about a brief -->
+        <div class="px-3 py-2 border-t border-neutral-800 bg-neutral-950/40">
+          <textarea id="chan-brief" rows="2"
+                    class="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-xs text-neutral-100 placeholder-neutral-600 focus:outline-none focus:ring-1 focus:ring-cyan-500/60"
+                    placeholder="Paste or describe a brief for the team to discuss…"></textarea>
+          <div class="mt-2 flex items-center gap-2">
+            <label class="flex items-center gap-1.5 text-[11px] text-neutral-400 select-none">
+              <input id="chan-ceo" type="checkbox" class="accent-red-500" /> CEO in room
+            </label>
+            <span class="text-[10px] text-neutral-600">Real agents (live models)</span>
+            <button id="chan-discuss" class="ml-auto bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg px-3 py-1.5 text-xs font-medium transition">Discuss brief →</button>
+          </div>
+        </div>
+
+        <!-- Human / CEO composer: post directly into the live room -->
+        <div class="p-2 border-t border-neutral-800 flex gap-2 items-center">
+          <select id="chan-speaker" title="Speak as" class="bg-neutral-900 border border-neutral-700 rounded-lg px-2 py-2 text-[11px] text-neutral-200 focus:outline-none focus:ring-1 focus:ring-cyan-500/60"></select>
+          <select id="chan-to" title="Address" class="bg-neutral-900 border border-neutral-700 rounded-lg px-2 py-2 text-[11px] text-neutral-200 focus:outline-none focus:ring-1 focus:ring-cyan-500/60"></select>
+          <input id="chan-input"
+                 class="flex-1 bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-xs text-neutral-100 placeholder-neutral-600 focus:outline-none focus:ring-1 focus:ring-cyan-500/60"
+                 placeholder="Message the room…" />
+          <button id="chan-send" class="bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg px-3 py-2 text-xs font-medium transition">Send</button>
         </div>
       </div>
     </section>

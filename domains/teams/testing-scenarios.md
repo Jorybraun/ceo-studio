@@ -89,10 +89,14 @@ This document logs testing scenarios for CEO Studio features so they can be revi
 5. Even CLI-mounted agents don't respond (echo providers are fake)
 
 ### Status
-❌ **FAILING** - Channels feature is non-functional UI shell
+❌ **FAILING (HISTORICAL)** - Channels was a non-functional UI shell at the time
+of this scenario. It has since been rebuilt into live A2A rooms and moved to its
+own domain. See the current criteria in `domains/channels/testing-criteria.md`.
 
 ### Documentation
-- Full test log: `domains/teams/channels-testing-log.md`
+- Historical test log: `domains/teams/channels-testing-log.md`
+- **Current authoritative criteria**: `domains/channels/testing-criteria.md`
+- Current feature spec: `domains/channels/docs/features/live-a2a-channels.md`
 
 ---
 

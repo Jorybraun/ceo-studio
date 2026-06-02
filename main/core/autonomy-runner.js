@@ -36,6 +36,7 @@ const org = require("./orchestration-org");
 const registry = require("./registry");
 const autonomyLoop = require("./autonomy-loop");
 const selfRepair = require("./self-repair");
+const meetings = require("./meetings");
 
 const DEFAULT_POLICY = {
   enabled: false,
@@ -245,6 +246,17 @@ function defaultCleanupWorktree({ projectPath, worktree }) {
   catch (e) { return { ok: false, reason: String(e.message || e).slice(0, 200) }; }
 }
 
+/**
+ * Post a milestone work-event into a board's team-log channel (the room a
+ * channel maps to). Best-effort and side-effect-only: the team log is a
+ * convenience surface, never a gate, so failures must never break a cycle.
+ */
+function defaultPostWork({ projectPath, board, speaker, body }) {
+  try {
+    return meetings.post({ projectPath, room: meetings.boardRoom(board), speaker: speaker || "worker", body });
+  } catch { return { ok: false }; }
+}
+
 const REAL_DEPS = {
   hermes,
   org,
@@ -257,7 +269,13 @@ const REAL_DEPS = {
   verify: defaultVerify,
   mergeBranch: defaultMergeBranch,
   cleanupWorktree: defaultCleanupWorktree,
+  postWork: defaultPostWork,
 };
+
+/** Safely emit one milestone to the team-log channel (never throws). */
+function logWork(deps, projectPath, board, speaker, body) {
+  try { if (deps.postWork) deps.postWork({ projectPath, board, speaker, body }); } catch { /* ignore */ }
+}
 
 // ---------------------------------------------------------------------------
 // Prompt construction
@@ -421,6 +439,9 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
             }
           }
           phases.reap.push({ board: w.board, taskId: w.taskId, agentId: w.agentId, branch: w.branch || null, outcome: failed ? "blocked" : "review" });
+          logWork(deps, projectPath, w.board, w.agentId, failed
+            ? `✗ hit an error on \`${w.board}/${w.taskId}\` — see the board log`
+            : `✓ finished \`${w.board}/${w.taskId}\`${w.branch ? ` on branch \`${w.branch}\`` : ""}; awaiting review`);
         });
       }
       workers = stillRunning;
@@ -504,6 +525,8 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
               workers.push({ board, taskId: t.id, agentId: agent.id, model, pid: res.pid, logPath, startedAt, title: full.title || t.title, worktree: res.worktree, branch: res.branch });
               spawnedThisCycle += 1;
               phases.execute.push({ board, taskId: t.id, agentId: agent.id, model, pid: res.pid });
+              logWork(deps, projectPath, board, agent.id,
+                `▶ started \`${board}/${t.id}\` — "${full.title || t.title}" (Devin ${model})`);
             });
           }
         }
@@ -547,6 +570,7 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
               const failTail = (verifyRes.results || []).filter((r) => !r.ok).map((r) => `### ${r.cmd}\n\`\`\`\n${r.tail}\n\`\`\``).join("\n\n");
               deps.hermes.addComment({ board: b, taskId: t.id, author: "autonomy-runner/review-gate", body: `Test gate FAILED — not promoting to Done.${reviewInfo ? ` (verified branch \`${reviewInfo.branch}\`)` : ""}\n${evidence}\n\n${failTail}` });
               deps.hermes.setTaskStatus({ board: b, taskId: t.id, status: "blocked", reason: "autonomy review/test gate failed" });
+              logWork(deps, projectPath, b, "review-gate", `⛔ \`${b}/${t.id}\` blocked — review/test gate failed; self-repair filed`);
               safe("review-selfrepair", () => deps.selfRepair.reportSystemBug({
                 board: b, source: "autonomy review/test gate",
                 title: `[Self-QA] Verification failed while reviewing ${t.id}`,
@@ -581,6 +605,7 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
             }
             deps.hermes.addComment({ board: b, taskId: t.id, author: "autonomy-runner/review-gate", body: `Test gate PASSED.${mergeNote}\n${evidence}` });
             deps.hermes.setTaskStatus({ board: b, taskId: t.id, status: "done", reason: "passed autonomy review/test gate" });
+            logWork(deps, projectPath, b, "review-gate", `✅ \`${b}/${t.id}\` passed the test gate${mergeNote ? " & merged" : ""} — Done`);
             phases.review.push({ board: b, taskId: t.id, outcome: "done" });
           });
         }
