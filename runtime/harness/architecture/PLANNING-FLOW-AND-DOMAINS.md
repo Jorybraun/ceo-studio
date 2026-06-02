@@ -2,6 +2,8 @@
 
 This document describes the concrete planning process in the Project CEO Harness.
 
+> **Evolution note (June 2026):** The high-level domain model here is being refined by the detailed domain lifecycle specs now at `domains/domain-lifecycle/docs/design/` (System Overview, Domain Terminology, Agent Scoping Model, Critical System Agents, Domain Creation Process, Handoff Protocol, Recursive Document Linking) inside the Domain Lifecycle domain. Those specs introduce specialized Critical System Agents (Domain Architect for guided creation interviews with live AGUI outline, Agenda Agent for handoff triage, per-domain BA Document Guard enforcing Dirty/Clean states) and first-class handoff entities. This document describes the current implemented/prior flow; the new specs represent the target detailed operating model. Cross-reference them for creation mechanics, agent roles, and document hygiene.
+
 ## What is a "Domain"?
 
 A **Domain** is a logical, self-contained area of the product or project that has its own:
@@ -10,7 +12,7 @@ A **Domain** is a logical, self-contained area of the product or project that ha
 - Data models / contracts with other domains
 - Long-term ownership
 
-Domains are **not** just "folders in the code." They are units of strategic ownership.
+Domains are **not** just "folders in the code." They are units of strategic ownership. They are created and maintained through the structured process defined in `domains/DOMAIN_CREATION_PROCESS.md` and protected by the BA Document Guard (`domains/CRITICAL_SYSTEM_AGENTS.md`, persona `ba-document-guard`).
 
 ### Examples (for a project like PIPE-OS)
 
@@ -27,7 +29,7 @@ Domains can be technical or product-oriented. The CEO Orchestrator decides the r
 
 ## How Domains Are Determined
 
-There are two main ways domains get created:
+There are two main ways domains get created (see the detailed, target process in `domains/DOMAIN_CREATION_PROCESS.md` and `domains/HANDOFF_PROTOCOL.md` — the flow below is the prior/ high-level view being evolved):
 
 ### 1. Initial Project Breakdown (when starting or re-architecting)
 
@@ -42,6 +44,8 @@ There are two main ways domains get created:
 
 5. Once approved, domains are scaffolded using the `create-domain.sh` tool (or improved version).
 
+**Target (per June 2026 design):** Domain creation is driven by a specialized **Domain Architect** Critical System Agent via a structured conversational interview in the right panel. The left AGUI panel live-updates a clickable hierarchical outline of the emerging definition. The process ends with an explicit handoff record to the **Agenda Agent** (not automatic deep work).
+
 ### 2. Organic Emergence (during normal operation)
 
 While working, the CEO Orchestrator may notice that something is big/complex enough to deserve its own domain.
@@ -49,6 +53,8 @@ While working, the CEO Orchestrator may notice that something is big/complex eno
 Example: "The way we're handling transcripts and provenance is getting complicated and touches multiple areas. We should spin up a `transcript-core` domain."
 
 It will propose this to you before creating it.
+
+Subsequent decomposition and refinement use the recursive deep-dive / linked child document mechanism described in `domains/RECURSIVE_DOCUMENT_LINKING.md`.
 
 ## The Planning Flow (Step by Step)
 
@@ -134,6 +140,18 @@ Future / ideal state:
   - Outstanding delegations and their status
   - Recent chat activity + decisions
 - The brain (GBrain) can answer questions like "What's the current status of the discovery domain?" or "What big decisions were made last month?"
+
+## Agent Scoping & Critical System Agents
+
+The refined model (see `domains/AGENT_SCOPING_MODEL.md` and `domains/CRITICAL_SYSTEM_AGENTS.md`) defines three scoping levels for agents:
+
+- **System (Critical)**: Mandatory platform infrastructure with immutable core behavior (system prompt) + editable persona layer. Includes CEO (Hermes), **Domain Architect**, **Agenda Agent**, **BA Document Guard** (per-domain doc quality + Dirty/Clean enforcement), Orchestrator.
+- **Project**: Visible across a project's domains.
+- **Domain**: Only visible/usable inside one specific domain.
+
+No cross-pollination: agents respect their scope.
+
+The **BA Document Guard** (persona: `ba-document-guard`) is the primary defense against documentation rot: every document change triggers review; dirty docs block attached work items.
 
 ## How Communication Works
 

@@ -76,20 +76,39 @@ async def _ask(client, text: str) -> str:
     return "\n".join(t for t in out if t).strip()
 
 
+def _is_agent_mounted(agent_id: str) -> bool:
+    """Check if an agent is already mounted (has active tmux session)."""
+    import subprocess
+    session = f"pipe-{agent_id}"
+    try:
+        subprocess.run(["tmux", "has-session", "-t", f"={session}"],
+                       check=True, capture_output=True, timeout=2)
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+
+
 @contextlib.asynccontextmanager
 async def _member_clients(members: list[Member], room: str, timeout: int):
-    """Start each member as an A2A server and yield {member_id: client}."""
+    """Start each member as an A2A server and yield {member_id: client}.
+    Skips launch for agents that are already mounted - they participate via room watchers."""
     import httpx
     from a2a.client import ClientFactory, ClientConfig
 
-    servers, clients = [], {}
+    servers, clients = {}, {}
     hc = httpx.AsyncClient(timeout=timeout + 30)
     try:
         for m in members:
+            # Check if agent is already mounted
+            if _is_agent_mounted(m.id):
+                # Agent is already running with room watcher - skip A2A server launch
+                # It will participate via the room instead
+                continue
+            
             handle = a2a_runtime.serve(
                 m.id, provider=m.provider, room=room, persona=m.persona,
                 model=m.model, capabilities=m.capabilities, timeout=timeout, block=False)
-            servers.append(handle)
+            servers[m.id] = handle
             if not a2a_runtime.wait_healthy(handle["url"]):
                 raise RuntimeError(f"member '{m.id}' A2A server failed health check at {handle['url']}")
             factory = ClientFactory(ClientConfig(httpx_client=hc, streaming=True))
@@ -101,7 +120,7 @@ async def _member_clients(members: list[Member], room: str, timeout: int):
                 await c.close()
         with contextlib.suppress(Exception):
             await hc.aclose()
-        for s in servers:
+        for s in servers.values():
             with contextlib.suppress(Exception):
                 s["server"].should_exit = True
 
@@ -146,14 +165,27 @@ async def run_meeting(*, room: str, agenda: str, members: list[Member],
 
     contributions: dict[str, str] = {}
     passes: list[str] = []
-    async with _member_clients(members, room, timeout) as clients:
-        for m in members:
+    
+    # Separate mounted vs unmounted agents
+    mounted = [m for m in members if _is_agent_mounted(m.id)]
+    unmounted = [m for m in members if not _is_agent_mounted(m.id)]
+    
+    if mounted:
+        agent_adapter.post_to_room(room, "Facilitator",
+                                   f"Mounted agents participating via room watchers: {', '.join(m.id for m in mounted)}")
+    
+    async with _member_clients(unmounted, room, timeout) as clients:
+        for m in unmounted:
             prompt = _relevance_prompt(agenda, criteria, m)
             reply = await _ask(clients[m.id], prompt)
             if reply.strip().upper().startswith(PASS_TOKEN):
                 passes.append(m.id)
             else:
                 contributions[m.id] = reply
+        
+        # For mounted agents, note they participate via room (no A2A client)
+        for m in mounted:
+            contributions[m.id] = f"[Participating via room watcher - see room transcript]"
 
     requirements = _synthesize(agenda, criteria, contributions, room, orchestrator, timeout)
     agent_adapter.post_to_room(room, "Facilitator",

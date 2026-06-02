@@ -10,6 +10,10 @@ const brain = require("./brain");
 const hermes = require("./hermes");
 const provenance = require("./provenance");
 const goals = require("./goals");
+const org = require("./orchestration-org");
+
+// Sectional decomposer (new capability for breaking briefs into well-scoped plans)
+const briefDecomposer = require("./brief-decomposer");
 
 function text(v) {
   return String(v == null ? "" : v).trim();
@@ -69,6 +73,7 @@ function briefBody(input = {}) {
   const board = normalizeBoard(input.board);
   const domain = fallback(input.domain, "All");
   const title = fallback(input.title, "Untitled brief");
+  const routing = input.routing || org.route(null, { domain, status: input.status || "triage", kind: "brief" });
   return [
     "# Brief",
     "",
@@ -110,6 +115,8 @@ function briefBody(input = {}) {
     `- Owner: ${fallback(input.owner, "Unassigned")}`,
     `- Persona: ${fallback(input.persona, "Unassigned")}`,
     "",
+    org.routingMarkdown(routing),
+    "",
     "## Planning Contract",
     "- Do not dispatch this brief until every section above is still true.",
     "- Planner decomposition must create child tasks that reference this brief title or task id.",
@@ -122,6 +129,7 @@ function bugBody(input = {}) {
   const board = normalizeBoard(input.board);
   const domain = fallback(input.domain, "All");
   const title = fallback(input.title, "Untitled bug");
+  const routing = input.routing || org.route(null, { domain, status: input.status || org.defaultLaneForKind("bug"), kind: "bug" });
   return [
     "# Bug",
     "",
@@ -159,6 +167,8 @@ function bugBody(input = {}) {
     `- Owner: ${fallback(input.owner, "Unassigned")}`,
     `- Persona: ${fallback(input.persona, "Unassigned")}`,
     "",
+    org.routingMarkdown(routing),
+    "",
     "## Triage Contract",
     "- Confirm the reproduction before assigning implementation.",
     "- If blocked, add a board comment with the blocker, attempted evidence, and next escalation target.",
@@ -189,14 +199,15 @@ function createBrief(input = {}, { projectSlug } = {}) {
     };
   }
   const board = normalizeBoard(input.board);
-  const body = briefBody({ ...input, board });
+  const routing = org.route(input.projectPath, { domain: input.domain, status: input.status || "triage", kind: "brief" });
+  const body = briefBody({ ...input, board, routing });
   const result = hermes.addTask({
     board,
-    status: input.status || "triage",
+    status: input.status || routing.lane || "triage",
     title: `[Brief] ${text(input.title)}`,
     body,
-    assignee: text(input.assignee || input.owner),
-    persona: text(input.persona),
+    assignee: text(input.assignee || input.owner || routing.assignee),
+    persona: text(input.persona || (routing.defaultPersonas || [])[0]),
   });
   if (!result.ok) return result;
   const artifact = recordBrainArtifact(projectSlug, { kind: "brief", input: { ...input, board }, taskResult: result });
@@ -245,14 +256,15 @@ function createBug(input = {}, { projectSlug } = {}) {
     };
   }
   const board = normalizeBoard(input.board);
-  const body = bugBody({ ...input, board });
+  const routing = org.route(input.projectPath, { domain: input.domain, status: input.status || org.defaultLaneForKind("bug"), kind: "bug" });
+  const body = bugBody({ ...input, board, routing });
   const result = hermes.addTask({
     board,
-    status: input.status || "triage",
+    status: input.status || routing.lane || "bug",
     title: `[Bug] ${text(input.title)}`,
     body,
-    assignee: text(input.assignee || input.owner),
-    persona: text(input.persona),
+    assignee: text(input.assignee || input.owner || routing.assignee),
+    persona: text(input.persona || (routing.defaultPersonas || [])[0]),
   });
   if (!result.ok) return result;
   const artifact = recordBrainArtifact(projectSlug, { kind: "bug", input: { ...input, board }, taskResult: result });
@@ -292,6 +304,7 @@ function createBug(input = {}, { projectSlug } = {}) {
 
 function childTaskBody(input = {}) {
   const parentId = fallback(input.parentId, "Unlinked");
+  const routing = input.routing || org.route(null, { domain: input.domain, status: input.status || org.defaultLaneForKind("child_task"), kind: "child_task" });
   return [
     "# Child Task",
     "",
@@ -311,6 +324,8 @@ function childTaskBody(input = {}) {
     "",
     "## Verification",
     bullets(input.verification, "Verification evidence must be added before Done."),
+    "",
+    org.routingMarkdown(routing),
   ].join("\n");
 }
 
@@ -318,14 +333,15 @@ function createChildTask(input = {}, { projectSlug } = {}) {
   if (!text(input.parentId)) return { ok: false, reason: "parentId required" };
   if (!text(input.title)) return { ok: false, reason: "title required" };
   const board = normalizeBoard(input.board);
-  const body = input.body || childTaskBody({ ...input, board });
+  const routing = org.route(input.projectPath, { domain: input.domain, status: input.status || org.defaultLaneForKind("child_task"), kind: "child_task" });
+  const body = input.body || childTaskBody({ ...input, board, routing });
   const result = hermes.addTask({
     board,
-    status: input.status || "triage",
+    status: input.status || routing.lane || "todo",
     title: `[Task] ${text(input.title)}`,
     body,
-    assignee: text(input.assignee || input.owner),
-    persona: text(input.persona),
+    assignee: text(input.assignee || input.owner || routing.assignee),
+    persona: text(input.persona || (routing.defaultPersonas || [])[0]),
   });
   if (!result.ok) return result;
   let relationship = null;
@@ -408,4 +424,8 @@ module.exports = {
   childTaskBody,
   missingBriefFields,
   missingBugFields,
+
+  // New sectional decomposition (see domains/domain-lifecycle/docs/features/brief-sectional-decomposer.md)
+  proposeSectionalBreakdown: briefDecomposer.proposeSectionalBreakdown,
+  applySectionalDecomposition: briefDecomposer.applySectionalDecomposition,
 };

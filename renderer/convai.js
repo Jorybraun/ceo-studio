@@ -67,6 +67,12 @@ async function buildStudioContext(reason = "") {
   lines.push(`Project: ${proj ? `${proj.name}${proj.slug ? ` [${proj.slug}]` : ""}` : "none open"}`);
   lines.push(`Active domain: ${ctx.domain || "All"}`);
   if (ctx.selectedFile && ctx.selectedFile.path) lines.push(`Open file: ${ctx.selectedFile.path}`);
+  if (ctx.focusedTask && ctx.focusedTask.taskId) {
+    lines.push(`Focused task: ${ctx.focusedTask.taskTitle || ctx.focusedTask.taskId} [${ctx.focusedTask.taskId}] (${ctx.focusedTask.board || "board"} / ${ctx.focusedTask.taskStatus || "task"})`);
+  }
+  if (ctx.panel && (ctx.panel.mode || ctx.panel.focusTitle || ctx.panel.title)) {
+    lines.push(`Panel: ${ctx.panel.mode || ""}${ctx.panel.focusTitle ? ` — ${ctx.panel.focusTitle}` : ""}${ctx.panel.title ? ` (${ctx.panel.title})` : ""}`.trim());
+  }
 
   // Team roster (agents + teams) from the registry — single source of truth.
   try {
@@ -76,7 +82,7 @@ async function buildStudioContext(reason = "") {
     if (agents.length) {
       lines.push("", `Team roster (${agents.length} agents):`);
       for (const a of agents.slice(0, 25)) {
-        const brain = a.provider ? `${a.provider}${a.model ? `/${a.model}` : ""}` : "echo";
+        const brain = a.provider ? `${a.provider}${a.model ? `/${a.model}` : ""}` : "vertex";
         lines.push(`- ${a.name || a.id} (${a.persona || "no persona"}, ${brain})${a.tmux_session ? " — MOUNTED/live" : ""}`);
       }
     } else {
@@ -300,7 +306,7 @@ const clientTools = {
     const teams = (reg && reg.teams) || [];
     if (!agents.length) return "No agents are defined yet. Ask me to create one or use the Team panel.";
     const roster = agents.map((a) => {
-      const brain = a.provider ? `${a.provider}${a.model ? `/${a.model}` : ""}` : "echo";
+      const brain = a.provider ? `${a.provider}${a.model ? `/${a.model}` : ""}` : "vertex";
       return `- ${a.name || a.id} (id: ${a.id}; ${a.persona || "no persona"}; ${brain})${a.tmux_session ? " — MOUNTED/live" : " — not mounted"}`;
     }).join("\n");
     const teamLines = teams.length
@@ -803,6 +809,41 @@ const clientTools = {
     ui().showPanel?.(`Provenance: ${parentId}`, md);
     return md;
   },
+  async show_orchestration_org({ domain } = {}) {
+    const activeDomain = domain || ui().getContext?.().domain || "All";
+    const r = await window.ceo.orchestrationSummary({ domain: activeDomain });
+    if (!r || !r.ok) return `Could not read orchestration org: ${r ? r.reason : "unknown"}`;
+    const lanes = (r.lanes || []).map((lane) => [
+      `### ${lane.lane}`,
+      `- Team: ${lane.team || "unassigned"}${lane.missingTeam ? " (missing)" : ""}`,
+      `- Workflow: ${lane.workflow || "unassigned"}`,
+      `- Queue role: ${lane.queueRole || "unassigned"}`,
+      `- Default personas: ${(lane.defaultPersonas || []).join(", ") || "unassigned"}`,
+      `- Members: ${(lane.members || []).join(", ") || "none"}`,
+      `- Escalation: ${lane.escalationTarget || "none"}`,
+      lane.guidance ? `- Guidance: ${lane.guidance}` : "",
+      (lane.missingAgents || []).length ? `- Missing agents: ${lane.missingAgents.join(", ")}` : "",
+    ].filter(Boolean).join("\n")).join("\n\n");
+    const issues = (r.issues || []).length ? ["", "## Issues", ...(r.issues || []).map((x) => `- ${x}`)].join("\n") : "";
+    const md = [`# Orchestration Org: ${activeDomain}`, "", lanes || "_No lane policies._", issues].join("\n");
+    ui().showPanel?.("Orchestration Org", md);
+    return md;
+  },
+  async route_work({ domain, status, kind = "task" } = {}) {
+    const activeDomain = domain || ui().getContext?.().domain || "All";
+    const r = await window.ceo.orchestrationRoute({ domain: activeDomain, status, kind });
+    if (!r || !r.ok) return `Could not route work: ${r ? r.reason : "unknown"}`;
+    return [
+      `Route for ${kind || "task"} in ${activeDomain}:`,
+      `- Lane: ${r.lane}`,
+      `- Team: ${r.team || "unassigned"}${r.missingTeam ? " (missing)" : ""}`,
+      `- Workflow: ${r.workflow || "unassigned"}`,
+      `- Default personas: ${(r.defaultPersonas || []).join(", ") || "unassigned"}`,
+      `- Suggested assignee: ${r.assignee || "unassigned"}`,
+      `- Escalation target: ${r.escalationTarget || "none"}`,
+      (r.missingAgents || []).length ? `- Missing agents: ${r.missingAgents.join(", ")}` : "",
+    ].filter(Boolean).join("\n");
+  },
   async analyze_blocked_work({ board, domain, dryRun = false, limit } = {}) {
     const slug = board || await currentBoardSlug();
     const r = await window.ceo.analyzeBlocked({
@@ -929,6 +970,52 @@ const clientTools = {
     const repairId = r.repairTask && r.repairTask.task && r.repairTask.task.taskId;
     ui().appendStream?.("sys", `Reported system bug${bugId ? ` ${bugId}` : ""}${repairId ? ` with repair ${repairId}` : ""}`);
     return `Reported system bug${bugId ? ` ${bugId}` : ""}${repairId ? ` and linked repair task ${repairId}` : ""}.`;
+  },
+  async ask_self_repair({
+    board,
+    domain,
+    title,
+    request,
+    source,
+    observedBehavior,
+    expectedBehavior,
+    reproductionSteps,
+    severity,
+    impact,
+    evidence,
+    evidencePath,
+    output,
+    goalId,
+    createRepairTask = true,
+    autoMount = true,
+  } = {}) {
+    if (!request && !observedBehavior) return "A self-repair request or observed behavior is required.";
+    const r = await window.ceo.consultSelfRepair({
+      board,
+      domain: domain || ui().getContext?.().domain || "Engineering",
+      title,
+      request,
+      source,
+      observedBehavior,
+      expectedBehavior,
+      reproductionSteps,
+      severity,
+      impact,
+      evidence,
+      evidencePath,
+      output,
+      goalId,
+      createRepairTask,
+      autoMount,
+      requestedBy: "voice-agent",
+    });
+    if (!r || !r.ok) return `Could not ask self-repair: ${r ? r.reason : "unknown"}`;
+    const bugId = r.bug && r.bug.task && r.bug.task.taskId;
+    const repairId = r.repairTask && r.repairTask.task && r.repairTask.task.taskId;
+    ui().appendStream?.("sys", `Asked self-repair${bugId ? ` via ${bugId}` : ""}${repairId ? ` / ${repairId}` : ""} in room ${r.room || "self-repair"}`);
+    const mountStatus = r.mount && r.mount.ok === false ? ` Mount failed: ${r.mount.reason || "unknown"}.` : "";
+    const postStatus = r.post && r.post.ok === false ? ` Handoff post failed: ${r.post.reason || "unknown"}.` : "";
+    return `Asked self-repair engineer to diagnose and repair this.${bugId ? ` Bug: ${bugId}.` : ""}${repairId ? ` Repair task: ${repairId}.` : ""} Room: ${r.room || "self-repair"}.${mountStatus}${postStatus}`;
   },
   async list_personas() {
     const r = await window.ceo.listPersonas();

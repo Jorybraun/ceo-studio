@@ -22,7 +22,8 @@ The `harness/` already contains the strategy (CEO orchestrator, domains, brain, 
 - **Shell:** Electron (agnostic desktop app, native file access, no server).
 - **Runtime:** Node.js + TypeScript in the main process; agent loop here.
 - **UI:** renderer process — project/domain switchers, red presence circle, two agent-controlled panels, visual libs (marked / mermaid / highlight.js) via CDN, Tailwind.
-- **Model:** single strong model (Claude/GPT) for the CEO; cheap models (Kimi) reserved for L3 subagents.
+- **CEO model path:** conversational CEO chat goes through Hermes (`main/core/hermes.js` -> `hermes chat -q`) using the funded `openai-codex` provider via OAuth. Do not wire raw OpenAI/Anthropic API keys as the CEO.
+- **Utility model path:** optional document-agent/utility providers may use `main/core/llm.js`, but that path is separate from the conversational CEO.
 - **Memory:** local brain folder per project (harness brain contract); GBrain optional at L3+.
 - **Git:** every autonomous doc edit is a commit on a working branch.
 
@@ -230,6 +231,6 @@ These are non-negotiable and exist *because a previous swarm burned all its cred
 ### Definition of done per PR
 - Exit criteria for the targeted milestone are demonstrably met.
 - Cost guardrails are active and tested (include a test that simulates breaching the cap and asserts the agent halts).
+- Authoritative docs are updated in the same change. Run `npm run docs:check` or `npm run check`. For docs handoff rules, see `runtime/harness/architecture/DOCS_STEWARDSHIP_AND_HANDOFF.md`.
 - `NORTH_STAR.md` / `E2E_PLAN.md` updated if scope changed.
 - No absolute paths, no model-specific code outside the provider layer.
-

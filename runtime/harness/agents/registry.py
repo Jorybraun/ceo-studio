@@ -238,8 +238,13 @@ def _launch_for(provider: str, spec: dict) -> tuple[str, str]:
     template; known CLI providers use the static map; anything else is tried as
     an external command of its own name so a new backend works without editing
     this file."""
+    model = str(spec.get("model") or "").strip()
     if provider == "command":
         return "external", str(spec.get("command") or "").strip()
+    if provider == "devin":
+        return "external", "devin" + (f" --model {shlex.quote(model)}" if model else "")
+    if provider == "claude":
+        return "external", "claude" + (f" --model {shlex.quote(model)}" if model else "")
     return _PROVIDER_LAUNCH.get(provider, ("external", provider))
 
 
@@ -278,6 +283,8 @@ def _declarative_agents() -> dict[str, dict[str, Any]]:
             "capabilities": list(spec.get("capabilities") or []),
             "mission": spec.get("description") or "",
             "provider": provider,
+            "model": spec.get("model"),
+            "memory_key": spec.get("memory_key"),
             "source": "agents.json",
         }
     return out

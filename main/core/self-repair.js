@@ -41,7 +41,7 @@ function buildSystemBug(input = {}) {
       "Verification commands pass and evidence is attached to the bug.",
     ],
     owner: text(input.owner) || "Self-repair",
-    persona: text(input.persona) || "specialist",
+    persona: text(input.persona) || "self-repair-engineer",
     goalId: text(input.goalId),
     requestedBy: input.requestedBy || "self-repair",
   };
@@ -60,31 +60,64 @@ function buildRepairTask({ bugId, bugTitle, board, goalId, workspace, verificati
       "Root cause is documented on the bug.",
       "Fix is implemented without bypassing tests or adding mocks.",
       "Verification evidence is recorded as a bug asset.",
+      "Documentation is updated, or docs-steward explicitly signs off that no docs update is needed.",
+      "All file changes are committed with a focused git commit.",
+      "The commit hash and verification output are posted back to the bug/task.",
     ],
     verification: list(verification).length ? list(verification) : ["npm test", "npm run check"],
     workspace: text(workspace) || "Use the CEO_STUDIO repo or an isolated worktree if dispatching to a worker.",
     owner: "Self-repair",
-    persona: "specialist",
+    persona: "self-repair-engineer",
     goalId: text(goalId),
     requestedBy: "self-repair",
   };
 }
 
-function reportSystemBug(input = {}, { projectSlug } = {}) {
-  const bugInput = buildSystemBug(input);
+function buildConsultMessage({ request, bugId, repairTaskId, bugTitle, severity, evidence, source } = {}) {
+  const lines = [
+    "## Self-Repair Request",
+    "",
+    `Request: ${text(request) || "Diagnose and repair the logged issue or improvement."}`,
+    `Source: ${text(source) || "voice-agent"}`,
+    `Bug: ${text(bugId) || "not created"}`,
+    `Repair task: ${text(repairTaskId) || "not created"}`,
+    `Title: ${text(bugTitle) || "Self-repair request"}`,
+    `Severity: ${text(severity) || "medium"}`,
+  ];
+  const ev = list(evidence);
+  if (ev.length) {
+    lines.push("", "### Evidence");
+    for (const item of ev) lines.push(`- ${item}`);
+  }
+  lines.push(
+    "",
+    "### Required Operating Contract",
+    "- Diagnose root cause before editing.",
+    "- Implement the smallest safe repair or improvement.",
+    "- Run `npm run check` and `npm test` unless explicitly blocked.",
+    "- Update docs when behavior changes, or ask `docs-steward` to sign off no docs change is needed.",
+    "- Commit every file change with a focused git commit.",
+    "- Post the commit hash and verification evidence back to the bug/task before claiming done.",
+  );
+  return lines.join("\n");
+}
+
+function reportSystemBug(input = {}, { projectSlug, projectPath } = {}) {
+  const bugInput = { ...buildSystemBug(input), projectPath };
   const bug = domainBoard.createBug(bugInput, { projectSlug });
   if (!bug.ok) return { ok: false, stage: "create_bug", bugInput, reason: bug.reason, missing: bug.missing, template: bug.template };
   const bugId = (bug.task && bug.task.taskId) || bugInput.title;
   let repairTask = null;
   if (input.createRepairTask !== false) {
-    repairTask = domainBoard.createChildTask(buildRepairTask({
+    const repairInput = buildRepairTask({
       bugId,
       bugTitle: bugInput.title,
       board: bug.board,
       goalId: bugInput.goalId,
       workspace: input.workspace,
       verification: input.verification,
-    }), { projectSlug });
+    });
+    repairTask = domainBoard.createChildTask({ ...repairInput, projectPath }, { projectSlug });
   }
   let evidence = null;
   if (projectSlug && text(input.evidencePath || input.output)) {
@@ -105,5 +138,6 @@ function reportSystemBug(input = {}, { projectSlug } = {}) {
 module.exports = {
   buildSystemBug,
   buildRepairTask,
+  buildConsultMessage,
   reportSystemBug,
 };

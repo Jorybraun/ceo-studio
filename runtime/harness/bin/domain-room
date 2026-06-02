@@ -85,7 +85,7 @@ append_locked() {
     rmdir "$lockdir" 2>/dev/null || true
 }
 
-# Auto-rotation guard. A single misbehaving agent (e.g. the old persona-responder
+# Auto-rotation guard. A single misbehaving agent (legacy responder patterns
 # self-trigger loop) or just normal long-lived chatter can grow chat.log without
 # bound — we once hit a 55MB log of stub self-replies. When the live log grows
 # past ROOM_LOG_MAX_BYTES we move it aside to chat.log.1 (keeping exactly one

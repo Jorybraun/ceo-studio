@@ -29,8 +29,14 @@ const fs = require("fs");
 function harnessRoot(projectPath) {
   return path.join(projectPath || process.cwd(), "runtime", "harness");
 }
+function appHarnessRoot() {
+  return path.join(__dirname, "..", "..", "runtime", "harness");
+}
 function harnessAgentsJson(projectPath) {
   return path.join(harnessRoot(projectPath), "agents", "agents.json");
+}
+function appHarnessAgentsJson() {
+  return path.join(appHarnessRoot(), "agents", "agents.json");
 }
 
 /** Read paths in precedence order (first id wins). */
@@ -40,6 +46,7 @@ function readPaths(projectPath) {
   if (env) out.push(env);
   if (projectPath) out.push(path.join(projectPath, "agents.json"));
   out.push(harnessAgentsJson(projectPath));
+  out.push(appHarnessAgentsJson());
   // de-dup, preserve order
   const seen = new Set();
   return out.filter((p) => {
@@ -65,11 +72,17 @@ function normalizeAgent(spec) {
   return {
     id,
     name: spec.name || spec.id || id,
-    provider: spec.provider || "echo",
+    provider: spec.provider || "vertex",
     model: spec.model || null,
     // CLI template for the generic "command" provider (use-anything seam).
     command: spec.command ? String(spec.command).trim() : null,
+    // The spawnable Hermes profile that executes this agent's Kanban work.
+    // Registry agents are the conceptual roles; the kanban dispatcher spawns a
+    // Hermes profile (pipe, devin, kanban-orchestrator, self-repair-engineer…).
+    // When unset, the autonomy runner derives one from `provider`.
+    dispatch_profile: spec.dispatch_profile ? String(spec.dispatch_profile).trim() : null,
     persona: spec.persona || null,
+    room: spec.room || null,
     capabilities: Array.isArray(spec.capabilities) ? spec.capabilities
       : String(spec.capabilities || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean),
     description: spec.description || "",
@@ -140,6 +153,7 @@ function _persistAgent(arr, agent) {
   const slim = { id: agent.id, name: agent.name, provider: agent.provider };
   if (agent.model) slim.model = agent.model;
   if (agent.command) slim.command = agent.command;
+  if (agent.dispatch_profile) slim.dispatch_profile = agent.dispatch_profile;
   if (agent.persona) slim.persona = agent.persona;
   if (agent.capabilities && agent.capabilities.length) slim.capabilities = agent.capabilities;
   if (agent.description) slim.description = agent.description;
@@ -221,6 +235,9 @@ function listPersonas(projectPath) {
   const root = harnessRoot(projectPath);
   dirs.push(path.join(root, "personas"));
   dirs.push(path.join(root, "agents", "personas"));
+  const appRoot = appHarnessRoot();
+  dirs.push(path.join(appRoot, "personas"));
+  dirs.push(path.join(appRoot, "agents", "personas"));
 
   const found = new Map();
   const walk = (dir) => {
@@ -252,8 +269,14 @@ function listPersonas(projectPath) {
  * plain JS list on purpose: macOS GUI apps don't inherit the shell PATH, so we
  * don't shell out to python just to enumerate providers. `command` is the
  * generic "use anything" provider — any CLI via an agent's `command` template.
+ *
+ * `vertex` = Gemma (Vertex AI MaaS) via the Cloudflare AI Gateway — a real,
+ * funded, hosted brain (the default). `codex`/`hermes`/`pi` shell out to their
+ * respective CLIs. `echo` is deliberately NOT listed: it is offline test
+ * scaffolding, not a usable agent brain. Keep this in sync with the Python
+ * registry (runtime/harness/agents/providers/__init__.py).
  */
-const PROVIDERS = ["echo", "grok", "devin", "claude", "command"];
+const PROVIDERS = ["vertex", "codex", "hermes", "grok", "claude", "pi", "devin", "command"];
 function listProviders() {
   return [...PROVIDERS];
 }
@@ -261,5 +284,5 @@ function listProviders() {
 module.exports = {
   read, createAgent, updateAgent, deleteAgent,
   saveTeam, deleteTeam, listPersonas, listProviders,
-  writePath, harnessRoot,
+  writePath, harnessRoot, appHarnessRoot,
 };

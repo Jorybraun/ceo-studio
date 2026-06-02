@@ -43,6 +43,8 @@ ok("live voice exposes provenance tools", convaiStatus.tools.includes("create_ch
 ok("live voice exposes goal tools", convaiStatus.tools.includes("list_goals") && convaiStatus.tools.includes("set_goal") && convaiStatus.tools.includes("link_work_to_goal") && convaiStatus.tools.includes("review_goals"));
 ok("live voice exposes autonomy policy tools", convaiStatus.tools.includes("autonomy_status") && convaiStatus.tools.includes("configure_autonomy") && convaiStatus.tools.includes("run_autonomy_cycle") && convaiStatus.tools.includes("start_autonomy") && convaiStatus.tools.includes("stop_autonomy"));
 ok("live voice exposes self-repair bug tool", convaiStatus.tools.includes("report_system_bug"));
+ok("live voice exposes self-repair consult tool", convaiStatus.tools.includes("ask_self_repair"));
+ok("live voice exposes orchestration org tools", convaiStatus.tools.includes("show_orchestration_org") && convaiStatus.tools.includes("route_work"));
 
 // --- env loader ---
 const parsed = parseEnv('# comment\nFOO=bar\nQUOTED="hi there"\nEMPTY=\nBAD LINE\n');

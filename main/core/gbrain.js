@@ -2,10 +2,16 @@
 /**
  * GBrain bridge.
  *
- * GBrain's `serve --http` mode is an MCP server, not a small REST API. CEO
- * Studio needs narrow app tools, so use the local `gbrain` CLI directly.
+ * Uses the same local gbrain CLI and env setup as the Hermes MCP server
+ * (see ~/.gbrain/serve-mcp.sh). This makes CEO Studio's gbrain usage
+ * consistent with the rest of the system.
+ *
+ * No separate HTTP server is needed for the bridge; the CLI + MCP stdio
+ * is the canonical way.
  */
 const { spawn } = require("child_process");
+const fs = require("fs");
+const path = require("path");
 
 function cfg(env = process.env) {
   return {
@@ -18,13 +24,42 @@ function configured() {
   return true;
 }
 
+function prepareEnv(baseEnv = process.env) {
+  const env = { ...baseEnv };
+
+  // Add bun to PATH (critical for finding gbrain)
+  env.PATH = `${process.env.HOME}/.bun/bin:${env.PATH || ""}`;
+
+  // Unset DATABASE_URL to avoid conflicts (same as serve-mcp.sh)
+  delete env.DATABASE_URL;
+
+  // Load Google embedding key from PIPE-OS .env (for vector search)
+  try {
+    const pipeEnvPath = path.join(process.env.HOME, "Code", "PIPE", "PIPE-OS", ".env");
+    if (fs.existsSync(pipeEnvPath)) {
+      const envContent = fs.readFileSync(pipeEnvPath, "utf-8");
+      const match = envContent.match(/^VERTEX_API_KEY=(.+)$/m);
+      if (match) {
+        const key = match[1].trim().replace(/"/g, "");
+        env.GOOGLE_GENERATIVE_AI_API_KEY = key;
+      }
+    }
+  } catch (e) {
+    // non-fatal
+  }
+
+  return env;
+}
+
 function _run(args, { input, env = process.env, timeoutMs } = {}) {
-  const c = cfg(env);
+  const preparedEnv = prepareEnv(env);
+  const c = cfg(preparedEnv);
+
   return new Promise((resolve) => {
     let out = "", err = "", done = false;
     let child;
     try {
-      child = spawn(c.bin, args, { env });
+      child = spawn(c.bin, args, { env: preparedEnv });
     } catch (e) {
       return resolve({ ok: false, reason: `failed to start gbrain: ${e.message}` });
     }
@@ -98,4 +133,4 @@ async function ingest({ title, content, project, domain, metadata } = {}, env = 
   return { ok: true, result: parsed, endpoint: "gbrain capture", slug };
 }
 
-module.exports = { cfg, configured, status, query, ingest };
+module.exports = { cfg, configured, prepareEnv, status, query, ingest };

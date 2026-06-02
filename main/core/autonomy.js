@@ -9,6 +9,7 @@
  */
 const brain = require("./brain");
 const hermes = require("./hermes");
+const org = require("./orchestration-org");
 
 const BLOCKER_MARKER = "CEO Studio Blocker Analysis";
 
@@ -43,11 +44,12 @@ function blockedReason(task = {}) {
   return blockerLine ? blockerLine.replace(/^[-*]\s*/, "") : "No explicit blocker reason is recorded on the task.";
 }
 
-function buildBlockedAnalysis({ board, task, detail } = {}) {
+function buildBlockedAnalysis({ board, task, detail, route } = {}) {
   const fullTask = { ...(task || {}), ...((detail && detail.task) || {}) };
   const target = escalationTarget(fullTask);
   const reason = blockedReason(fullTask);
   const comments = recentComments(detail);
+  const routing = route || org.route(null, { status: "blocked", kind: "task" });
   return [
     `## ${BLOCKER_MARKER}`,
     "",
@@ -55,6 +57,8 @@ function buildBlockedAnalysis({ board, task, detail } = {}) {
     `Board: ${board || "unknown"}`,
     `Status: ${fullTask.status || "blocked"}`,
     `Escalation target: ${target}`,
+    `Lane owner team: ${routing.team || "unassigned"}`,
+    `Workflow: ${routing.workflow || "unassigned"}`,
     "",
     "### What is blocked",
     `- ${reason}`,
@@ -66,7 +70,7 @@ function buildBlockedAnalysis({ board, task, detail } = {}) {
     "- Decide whether this needs clearer requirements, a specialist repair pass, human input, or CEO reprioritization.",
     "",
     "### Proposed next action",
-    `- Route to ${target}; add the missing decision/evidence, then unblock or split the work into a smaller task.`,
+    `- Route to ${target} through ${routing.team || "the owning team"}; add the missing decision/evidence, then unblock or split the work into a smaller task.`,
   ].join("\n");
 }
 
@@ -78,7 +82,7 @@ function memorySummary(task = {}, target) {
   ].join(" ");
 }
 
-function analyzeBlocked({ board, projectSlug, dryRun = false, limit = 20 } = {}) {
+function analyzeBlocked({ board, projectSlug, projectPath, domain = "All", dryRun = false, limit = 20 } = {}) {
   const slug = board || hermes.currentBoard();
   if (!slug) return { ok: false, reason: "No board specified" };
   const boardState = hermes.getBoard(slug);
@@ -91,7 +95,8 @@ function analyzeBlocked({ board, projectSlug, dryRun = false, limit = 20 } = {})
       results.push({ taskId: task.id, skipped: true, reason: "already has blocker analysis" });
       continue;
     }
-    const analysis = buildBlockedAnalysis({ board: slug, task, detail: detail && detail.ok ? detail : null });
+    const route = org.route(projectPath, { domain, status: "blocked", kind: "task" });
+    const analysis = buildBlockedAnalysis({ board: slug, task, detail: detail && detail.ok ? detail : null, route });
     const target = escalationTarget({ ...task, ...((detail && detail.task) || {}) });
     let comment = { ok: true, dryRun: true };
     let artifact = null;
@@ -120,12 +125,14 @@ function analyzeBlocked({ board, projectSlug, dryRun = false, limit = 20 } = {})
       comment: comment && comment.ok ? "written" : "failed",
       reason: comment && comment.ok ? null : comment && comment.reason,
       brainArtifactId: artifact && artifact.id,
+      route,
       analysis,
     });
   }
   return {
     ok: true,
     board: slug,
+    domain,
     blocked: blocked.length,
     analyzed: results.filter((r) => !r.skipped).length,
     skipped: results.filter((r) => r.skipped).length,

@@ -1,6 +1,6 @@
 # Agent Registry
 
-**Status**: The previous implementation lived in the (now removed) React prototype at `ui/multi-agent-desktop/src/config/agentRegistry.ts`.
+**Status**: The machine-readable registry now lives in `runtime/harness/agents/agents.json` and is loaded by the Node cockpit registry plus the Python herder registry bridge. This file is the human-readable orientation layer.
 
 The harness separates two concepts:
 
@@ -11,11 +11,13 @@ This matters because Grok, hinnymen/Feynman, Hermes, etc. are not just model nam
 
 ## Canonical Object
 
-The previous concrete TypeScript implementation was removed along with the React UI prototypes.
+The canonical writable object is `agents.json`:
 
-The conceptual registry (roles, personas, herder tmux sessions, launch paths, coordination rooms) is documented here and in the herder tools (`launch-agent`, `domain-room-watch --persona`, presence files, etc.).
+- `agents[]`: id, provider, persona, capabilities, optional tmux/session details.
+- `teams`: named ordered lists of agent ids.
+- `orchestration` (optional project override): lane/team/workflow routing policy consumed by `main/core/orchestration-org.js`.
 
-A future herder-native implementation can re-create a similar structure (JSON, Markdown, or code) when real orchestrator-driven activation is built.
+The cockpit reads/writes this registry through `main/core/registry.js`; the herder reads it through `runtime/harness/agents/agent_config.py` and `runtime/harness/agents/registry.py`.
 
 ## Current Registered Models
 
@@ -55,6 +57,16 @@ Role: research agent
 - launch mode: web-first until CLI/API is confirmed
 - mission: source gathering, evidence checks, uncertainty mapping, research briefs
 
+### Docs Steward
+
+Role: documentation handoff and docs-drift prevention
+
+- id: `docs-steward`
+- persona: `docs-steward`
+- skill: `runtime/harness/skills/docs-steward/SKILL.md`
+- team: `documentation-stewards`
+- mission: review behavior-changing work before handoff, update authoritative docs, and keep agent/skill/workflow registry docs aligned with implementation.
+
 ## Coordination Rule
 
 Every registered agent has a `coordination` block pointing at the shared room:
@@ -70,12 +82,6 @@ cd /Users/hans/Code/PIPE/PIPE-OS/harness
 ./bin/domain-room post discovery "<AgentName>" "<message>"
 ```
 
-## Next Step
+## Docs Handoff Rule
 
-The next useful improvement is a small harness command that reads `agentRegistry.ts` or a generated JSON equivalent and can:
-
-- list agents
-- show launch commands
-- start or resume herder adapters
-- prime agents with their mission and coordination rules
-- report online/offline status
+Any change to agents, teams, skills, workflows, provider routing, autonomy, or domain-board behavior must update the relevant docs and pass `npm run docs:check`. See `runtime/harness/architecture/DOCS_STEWARDSHIP_AND_HANDOFF.md`.

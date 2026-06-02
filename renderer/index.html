@@ -100,6 +100,9 @@
       <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="teams">
         <span class="text-neutral-500">⦿</span><span>Teams</span>
       </button>
+      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="personas">
+        <span class="text-neutral-500">✦</span><span>Personas</span>
+      </button>
       <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="channels">
         <span class="text-neutral-500">#</span><span>Channels</span>
       </button>
@@ -162,6 +165,10 @@
         </div>
         <pre id="as-output" class="flex-1 overflow-auto p-3 m-0 font-mono text-[11px] leading-relaxed text-emerald-100/85 whitespace-pre-wrap"></pre>
         <div id="as-input-row" class="p-2 border-t border-neutral-800 flex gap-2">
+          <div class="flex items-center gap-2">
+            <button id="as-mode-room" class="text-[10px] bg-cyan-600/80 text-white rounded px-2 py-1">Room</button>
+            <button id="as-mode-terminal" class="text-[10px] bg-neutral-800 text-neutral-400 rounded px-2 py-1 hover:text-neutral-200">Terminal</button>
+          </div>
           <input id="as-input"
                  class="flex-1 bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-xs text-neutral-100 placeholder-neutral-600 focus:outline-none focus:ring-1 focus:ring-cyan-500/60"
                  placeholder="Message this agent in its room (as CEO)…" />

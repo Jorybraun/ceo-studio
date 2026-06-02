@@ -26,7 +26,7 @@ const API_BASE = "https://api.elevenlabs.io/v1";
 
 // Bump when the agent config (prompt/tools/behavior) below changes, so existing
 // agents get PATCHed into sync instead of serving a stale config.
-const CONFIG_VERSION = 30;
+const CONFIG_VERSION = 31;
 
 // The CEO (Hermes) thinks for a while on real turns — a cold `hermes chat`
 // floor of ~6s, and 15–60s+ for substantive/long-session answers. ElevenLabs
@@ -580,6 +580,34 @@ const COCKPIT_TOOLS = [
   },
   {
     type: "client",
+    name: "propose_brief_decomposition",
+    description: "Propose breaking a structured brief into logical sections and multiple high-quality child plans (child briefs). Returns a reviewable proposal with draft bodies. Preferred over raw decompose_brief for complex/domain work. See Domain Lifecycle feature spec for details.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["taskId"],
+      properties: {
+        board: { type: "string", description: "Hermes Kanban board slug." },
+        taskId: { type: "string", description: "Parent brief task id." },
+        domain: { type: "string", description: "Optional domain override (used to load design docs from domains/<slug>/docs/design/)." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "apply_brief_decomposition",
+    description: "Materialize an approved decomposition proposal (from propose_brief_decomposition) by creating the real child briefs on the kanban with full provenance links. Only call after human or CEO review.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["proposal"],
+      properties: {
+        proposal: { type: "object", description: "The full proposal object returned by propose_brief_decomposition." },
+      },
+    },
+  },
+  {
+    type: "client",
     name: "create_child_task",
     description: "Create a real Hermes child task that queryably belongs to a parent brief or bug in CEO Studio provenance. Use this when manually decomposing a brief into tasks.",
     expects_response: true,
@@ -709,6 +737,34 @@ const COCKPIT_TOOLS = [
   },
   {
     type: "client",
+    name: "show_orchestration_org",
+    description: "Show the machine-readable lane ownership model: which team/workflow owns triage, bug, planning, todo, ready, running, blocked, review, and done for the current domain.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: [],
+      properties: {
+        domain: { type: "string", description: "Optional domain name; defaults to the active domain." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "route_work",
+    description: "Resolve which lane, team, workflow, default personas, and assignee should own a brief, bug, task, or blocked item.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: [],
+      properties: {
+        domain: { type: "string", description: "Optional domain name; defaults to active domain." },
+        status: { type: "string", description: "Kanban lane/status such as triage, planning, todo, ready, running, blocked, review, done." },
+        kind: { type: "string", description: "Work kind: brief, bug, task, child_task, asset." },
+      },
+    },
+  },
+  {
+    type: "client",
     name: "analyze_blocked_work",
     description: "Scan the blocked lane on a Hermes domain board, add blocker-analysis comments for unexamined blocked tasks, and log escalation items into memory. Use when work is stuck or the user asks why the board is blocked.",
     expects_response: true,
@@ -810,6 +866,34 @@ const COCKPIT_TOOLS = [
         output: { type: "string", description: "Captured failure output." },
         goalId: { type: "string", description: "Optional goal this repair supports." },
         createRepairTask: { type: "boolean", description: "Whether to create the linked repair task. Defaults true." },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "ask_self_repair",
+    description: "Ask the dedicated self-repair engineer to diagnose a CEO Studio issue or improvement. This logs a real bug/repair task, attempts to mount the self-repair agent, posts a handoff to the self-repair room, and requires verification, docs status, and a git commit.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["request"],
+      properties: {
+        board: { type: "string", description: "Optional Hermes board slug." },
+        domain: { type: "string", description: "Domain for board mapping, usually Engineering." },
+        title: { type: "string", description: "Bug or improvement title." },
+        request: { type: "string", description: "What the self-repair engineer should diagnose, repair, or improve." },
+        source: { type: "string", description: "What exposed the issue or opportunity." },
+        observedBehavior: { type: "string", description: "What failed or what was observed." },
+        expectedBehavior: { type: "string", description: "What should happen after repair." },
+        reproductionSteps: { type: "string", description: "Steps, comma or newline separated." },
+        severity: { type: "string", description: "critical, high, medium, or low." },
+        impact: { type: "string", description: "Impact on autonomy or users." },
+        evidence: { type: "string", description: "Logs/output/files, comma or newline separated." },
+        evidencePath: { type: "string", description: "Optional path to evidence file." },
+        output: { type: "string", description: "Captured failure output." },
+        goalId: { type: "string", description: "Optional goal this repair supports." },
+        createRepairTask: { type: "boolean", description: "Whether to create the linked repair task. Defaults true." },
+        autoMount: { type: "boolean", description: "Whether to mount the self-repair engineer before posting. Defaults true." },
       },
     },
   },
@@ -1037,12 +1121,14 @@ const TOOLS = [
 function cfg(env = process.env) {
   const maxMin = Number(env.CEO_CONVAI_MAX_MINUTES);
   const maxTokens = Number(env.CEO_CONVAI_MAX_TOKENS);
+  const mode = String(env.CEO_CONVAI_MODE || "intake").trim().toLowerCase();
   return {
     apiKey: env.ELEVENLABS_API_KEY || "",
     voiceId: env.ELEVENLABS_VOICE_ID || "EXAVITQu4vr4xnSDxMaL", // "Sarah"
     llm: env.CEO_CONVAI_LLM || "gemini-2.0-flash",
-    maxMinutes: Number.isFinite(maxMin) && maxMin > 0 ? maxMin : 5,
-    maxTokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : 500,
+    mode,
+    maxMinutes: Number.isFinite(maxMin) && maxMin > 0 ? maxMin : 2,
+    maxTokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : 220,
   };
 }
 
@@ -1088,14 +1174,16 @@ function _conversationConfig(env = process.env, { projectName, currentDomain = "
     
   const prompt = [
     `You are CEO Studio's live voice cockpit agent for ${who}. You are useful in conversation: you can inspect domains, tickets, files, and brain context; render the left panel; and then hand distilled requests to the CEO or document agent when that is the right next step.`,
+    `Cost mode: ${c.mode}. Default to voice intake, not voice planning. Keep spoken replies under two short sentences unless the user explicitly asks for more.`,
     `Current domain: ${currentDomain || "All"}. ${domainInstruction}`,
-    "Do not forward every utterance to the CEO. First understand the user's intent. For casual clarification, answer directly. For domain/ticket/file work, gather the smallest useful context with tools, render useful artifacts in the left panel, and keep the user in the loop.",
-    "Routing: use list_goals before creating meaningful new work; use set_goal when the user defines daily/weekly/monthly/quarterly/roadmap direction; use review_goals for daily/weekly/monthly/quarterly review cycles; use autonomy_status/configure_autonomy/run_autonomy_cycle/start_autonomy/stop_autonomy for the explicit long-running autonomy policy; use report_system_bug when tests, tools, or CEO Studio itself fail and should become a real bug plus repair task; use link_work_to_goal when an existing item supports a goal; use ticket tools for Kanban/ticket/board questions; use create_brief for new structured work briefs and include goalId when possible; use create_bug for reproducible defects and include goalId when possible; use create_child_task when manually decomposing a brief into queryably linked tasks; use record_brief_asset when generated evidence or files belong to a brief/task; use show_provenance to inspect those links; use decompose_brief only after a brief task exists and should let Hermes decompose; use analyze_blocked_work when work is stuck or blocked and needs escalation; use project file tools for documents and code; use local brain tools for immediate project memory; use GBrain tools for long-term memory, founder-judgment patterns, historical decisions, and synthesis-heavy context; use define_domain/list_domains/set_domain for domain setup; use ask_document_agent for document-specific analysis; use tell_ceo or ask_ceo only for strategic decisions, delegation, prioritization, or final handoff.",
+    "Do not forward every utterance to the CEO. Do not run long planning inside the live voice session. First capture intent, then use deterministic tools to create or update briefs, bugs, goals, provenance, tickets, panels, or handoffs.",
+    "For planning requests, prefer creating an enforced brief, logging a bug, or posting a concise planner/CEO handoff. Only call ask_ceo/tell_ceo when the user explicitly asks for a strategic decision or when a short handoff is truly necessary.",
+    "Routing: use show_orchestration_org when the user asks about org structure, lane ownership, planner/worker routing, queues, or escalation; use route_work before assigning ambiguous work to a lane/team. New reproducible defects belong in the bug lane. Use list_goals before creating meaningful new work; use set_goal when the user defines daily/weekly/monthly/quarterly/roadmap direction; use review_goals for daily/weekly/monthly/quarterly review cycles; use autonomy_status/configure_autonomy/run_autonomy_cycle/start_autonomy/stop_autonomy for the explicit long-running autonomy policy; use ask_self_repair when tests, tools, UI, voice, IPC, orchestration, or CEO Studio itself fail or when recurring friction suggests a system improvement; use report_system_bug only when logging the defect without a live self-repair handoff; use link_work_to_goal when an existing item supports a goal; use ticket tools for Kanban/ticket/board questions; use create_brief for new structured work briefs and include goalId when possible; use create_bug for reproducible defects and include goalId when possible; use create_child_task when manually decomposing a brief into queryably linked tasks; use record_brief_asset when generated evidence or files belong to a brief/task; use show_provenance to inspect those links; use decompose_brief only after a brief task exists and should let Hermes decompose; use analyze_blocked_work when work is stuck or blocked and needs escalation; use project file tools for documents and code; use local brain tools for immediate project memory; use GBrain tools for long-term memory, founder-judgment patterns, historical decisions, and synthesis-heavy context; use define_domain/list_domains/set_domain for domain setup; use ask_document_agent for document-specific analysis; use tell_ceo or ask_ceo only for strategic decisions, delegation, prioritization, or final handoff.",
     "Team: you can see and operate the agent team. Use list_agents to see the roster and who is mounted; mount_agent to bring an agent live; message_agent to delegate to one teammate; start_meeting + read_room to convene several agents on an agenda and collect their requirements. Use open_view and open_agent_detail to navigate the cockpit and surface a teammate's live terminal for the user.",
     "Live context: at the start of every session and whenever the user switches project/domain/file you receive a 'CEO STUDIO LIVE CONTEXT' update with the active project, domain, open file, team roster, board tickets, and recent decisions. Trust it as ground truth for where we are — do not ask the user which project or domain we are on.",
     "When the user asks to create or set up a domain, ask only for missing essentials, then call define_domain and set_domain. If a visual summary helps, call render_panel.",
     "When discussing a file or ticket, prefer showing it in the left panel before reasoning about it. Mention concrete file paths or ticket ids.",
-    "Voice style: concise, direct, collaborative. Stop immediately when the user speaks. Do not invent unavailable facts; use tools or say what is missing.",
+    "Voice style: concise, direct, collaborative. Stop immediately when the user speaks. Do not invent unavailable facts; use tools or say what is missing. When a task will take more than a minute, create the board item or room handoff and end the voice turn.",
   ].join(" ");
   return {
     agent: {
@@ -1214,6 +1302,8 @@ function status(env = process.env) {
   return {
     available: available(env),
     maxMinutes: c.maxMinutes,
+    maxTokens: c.maxTokens,
+    mode: c.mode,
     voiceId: c.voiceId,
     llm: c.llm,
     tools: TOOLS.map((t) => t.name),

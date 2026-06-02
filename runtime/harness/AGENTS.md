@@ -7,7 +7,7 @@ Any agent (Claude, Grok, Hermes profiles, etc.) working inside or with this harn
 ## Core Philosophy
 
 - **Hermes Kanban is the source of truth** for all work.
-- The `kanban-orchestrator` profile acts as the **CEO / Chief of Staff**.
+- The `kanban-orchestrator` profile acts as the **CEO / Chief of Staff** through Hermes/Codex OAuth. It must not depend on raw OpenAI/Anthropic API keys.
 - Specialist profiles (e.g. `pipe`, future `pipe-research`, `pipe-ux`, etc.) act as workers.
 - The human remains the primary decision maker. Agents propose and execute within approved bounds.
 - Planning-first: Prefer creating clear plans, research, and proposals over direct implementation.
@@ -75,12 +75,13 @@ Act as CEO for PIPE-OS. Audit current state and decompose this goal into a clear
 
 | Profile / Agent        | Role                              | Typical Model / Tool | Notes |
 |------------------------|-----------------------------------|----------------------|-------|
-| Hermes                 | Herder session orchestrator / controller | GPT-5.5              | Runs the show, routes work through Kanban, rooms, and adapters |
-| Grok                   | General worker / planning/build   | Grok Build CLI       | External agent adapter; durable outputs go to room/Kanban |
+| Hermes                 | Herder session orchestrator / controller | openai-codex OAuth   | Runs the show, routes work through Kanban, rooms, and adapters |
+| Grok                   | Optional worker / planning/build  | Grok Build CLI       | External agent adapter; durable outputs go to room/Kanban |
 | hinnymen / Feynman     | Research agent                    | https://www.feynman.is | Research, evidence, uncertainty mapping |
-| kanban-orchestrator    | CEO / Chief of Staff              | Grok                 | Strategic decomposition and prioritization |
-| pipe                   | General worker / implementation   | Grok                 | Default worker profile for PIPE-OS |
-| default                | General purpose                   | GPT-5.5              | Fallback / general tasks |
+| kanban-orchestrator    | CEO / Chief of Staff              | openai-codex         | Strategic decomposition and prioritization |
+| pipe                   | General worker / implementation   | openai-codex         | Default funded worker profile for PIPE-OS |
+| docs-steward           | Documentation handoff reviewer    | registry provider    | Keeps docs, registry, skills, and workflows aligned |
+| default                | General purpose                   | openai-codex         | Fallback / general tasks |
 
 ## Anti-Patterns
 
@@ -100,6 +101,7 @@ The harness deliberately keeps a small, coherent set of commands. Proliferating 
 - Prefer extending `domain-room` (via subcommands), `launch-agent`, `herder-chat`, or `herder-steer` over creating new executables.
 - New tools are only justified when they have a genuinely distinct purpose that cannot be met by extending what already exists.
 - Any new command added to `bin/` must also be documented in the reference table in `README.md`.
+- Any behavior-changing work must pass the docs handoff in `../AGENTS.md` and `architecture/DOCS_STEWARDSHIP_AND_HANDOFF.md`.
 
 This rule applies to both humans and agents working in the harness.
 

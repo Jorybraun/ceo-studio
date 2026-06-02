@@ -1,40 +1,53 @@
 {
-  "_comment": "Declarative agent registry. Add an agent = add an entry here (config, not code). 'provider' is any registered harness provider (echo|devin|grok). 'persona' resolves via agents/personas.py. Projects can override by placing their own agents.json in the workspace or via $CEO_AGENTS_CONFIG. Defaults use the free 'echo' provider so meetings run at zero cost; switch to devin/grok for real brains.",
+  "_comment": "Declarative agent registry. Add an agent = add an entry here (config, not code). 'provider' is any registered harness provider (echo|codex|hermes|grok|claude|pi|devin|command). 'persona' resolves via agents/personas.py. 'dispatch_profile' is the spawnable Hermes worker profile the kanban dispatcher would use; the CEO Studio autonomy runner instead executes 'devin' agents directly via the Devin CLI (model field, e.g. swe-1.6), because Hermes has no Devin model provider. Execution + repair roles run on Devin swe-1.6 so the app can dogfood itself. Critical System Agents (domain-architect/agenda-agent/ba-document-guard) stay on their design-placeholder providers. Projects can override via their own agents.json or $CEO_AGENTS_CONFIG.",
   "agents": [
     {
       "id": "ba",
       "name": "ba",
-      "provider": "echo",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
       "persona": "ba",
       "capabilities": [
         "requirements",
         "user-journeys",
         "decomposition"
-      ]
+      ],
+      "tmux_window": "watcher"
     },
     {
       "id": "architect",
-      "provider": "echo",
+      "name": "architect",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
       "persona": "architect",
       "capabilities": [
         "adr",
         "data-model",
         "interfaces"
-      ]
+      ],
+      "tmux_window": "watcher"
     },
     {
       "id": "pm",
-      "provider": "echo",
+      "name": "pm",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
       "persona": "pm",
       "capabilities": [
         "roadmap",
         "epics",
         "prioritization"
-      ]
+      ],
+      "tmux_session": "pipe-pm"
     },
     {
       "id": "planner",
-      "provider": "echo",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
       "persona": "planner",
       "capabilities": [
         "task-planning",
@@ -42,8 +55,22 @@
       ]
     },
     {
+      "id": "builder",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
+      "persona": "builder",
+      "capabilities": [
+        "implementation",
+        "verification",
+        "patches"
+      ]
+    },
+    {
       "id": "researcher",
-      "provider": "echo",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
       "persona": "DEEP_RESEARCHER",
       "capabilities": [
         "research",
@@ -53,7 +80,9 @@
     },
     {
       "id": "designer",
-      "provider": "echo",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
       "persona": "SENIOR_DESIGNER_UX",
       "capabilities": [
         "ux",
@@ -62,12 +91,99 @@
     },
     {
       "id": "facilitator",
-      "provider": "echo",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
       "persona": "swarm-facilitator",
       "capabilities": [
         "coordination",
         "synthesis"
       ]
+    },
+    {
+      "id": "docs-steward",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
+      "persona": "docs-steward",
+      "capabilities": [
+        "documentation",
+        "docs-drift",
+        "handoff-review",
+        "registry-audit"
+      ],
+      "description": "Reviews code/agent changes before handoff and updates authoritative docs so future agents inherit the current operating model."
+    },
+    {
+      "id": "self-repair-engineer",
+      "name": "self-repair-engineer",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
+      "persona": "self-repair-engineer",
+      "room": "self-repair",
+      "capabilities": [
+        "diagnostics",
+        "self-repair",
+        "test-verification",
+        "git-commit",
+        "docs-updates",
+        "bug-evidence"
+      ],
+      "description": "Diagnoses CEO Studio defects and improvement opportunities, implements verified repairs, logs evidence, updates docs when behavior changes, and commits all file changes."
+    },
+    {
+      "id": "dogfood-tester",
+      "name": "dogfood-tester",
+      "provider": "vertex",
+      "persona": "ba",
+      "capabilities": [
+        "testing",
+        "dogfood"
+      ],
+      "description": "Test agent created during dogfood session",
+      "memory_key": "agent:dogfood-tester",
+      "tmux_session": "pipe-dogfood-tester"
+    },
+    {
+      "id": "domain-architect",
+      "name": "Domain Architect",
+      "provider": "hermes",
+      "persona": "domain-architect",
+      "capabilities": [
+        "domain-definition",
+        "interview",
+        "entity-detection",
+        "handoff-creation"
+      ],
+      "description": "Critical System Agent (design placeholder from June 2026 domain lifecycle discussion): Guides structured conversational interviews for new domain creation. Maintains live AGUI outline in left panel. Produces synthesized definition + raw artifacts + explicit handoff to Agenda Agent. Two-layer model (immutable core + editable persona). See domains/domain-lifecycle/docs/design/ and docs/personas/domain-architect.md (inside the Domain Lifecycle domain)"
+    },
+    {
+      "id": "agenda-agent",
+      "name": "Agenda Agent",
+      "provider": "grok",
+      "persona": "agenda-agent",
+      "capabilities": [
+        "handoff-triage",
+        "agenda-item-creation",
+        "routing",
+        "human-in-loop-judgment"
+      ],
+      "description": "Critical System Agent (design placeholder): Receives handoffs (esp. from Domain Architect), performs triage, creates actionable Agenda Items, routes work, surfaces needs for human attention. See domains/domain-lifecycle/docs/design/ and docs/personas/agenda-agent.md (inside the Domain Lifecycle domain)"
+    },
+    {
+      "id": "ba-document-guard",
+      "name": "BA Document Guard",
+      "provider": "hermes",
+      "persona": "ba-document-guard",
+      "capabilities": [
+        "document-review",
+        "conflict-detection",
+        "dirty-clean-state",
+        "work-blocking",
+        "doc-hygiene"
+      ],
+      "description": "Critical System Agent (design placeholder, domain-scoped): Per-domain guardian of documentation quality. Enforces Dirty/Clean states on all documents, detects contradictions, blocks work on dirty docs. Two-layer model. See domains/domain-lifecycle/docs/design/ and docs/personas/ba-document-guard.md (inside the Domain Lifecycle domain)"
     }
   ],
   "teams": {
@@ -77,6 +193,26 @@
       "pm",
       "researcher",
       "designer"
+    ],
+    "execution-builders": [
+      "builder",
+      "architect",
+      "planner"
+    ],
+    "review-guild": [
+      "pm",
+      "architect",
+      "facilitator"
+    ],
+    "documentation-stewards": [
+      "docs-steward",
+      "pm",
+      "architect"
+    ],
+    "self-repair": [
+      "self-repair-engineer",
+      "docs-steward",
+      "architect"
     ]
   }
 }

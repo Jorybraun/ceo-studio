@@ -12,7 +12,7 @@ On top of that there were **several competing, half-wired comms mechanisms** wit
 
 ## What now works (validated live)
 
-A new adapter, **`bin/devin-agent`**, runs real **Devin CLI** sessions (default model `swe-1-6`) as first-class swarm members and bridges both directions onto the domain-room bus:
+A new adapter, **`bin/devin-agent`**, runs real **Devin CLI** sessions (default model `swe-1.6-fast`) as first-class swarm members and bridges both directions onto the domain-room bus:
 
 - `dispatch --agent <name> --room <r> --task "..."` → runs a Devin turn, captures the reply, records the session id, posts request+reply to the room.
 - `tell --agent <name> --room <r> --message "..."` → **resumes the same Devin session** (persistent memory) and posts the exchange.
@@ -42,7 +42,7 @@ Grounded in usage greps:
 Orchestrator (you / CEO) ──▶ domain room (chat.log = the bus)
         │                          ▲
         ▼                          │ reply posted back
-   bin/devin-agent  ──▶ Devin CLI session (swe-1-6, persistent via session id)
+   bin/devin-agent  ──▶ Devin CLI session (swe-1.6-fast default, persistent via session id)
 ```
 
 - One bus (the room). One adapter per agent kind (`devin-agent` now; add `grok-agent` later that reuses the same post-to-room contract and the `config/cost_limits.py` guardrail).

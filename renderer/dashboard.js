@@ -24,10 +24,10 @@
   let selectedAgentId = null;
 
   // Preferred left-to-right column order; unknown statuses are appended.
-  const COL_ORDER = ["planning", "triage", "todo", "ready", "running", "blocked", "scheduled", "review", "done"];
+  const COL_ORDER = ["planning", "triage", "bug", "todo", "ready", "running", "blocked", "scheduled", "review", "done"];
   const COL_ACCENT = {
     running: "border-emerald-500/40", ready: "border-sky-500/40",
-    blocked: "border-red-500/40", todo: "border-neutral-600",
+    blocked: "border-red-500/40", bug: "border-rose-500/40", todo: "border-neutral-600",
     done: "border-neutral-700", review: "border-amber-500/40",
     scheduled: "border-violet-500/40", triage: "border-pink-500/40",
     planning: "border-cyan-500/40",
@@ -35,7 +35,7 @@
   const DOT = {
     running: "bg-emerald-500", ready: "bg-sky-500", blocked: "bg-red-500",
     done: "bg-neutral-500", review: "bg-amber-500", scheduled: "bg-violet-500",
-    todo: "bg-neutral-500", triage: "bg-pink-500", planning: "bg-cyan-500",
+    todo: "bg-neutral-500", triage: "bg-pink-500", bug: "bg-rose-500", planning: "bg-cyan-500",
   };
 
   function esc(s) {
@@ -74,13 +74,13 @@
     
     // Get current domain from the global app state if available
     const domainSwitcher = document.getElementById("domain-switcher");
-    const currentDomain = domainSwitcher ? domainSwitcher.value : "All";
+    const currentDomain = "ceo-studio"; // fixed to the application only // fixed to CEO Studio only
     
     let res = {};
     try { res = await ceo.ceoBoardsForDomain(currentDomain); } catch { res = {}; }
     const boards = (res && res.boards) || [];
     if (!board || !boards.some((b) => b.slug === board)) {
-      board = (boards[0] && boards[0].slug) || (res && res.current) || null;
+      board = "ceo-studio";
     }
     const sel = $("dash-board");
     if (sel) {
@@ -432,7 +432,7 @@
       <label class="flex items-center gap-2 text-xs text-neutral-300">
         <input type="checkbox" class="mtg-member accent-cyan-500" value="${esc(a.id)}" ${sel.has(a.id) ? "checked" : ""} />
         <span class="font-medium text-neutral-200">${esc(a.id)}</span>
-        <span class="text-[10px] text-neutral-500">${esc(a.provider || "echo")}${a.persona ? " · " + esc(a.persona) : ""}</span>
+        <span class="text-[10px] text-neutral-500">${esc(a.provider || "vertex")}${a.persona ? " · " + esc(a.persona) : ""}</span>
       </label>`).join("");
   }
 
@@ -505,7 +505,7 @@
     if (!data || !data.ok) { host.innerHTML = `<div class="text-neutral-600 text-sm p-4">No board data.</div>`; return; }
     const cols = data.columns || {};
     const present = Object.keys(cols);
-    const ordered = COL_ORDER.filter((c) => present.includes(c)).concat(present.filter((c) => !COL_ORDER.includes(c)));
+    const ordered = COL_ORDER.concat(present.filter((c) => !COL_ORDER.includes(c)));
     if (!ordered.length) { host.innerHTML = `<div class="text-neutral-600 text-sm p-4">Board is empty.</div>`; return; }
     host.innerHTML = ordered.map((status) => {
       const tasks = cols[status] || [];

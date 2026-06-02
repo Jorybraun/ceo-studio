@@ -133,7 +133,7 @@ function summarizeActions(reviews = []) {
   return actions;
 }
 
-function runCycle({ projectSlug, board, domain = "All", force = false, now = new Date() } = {}) {
+function runCycle({ projectSlug, projectPath, board, domain = "All", force = false, now = new Date() } = {}) {
   if (!projectSlug) return { ok: false, reason: "project slug required" };
   const gate = canRun(projectSlug, { force, now });
   if (!gate.ok) return { ok: true, skipped: true, reason: gate.reason, policy: gate.policy, state: gate.state };
@@ -154,6 +154,8 @@ function runCycle({ projectSlug, board, domain = "All", force = false, now = new
     ? autonomy.analyzeBlocked({
       board,
       projectSlug,
+      projectPath,
+      domain,
       dryRun: !policy.allowBoardComments,
       limit: policy.maxBlockedPerRun,
     })

@@ -241,7 +241,6 @@ now self-manages it:
 | Command                | Purpose |
 |------------------------|---------|
 | `launch-agent`         | Lower-level way to start a persona agent into a herder session |
-| `persona-responder`    | Give a running agent a brain so it can actually reply using its persona |
 | `harem-orchestrator`   | Dedicated long-running process for the orchestrator |
 
 #### Utilities
@@ -329,6 +328,5 @@ Run `./bin/list-personas` to see everything you currently have.
 - `domain-room` family — raw room operations
 - `herder-steer` — direct injection into agent panes
 - `launch-agent` — explicit agent session creation
-- `persona-responder` — give an agent a running brain
 
 See the individual script `--help` for details.

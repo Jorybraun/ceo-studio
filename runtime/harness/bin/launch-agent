@@ -43,6 +43,7 @@ if [[ -z "$NAME" ]]; then
 fi
 
 HARNESS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+AGENT_CWD="${HARNESS_WORKSPACE:-$HARNESS_ROOT}"
 REGISTRY_LOOKUP=(python3 "$HARNESS_ROOT/agents/registry.py" lookup "$NAME" --format shell)
 if [[ -n "$DOMAIN_OVERRIDE" ]]; then
     REGISTRY_LOOKUP+=(--domain "$DOMAIN_OVERRIDE")
@@ -68,7 +69,7 @@ if [[ "$LAUNCHABLE" != "1" ]]; then
     exit 1
 fi
 
-WATCH_CMD="cd $HARNESS_ROOT && ./bin/domain-room watch $CANONICAL_ROOM \"$ROOM_SPEAKER\" --persona $PERSONA --interval 12 --heartbeat"
+WATCH_CMD="cd $(printf '%q' "$HARNESS_ROOT") && HARNESS_WORKSPACE=$(printf '%q' "${HARNESS_WORKSPACE:-}") ./bin/domain-room watch $(printf '%q' "$CANONICAL_ROOM") $(printf '%q' "$ROOM_SPEAKER") --persona $(printf '%q' "$PERSONA") --interval 12 --heartbeat"
 
 tmux_session_target() {
     # tmux target matching is prefix-based by default. Use '=' so short names
@@ -99,6 +100,7 @@ fi
 if [[ -n "$COMMAND" ]]; then
     echo "Command: $COMMAND"
 fi
+echo "Workspace: $AGENT_CWD"
 
 # Enforced cost/concurrency guardrail (single source of truth: config/cost_limits.py).
 # This works for BOTH humans and automated/subprocess callers — the old interactive
@@ -165,7 +167,7 @@ case "$LAUNCH_MODE" in
             # actually start the registry command in the main window (the spawn
             # already passed the cost guardrail above).
             echo "Starting external agent command in ${TMUX_SESSION}:${TMUX_WINDOW}: $COMMAND"
-            tmux send-keys -t "=$(printf '%s:%s' "$TMUX_SESSION" "$TMUX_WINDOW")" "cd $HARNESS_ROOT && $COMMAND" C-m
+            tmux send-keys -t "=$(printf '%s:%s' "$TMUX_SESSION" "$TMUX_WINDOW")" "cd $(printf '%q' "$AGENT_CWD") && $COMMAND" C-m
         else
             echo "No registry command configured for '$AGENT_ID'."
             echo "Prefer a provider-backed adapter instead (recommended): ./bin/agent dispatch --provider <p> --agent $AGENT_ID --room $CANONICAL_ROOM --task \"...\""

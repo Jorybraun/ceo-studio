@@ -18,7 +18,7 @@ from typing import Optional
 
 from .base import AgentProvider, ProviderResult
 
-DEFAULT_MODEL = os.environ.get("DEVIN_MODEL", "swe-1-6")
+DEFAULT_MODEL = os.environ.get("DEVIN_MODEL", "swe-1.6-fast")
 
 
 class DevinProvider(AgentProvider):

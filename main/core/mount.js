@@ -15,11 +15,21 @@
  * found even in a packaged GUI.
  */
 const path = require("path");
+const fs = require("fs");
 const { execFileSync, spawnSync } = require("child_process");
 const { resolvePython, envWithPython } = require("./pybin");
 
 function harnessRoot(projectPath) {
-  return path.join(projectPath || process.cwd(), "runtime", "harness");
+  const projectHarness = projectPath ? path.join(projectPath, "runtime", "harness") : "";
+  if (projectHarness && fs.existsSync(path.join(projectHarness, "agents", "registry.py"))) {
+    return projectHarness;
+  }
+  return path.join(__dirname, "..", "..", "runtime", "harness");
+}
+
+function harnessEnv(projectPath, extra = {}) {
+  const workspace = projectPath ? { HARNESS_WORKSPACE: projectPath } : {};
+  return envWithPython({ ...workspace, ...extra });
 }
 
 function _tmux(args, opts = {}) {
@@ -61,11 +71,12 @@ function liveWindow(plan) {
 
 /** Ask the harness registry for an agent's launch plan (tmux session, room, launchability). */
 function lookup(projectPath, id) {
+  const root = harnessRoot(projectPath);
   try {
     const out = execFileSync(
       resolvePython(),
-      [path.join(harnessRoot(projectPath), "agents", "registry.py"), "lookup", String(id), "--format", "json"],
-      { encoding: "utf8", timeout: 5000, cwd: harnessRoot(projectPath), env: envWithPython() },
+      [path.join(root, "agents", "registry.py"), "lookup", String(id), "--format", "json"],
+      { encoding: "utf8", timeout: 5000, cwd: root, env: harnessEnv(projectPath) },
     );
     return JSON.parse(out);
   } catch {
@@ -77,10 +88,11 @@ function mount(projectPath, id) {
   const plan = lookup(projectPath, id);
   if (!plan) return { ok: false, reason: `agent not found in registry: ${id}` };
   if (plan.launchable === false) return { ok: false, reason: plan.launch_status_reason || "agent is not launchable" };
-  const bin = path.join(harnessRoot(projectPath), "bin", "launch-agent");
+  const root = harnessRoot(projectPath);
+  const bin = path.join(root, "bin", "launch-agent");
   const r = spawnSync(bin, ["--name", String(id)], {
-    cwd: harnessRoot(projectPath),
-    env: envWithPython(),
+    cwd: root,
+    env: harnessEnv(projectPath),
     encoding: "utf8",
     timeout: 20000,
     input: "no\n", // never hang on an interactive guardrail prompt
@@ -143,10 +155,11 @@ function send(session, window, text) {
 function post(projectPath, room, speaker, message) {
   if (!room) return { ok: false, reason: "room required" };
   if (!String(message || "").trim()) return { ok: false, reason: "message required" };
-  const bin = path.join(harnessRoot(projectPath), "bin", "domain-room");
+  const root = harnessRoot(projectPath);
+  const bin = path.join(root, "bin", "domain-room");
   try {
     execFileSync(bin, ["post", String(room), String(speaker || "CEO"), String(message)], {
-      cwd: harnessRoot(projectPath), env: envWithPython(), encoding: "utf8", timeout: 8000,
+      cwd: root, env: harnessEnv(projectPath), encoding: "utf8", timeout: 8000,
     });
     return { ok: true, room, speaker: speaker || "CEO" };
   } catch (e) {

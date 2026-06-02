@@ -1,0 +1,814 @@
+{
+  "captured_at": "2026-06-01T02:26:48.644844+00:00",
+  "providers": {
+    "vertex": [
+      {
+        "id": "google/gemma-4-26b-a4b-it-maas",
+        "label": "Gemma (Vertex MaaS) \u00b7 google/gemma-4-26b-a4b-it-maas",
+        "source": "cloudflare-ai-gateway"
+      }
+    ],
+    "codex": [
+      {
+        "id": "gpt-5.5",
+        "label": "GPT-5.5",
+        "context": 272000
+      },
+      {
+        "id": "gpt-5.4",
+        "label": "GPT-5.4",
+        "context": 272000
+      },
+      {
+        "id": "gpt-5.4-mini",
+        "label": "GPT-5.4-Mini",
+        "context": 272000
+      },
+      {
+        "id": "gpt-5.3-codex",
+        "label": "GPT-5.3-Codex",
+        "context": 272000
+      },
+      {
+        "id": "gpt-5.2",
+        "label": "GPT-5.2",
+        "context": 272000
+      },
+      {
+        "id": "codex-auto-review",
+        "label": "Codex Auto Review",
+        "context": 272000
+      }
+    ],
+    "hermes": [
+      {
+        "id": "claude-opus-4.7",
+        "label": "claude-opus-4.7",
+        "source": "copilot"
+      },
+      {
+        "id": "claude-opus-4.8",
+        "label": "claude-opus-4.8",
+        "source": "copilot"
+      },
+      {
+        "id": "claude-sonnet-4.6",
+        "label": "claude-sonnet-4.6",
+        "source": "copilot"
+      },
+      {
+        "id": "gpt-5.2-codex",
+        "label": "gpt-5.2-codex",
+        "source": "copilot"
+      },
+      {
+        "id": "gpt-5.3-codex",
+        "label": "gpt-5.3-codex",
+        "source": "copilot"
+      },
+      {
+        "id": "gpt-5.4-mini",
+        "label": "gpt-5.4-mini",
+        "source": "copilot"
+      },
+      {
+        "id": "gpt-5.4",
+        "label": "gpt-5.4",
+        "source": "copilot"
+      },
+      {
+        "id": "gpt-5.5",
+        "label": "gpt-5.5",
+        "source": "copilot"
+      },
+      {
+        "id": "gpt-5-mini",
+        "label": "gpt-5-mini",
+        "source": "copilot"
+      },
+      {
+        "id": "claude-haiku-4.5",
+        "label": "claude-haiku-4.5",
+        "source": "copilot"
+      },
+      {
+        "id": "gpt-5.5",
+        "label": "gpt-5.5",
+        "source": "openai-codex"
+      },
+      {
+        "id": "gpt-5.4",
+        "label": "gpt-5.4",
+        "source": "openai-codex"
+      },
+      {
+        "id": "gpt-5.4-mini",
+        "label": "gpt-5.4-mini",
+        "source": "openai-codex"
+      },
+      {
+        "id": "gpt-5.3-codex",
+        "label": "gpt-5.3-codex",
+        "source": "openai-codex"
+      },
+      {
+        "id": "gpt-5.2",
+        "label": "gpt-5.2",
+        "source": "openai-codex"
+      },
+      {
+        "id": "gpt-5.3-codex-spark",
+        "label": "gpt-5.3-codex-spark",
+        "source": "openai-codex"
+      },
+      {
+        "id": "grok-4.3",
+        "label": "grok-4.3",
+        "source": "xai-oauth"
+      },
+      {
+        "id": "grok-4.20-0309-non-reasoning",
+        "label": "grok-4.20-0309-non-reasoning",
+        "source": "xai-oauth"
+      },
+      {
+        "id": "grok-4.20-0309-reasoning",
+        "label": "grok-4.20-0309-reasoning",
+        "source": "xai-oauth"
+      },
+      {
+        "id": "grok-4.20-multi-agent-0309",
+        "label": "grok-4.20-multi-agent-0309",
+        "source": "xai-oauth"
+      },
+      {
+        "id": "grok-build-0.1",
+        "label": "grok-build-0.1",
+        "source": "xai-oauth"
+      },
+      {
+        "id": "grok-imagine-image",
+        "label": "grok-imagine-image",
+        "source": "xai-oauth"
+      },
+      {
+        "id": "grok-imagine-image-quality",
+        "label": "grok-imagine-image-quality",
+        "source": "xai-oauth"
+      },
+      {
+        "id": "grok-imagine-video",
+        "label": "grok-imagine-video",
+        "source": "xai-oauth"
+      },
+      {
+        "id": "claude-opus-4-8",
+        "label": "claude-opus-4-8",
+        "source": "anthropic"
+      },
+      {
+        "id": "claude-opus-4-7",
+        "label": "claude-opus-4-7",
+        "source": "anthropic"
+      },
+      {
+        "id": "claude-opus-4-6",
+        "label": "claude-opus-4-6",
+        "source": "anthropic"
+      },
+      {
+        "id": "claude-sonnet-4-6",
+        "label": "claude-sonnet-4-6",
+        "source": "anthropic"
+      },
+      {
+        "id": "claude-opus-4-5-20251101",
+        "label": "claude-opus-4-5-20251101",
+        "source": "anthropic"
+      },
+      {
+        "id": "claude-sonnet-4-5-20250929",
+        "label": "claude-sonnet-4-5-20250929",
+        "source": "anthropic"
+      },
+      {
+        "id": "claude-opus-4-20250514",
+        "label": "claude-opus-4-20250514",
+        "source": "anthropic"
+      },
+      {
+        "id": "claude-sonnet-4-20250514",
+        "label": "claude-sonnet-4-20250514",
+        "source": "anthropic"
+      },
+      {
+        "id": "claude-haiku-4-5-20251001",
+        "label": "claude-haiku-4-5-20251001",
+        "source": "anthropic"
+      }
+    ],
+    "grok": [
+      {
+        "id": "grok-build",
+        "label": "Grok Build",
+        "context": 512000
+      },
+      {
+        "id": "grok-4.3",
+        "label": "grok-4.3"
+      },
+      {
+        "id": "grok-4.20-0309-non-reasoning",
+        "label": "grok-4.20-0309-non-reasoning"
+      },
+      {
+        "id": "grok-4.20-0309-reasoning",
+        "label": "grok-4.20-0309-reasoning"
+      },
+      {
+        "id": "grok-4.20-multi-agent-0309",
+        "label": "grok-4.20-multi-agent-0309"
+      },
+      {
+        "id": "grok-build-0.1",
+        "label": "grok-build-0.1"
+      },
+      {
+        "id": "grok-imagine-image",
+        "label": "grok-imagine-image"
+      },
+      {
+        "id": "grok-imagine-image-quality",
+        "label": "grok-imagine-image-quality"
+      },
+      {
+        "id": "grok-imagine-video",
+        "label": "grok-imagine-video"
+      }
+    ],
+    "claude": [
+      {
+        "id": "opus",
+        "label": "opus (alias \u2192 latest)"
+      },
+      {
+        "id": "sonnet",
+        "label": "sonnet (alias \u2192 latest)"
+      },
+      {
+        "id": "haiku",
+        "label": "haiku (alias \u2192 latest)"
+      },
+      {
+        "id": "claude-opus-4-8",
+        "label": "claude-opus-4-8",
+        "source": "anthropic"
+      },
+      {
+        "id": "claude-opus-4-7",
+        "label": "claude-opus-4-7",
+        "source": "anthropic"
+      },
+      {
+        "id": "claude-opus-4-6",
+        "label": "claude-opus-4-6",
+        "source": "anthropic"
+      },
+      {
+        "id": "claude-sonnet-4-6",
+        "label": "claude-sonnet-4-6",
+        "source": "anthropic"
+      },
+      {
+        "id": "claude-opus-4-5-20251101",
+        "label": "claude-opus-4-5-20251101",
+        "source": "anthropic"
+      },
+      {
+        "id": "claude-sonnet-4-5-20250929",
+        "label": "claude-sonnet-4-5-20250929",
+        "source": "anthropic"
+      },
+      {
+        "id": "claude-opus-4-20250514",
+        "label": "claude-opus-4-20250514",
+        "source": "anthropic"
+      },
+      {
+        "id": "claude-sonnet-4-20250514",
+        "label": "claude-sonnet-4-20250514",
+        "source": "anthropic"
+      },
+      {
+        "id": "claude-haiku-4-5-20251001",
+        "label": "claude-haiku-4-5-20251001",
+        "source": "anthropic"
+      }
+    ],
+    "pi": [
+      {
+        "id": "claude-3-5-haiku-20241022",
+        "label": "anthropic/claude-3-5-haiku-20241022",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": false,
+        "images": true
+      },
+      {
+        "id": "claude-3-5-haiku-latest",
+        "label": "anthropic/claude-3-5-haiku-latest",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": false,
+        "images": true
+      },
+      {
+        "id": "claude-3-5-sonnet-20240620",
+        "label": "anthropic/claude-3-5-sonnet-20240620",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": false,
+        "images": true
+      },
+      {
+        "id": "claude-3-5-sonnet-20241022",
+        "label": "anthropic/claude-3-5-sonnet-20241022",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": false,
+        "images": true
+      },
+      {
+        "id": "claude-3-7-sonnet-20250219",
+        "label": "anthropic/claude-3-7-sonnet-20250219",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-3-haiku-20240307",
+        "label": "anthropic/claude-3-haiku-20240307",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": false,
+        "images": true
+      },
+      {
+        "id": "claude-3-opus-20240229",
+        "label": "anthropic/claude-3-opus-20240229",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": false,
+        "images": true
+      },
+      {
+        "id": "claude-3-sonnet-20240229",
+        "label": "anthropic/claude-3-sonnet-20240229",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": false,
+        "images": true
+      },
+      {
+        "id": "claude-haiku-4-5",
+        "label": "anthropic/claude-haiku-4-5",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-haiku-4-5-20251001",
+        "label": "anthropic/claude-haiku-4-5-20251001",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-opus-4-0",
+        "label": "anthropic/claude-opus-4-0",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-opus-4-1",
+        "label": "anthropic/claude-opus-4-1",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-opus-4-1-20250805",
+        "label": "anthropic/claude-opus-4-1-20250805",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-opus-4-20250514",
+        "label": "anthropic/claude-opus-4-20250514",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-opus-4-5",
+        "label": "anthropic/claude-opus-4-5",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-opus-4-5-20251101",
+        "label": "anthropic/claude-opus-4-5-20251101",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-opus-4-6",
+        "label": "anthropic/claude-opus-4-6",
+        "context": "1M",
+        "source": "anthropic",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-opus-4-7",
+        "label": "anthropic/claude-opus-4-7",
+        "context": "1M",
+        "source": "anthropic",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-sonnet-4-0",
+        "label": "anthropic/claude-sonnet-4-0",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-sonnet-4-20250514",
+        "label": "anthropic/claude-sonnet-4-20250514",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-sonnet-4-5",
+        "label": "anthropic/claude-sonnet-4-5",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-sonnet-4-5-20250929",
+        "label": "anthropic/claude-sonnet-4-5-20250929",
+        "context": "200K",
+        "source": "anthropic",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-sonnet-4-6",
+        "label": "anthropic/claude-sonnet-4-6",
+        "context": "1M",
+        "source": "anthropic",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-haiku-4.5",
+        "label": "github-copilot/claude-haiku-4.5",
+        "context": "144K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-opus-4.5",
+        "label": "github-copilot/claude-opus-4.5",
+        "context": "160K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-opus-4.6",
+        "label": "github-copilot/claude-opus-4.6",
+        "context": "1M",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-opus-4.7",
+        "label": "github-copilot/claude-opus-4.7",
+        "context": "144K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-sonnet-4",
+        "label": "github-copilot/claude-sonnet-4",
+        "context": "216K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-sonnet-4.5",
+        "label": "github-copilot/claude-sonnet-4.5",
+        "context": "144K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "claude-sonnet-4.6",
+        "label": "github-copilot/claude-sonnet-4.6",
+        "context": "1M",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "gemini-2.5-pro",
+        "label": "github-copilot/gemini-2.5-pro",
+        "context": "128K",
+        "source": "github-copilot",
+        "thinking": false,
+        "images": true
+      },
+      {
+        "id": "gemini-3-flash-preview",
+        "label": "github-copilot/gemini-3-flash-preview",
+        "context": "128K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "gemini-3-pro-preview",
+        "label": "github-copilot/gemini-3-pro-preview",
+        "context": "128K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "gemini-3.1-pro-preview",
+        "label": "github-copilot/gemini-3.1-pro-preview",
+        "context": "128K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "gpt-4.1",
+        "label": "github-copilot/gpt-4.1",
+        "context": "128K",
+        "source": "github-copilot",
+        "thinking": false,
+        "images": true
+      },
+      {
+        "id": "gpt-4o",
+        "label": "github-copilot/gpt-4o",
+        "context": "128K",
+        "source": "github-copilot",
+        "thinking": false,
+        "images": true
+      },
+      {
+        "id": "gpt-5",
+        "label": "github-copilot/gpt-5",
+        "context": "128K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "gpt-5-mini",
+        "label": "github-copilot/gpt-5-mini",
+        "context": "264K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "gpt-5.1",
+        "label": "github-copilot/gpt-5.1",
+        "context": "264K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "gpt-5.1-codex",
+        "label": "github-copilot/gpt-5.1-codex",
+        "context": "400K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "gpt-5.1-codex-max",
+        "label": "github-copilot/gpt-5.1-codex-max",
+        "context": "400K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "gpt-5.1-codex-mini",
+        "label": "github-copilot/gpt-5.1-codex-mini",
+        "context": "400K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "gpt-5.2",
+        "label": "github-copilot/gpt-5.2",
+        "context": "264K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "gpt-5.2-codex",
+        "label": "github-copilot/gpt-5.2-codex",
+        "context": "400K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "gpt-5.3-codex",
+        "label": "github-copilot/gpt-5.3-codex",
+        "context": "400K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "gpt-5.4",
+        "label": "github-copilot/gpt-5.4",
+        "context": "400K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "gpt-5.4-mini",
+        "label": "github-copilot/gpt-5.4-mini",
+        "context": "400K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "gpt-5.5",
+        "label": "github-copilot/gpt-5.5",
+        "context": "400K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": true
+      },
+      {
+        "id": "grok-code-fast-1",
+        "label": "github-copilot/grok-code-fast-1",
+        "context": "128K",
+        "source": "github-copilot",
+        "thinking": true,
+        "images": false
+      }
+    ],
+    "devin": [
+      {
+        "id": "adaptive-promo",
+        "label": "Adaptive PROMO",
+        "source": "devin",
+        "promo": true
+      },
+      {
+        "id": "claude-haiku-4.5",
+        "label": "Claude Haiku 4.5",
+        "source": "devin"
+      },
+      {
+        "id": "claude-sonnet-4.6",
+        "label": "Claude Sonnet 4.6",
+        "source": "devin",
+        "cost": {
+          "input_per_mtok": 3,
+          "output_per_mtok": 15
+        }
+      },
+      {
+        "id": "deepseek-v4-pro",
+        "label": "DeepSeek V4 Pro",
+        "source": "devin"
+      },
+      {
+        "id": "gemini-3.5-flash",
+        "label": "Gemini 3.5 Flash",
+        "source": "devin"
+      },
+      {
+        "id": "glm-5.1",
+        "label": "GLM-5.1",
+        "source": "devin"
+      },
+      {
+        "id": "gpt-5.5",
+        "label": "GPT-5.5",
+        "source": "devin"
+      },
+      {
+        "id": "kimi-k2.6-promo",
+        "label": "Kimi K2.6 PROMO",
+        "source": "devin",
+        "promo": true
+      },
+      {
+        "id": "swe-1.6-fast",
+        "label": "SWE-1.6 Fast",
+        "source": "devin"
+      },
+      {
+        "id": "claude-opus-4.7",
+        "label": "Claude Opus 4.7",
+        "source": "devin"
+      },
+      {
+        "id": "claude-sonnet-4.5-promo",
+        "label": "Claude Sonnet 4.5 PROMO",
+        "source": "devin",
+        "promo": true
+      },
+      {
+        "id": "gemini-3.1-pro",
+        "label": "Gemini 3.1 Pro",
+        "source": "devin"
+      },
+      {
+        "id": "gpt-5.4",
+        "label": "GPT-5.4",
+        "source": "devin"
+      },
+      {
+        "id": "gpt-5.4-mini",
+        "label": "GPT-5.4 Mini",
+        "source": "devin"
+      },
+      {
+        "id": "swe-1.5-promo",
+        "label": "SWE-1.5 PROMO",
+        "source": "devin",
+        "promo": true
+      },
+      {
+        "id": "claude-opus-4.6",
+        "label": "Claude Opus 4.6",
+        "source": "devin"
+      },
+      {
+        "id": "gemini-3-flash",
+        "label": "Gemini 3 Flash",
+        "source": "devin"
+      },
+      {
+        "id": "gpt-5.3-codex",
+        "label": "GPT-5.3-Codex",
+        "source": "devin"
+      },
+      {
+        "id": "claude-opus-4.5",
+        "label": "Claude Opus 4.5",
+        "source": "devin"
+      },
+      {
+        "id": "gpt-5.2",
+        "label": "GPT-5.2",
+        "source": "devin"
+      }
+    ],
+    "command": []
+  }
+}

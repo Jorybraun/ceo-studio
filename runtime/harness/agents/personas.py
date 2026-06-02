@@ -30,6 +30,7 @@ def _candidate_dirs() -> list[Path]:
         if chunk.strip():
             dirs.append(Path(chunk).expanduser())
     dirs.append(paths.workspace() / "personas")
+    dirs.append(paths.workspace() / "runtime" / "harness" / "personas")
     dirs.append(paths.HARNESS_HOME / "personas")
     # de-dup, preserve order
     seen, out = set(), []

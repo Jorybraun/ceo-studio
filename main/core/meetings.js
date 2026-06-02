@@ -15,7 +15,7 @@
  */
 const path = require("path");
 const fs = require("fs");
-const { execFileSync, spawn } = require("child_process");
+const { execFileSync, spawn, execSync } = require("child_process");
 const { resolvePython, envWithPython } = require("./pybin");
 
 function harnessRoot(projectPath) {
@@ -29,6 +29,22 @@ function roomsDir(projectPath) {
 }
 function roomDir(projectPath, room) {
   return path.join(roomsDir(projectPath), room);
+}
+
+/** Get list of currently mounted agents (active tmux sessions). */
+function mountedAgents() {
+  try {
+    const out = execSync("tmux list-sessions", { encoding: "utf8", env: envWithPython() });
+    const sessions = out.split("\n").filter(Boolean);
+    // Extract agent IDs from session names like "pipe-pm", "pipe-ba", "agent-chat", etc.
+    // Filter out non-agent sessions like "agent-chat", "agent-orchestration"
+    return sessions
+      .map(line => line.split(":")[0].trim())
+      .filter(name => name.startsWith("pipe-"))
+      .map(name => name.replace("pipe-", ""));
+  } catch {
+    return [];
+  }
 }
 
 /** Run a model-free harness python helper module and parse its JSON stdout. */
@@ -51,12 +67,19 @@ function _pyJson(projectPath, moduleName) {
 function options(projectPath) {
   const cfg = _pyJson(projectPath, "agents.agent_config") || { agents: {}, teams: {} };
   const personas = _pyJson(projectPath, "agents.personas") || [];
-  const agents = Object.values(cfg.agents || {});
+  const allAgents = Object.values(cfg.agents || {});
+  const mounted = mountedAgents();
+  const mountedSet = new Set(mounted);
+  const agents = allAgents.map((agent) => ({
+    ...agent,
+    mounted: mountedSet.has(agent.id),
+  }));
   return {
     ok: true,
     agents,
     teams: Object.entries(cfg.teams || {}).map(([name, ids]) => ({ name, members: ids })),
     personas: Array.isArray(personas) ? personas : [],
+    mounted, // Include mounted list for UI debugging
   };
 }
 
@@ -141,4 +164,4 @@ function room({ projectPath, room } = {}) {
   return { ok: true, room: safeRoom, feed, requirements, running: !done, started: true };
 }
 
-module.exports = { options, start, room, roomDir, harnessRoot };
+module.exports = { options, start, room, roomDir, harnessRoot, mountedAgents };

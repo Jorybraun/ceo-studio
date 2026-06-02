@@ -55,7 +55,8 @@ def prune_stale_presence(presence_dir: Path, stale_seconds: int = 600) -> None:
         pass
 
 HARNESS_ROOT = Path(__file__).parent.parent
-ROOMS_ROOT = HARNESS_ROOT / "brain" / "rooms"
+WORKSPACE_ROOT = Path(os.environ.get("HARNESS_WORKSPACE") or HARNESS_ROOT).expanduser()
+ROOMS_ROOT = WORKSPACE_ROOT / "brain" / "rooms"
 
 
 def get_room_paths(domain: str):
@@ -95,8 +96,11 @@ def load_persona(name: str) -> Optional[str]:
     The loader searches recursively.
     """
     search_roots = [
+        WORKSPACE_ROOT / "personas",
+        WORKSPACE_ROOT / "runtime" / "harness" / "personas",
         HARNESS_ROOT / "personas",                    # NEW primary big manageable folder
         HARNESS_ROOT / "skills" / "planning-team",
+        WORKSPACE_ROOT / "runtime" / "harness" / "agents" / "personas",
         HARNESS_ROOT / "agents" / "personas",         # legacy
     ]
     name_variants = [name, name.lower(), name.replace(" ", "_"), name.replace(" ", "-")]
@@ -108,7 +112,11 @@ def load_persona(name: str) -> Optional[str]:
             for path in root.rglob(f"*{variant}*.md"):
                 if path.is_file():
                     content = path.read_text(encoding="utf-8")
-                    return f"# Loaded Persona: {name}\n# Source: {path.relative_to(HARNESS_ROOT)}\n\n{content}"
+                    try:
+                        source = path.relative_to(HARNESS_ROOT)
+                    except ValueError:
+                        source = path
+                    return f"# Loaded Persona: {name}\n# Source: {source}\n\n{content}"
     return None
 
 

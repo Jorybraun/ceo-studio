@@ -48,6 +48,7 @@ An asset is output generated for a brief or task: docs, screenshots, reports, ge
 The board is the durable queue. Agents should not maintain a private hidden queue that can diverge from Hermes.
 
 - `triage`: raw intake; PM/planner must normalize it.
+- `bug`: reproducible defect intake; self-repair confirms severity/reproduction and creates or executes the linked repair path.
 - `planning`: brief is being enriched or decomposed.
 - `todo` / `ready`: dispatchable work with owner, workspace, and acceptance criteria.
 - `running`: worker is actively executing.
@@ -108,9 +109,15 @@ Implemented in CEO Studio:
 - Live voice/planner tool `review_goals` exposes the review cycle and renders the report in the cockpit.
 - `main/core/autonomy-loop.js` stores conservative autonomy policy, enforces cooldowns, runs goal reviews plus blocked analysis, and persists run records.
 - Live voice/planner tools `autonomy_status`, `configure_autonomy`, `run_autonomy_cycle`, `start_autonomy`, and `stop_autonomy` expose explicit long-running control without hidden polling.
-- `main/core/self-repair.js` turns observed CEO Studio failures into first-class bugs plus linked repair tasks and evidence provenance.
-- Live voice/planner tool `report_system_bug` exposes self-repair intake when tests, tools, or Studio behavior fail.
+- `main/core/self-repair.js` turns observed CEO Studio failures and improvement requests into first-class bugs plus linked repair tasks and evidence provenance.
+- Live voice/planner tool `ask_self_repair` asks the dedicated `self-repair-engineer` agent to diagnose or improve the system, attempts to mount it, posts the handoff to the `self-repair` room, and requires verification, docs status, and a focused git commit before completion.
+- Live voice/planner tool `report_system_bug` remains available for logging self-repair defects without a live agent handoff.
 - The renderer task planning panel loads provenance, linked goals, and autonomy status for the selected Hermes task, showing parent briefs, child work, assets, and current autonomy mode/state beside the brief.
+- `main/core/orchestration-org.js` defines the machine-readable org structure that binds Kanban lanes to owning teams, workflows, default personas, queue roles, and escalation targets, including a first-class `bug` lane owned by the `self-repair` team.
+- Briefs, bugs, child tasks, and blocked-analysis comments now carry this routing contract, and live voice/planner tools `show_orchestration_org` and `route_work` expose the model before delegation.
+- The default harness registry includes explicit planning, execution, review, documentation, and self-repair teams so `triage/planning`, `todo/ready/running`, `blocked/review`, docs handoff, and repair handoff have concrete owners.
+- `runtime/harness/personas/general/self-repair-engineer.md` and `runtime/harness/skills/self-repair/SKILL.md` define the self-repair operating contract: diagnose first, implement real fixes, run `npm run check` and `npm test` unless blocked, update docs or obtain docs-steward signoff, commit all file changes, and report the commit hash plus verification evidence.
+- `runtime/harness/architecture/DOCS_STEWARDSHIP_AND_HANDOFF.md`, `runtime/harness/skills/docs-steward/SKILL.md`, and the `docs-steward` persona define the documentation handoff role. `npm run docs:check` is part of `npm run check`.
 
 Still needed:
 
@@ -118,3 +125,4 @@ Still needed:
 - Decide and implement the promotion policy for when proposed actions may become actual briefs/tasks without human confirmation.
 - Connect automatic failure detectors to `report_system_bug` once false-positive and duplicate suppression policy is defined.
 - Add lightweight board-card badges for provenance and goal alignment without overloading the Kanban scan view.
+- Surface lane owner/team/workflow directly on board cards and dispatch controls.

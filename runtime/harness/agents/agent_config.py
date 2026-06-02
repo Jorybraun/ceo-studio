@@ -71,14 +71,19 @@ def load_config() -> dict:
             if aid and aid not in agents:
                 agents[aid] = {
                     "id": aid,
+                    "name": spec.get("name"),
                     "provider": spec.get("provider", "echo"),
                     "persona": spec.get("persona"),
                     "model": spec.get("model"),
+                    "room": spec.get("room"),
+                    "tmux_session": spec.get("tmux_session"),
+                    "tmux_window": spec.get("tmux_window"),
                     "capabilities": spec.get("capabilities", []) or [],
                     "description": spec.get("description", ""),
                     # Generic command provider: CLI template + cost hint.
                     "command": spec.get("command"),
                     "paid": spec.get("paid"),
+                    "memory_key": spec.get("memory_key"),
                 }
         for name, ids in (data.get("teams", {}) or {}).items():
             if name not in teams and isinstance(ids, list):

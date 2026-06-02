@@ -20,7 +20,6 @@ harem --orchestrator -d discovery:main
 
 Detach with `Ctrl-b d`. Re-attach later with `tmux attach -t harem-orchestrator`.
 
-The `persona-responder` (started by the harem command) keeps the orchestrator reactive.
 
 ### 2. Using the dedicated long-running script
 ```bash
@@ -38,7 +37,6 @@ This runs the Python reactor loop forever.
 
 Previously agents were mostly just watchers (they printed room lines but had no "brain" that knew how to reply using their persona).
 
-When you now do `harem -a foo -p planner`, it automatically starts a `persona-responder` unless you pass `--headless`. This gives the agent the ability to actually think and reply when you @ it.
 
 In the Harem we distinguish:
 - **Agent**: the identity, herder session (tmux), persona, skills, and ability to be @'d and messaged.
@@ -58,7 +56,6 @@ When running as a Kanban Finisher (`harem kanban-finisher`), it uses the structu
 
 ## Memory Usage Note (Long-Running Processes)
 
-Long-running orchestrators and `persona-responder` processes now use efficient incremental reading of `chat.log` (via file offsets in `HerderAgent.get_messages_for_me(use_new_only=True)`).
 
 This prevents memory leaks that would occur from repeatedly loading the entire (potentially multi-megabyte) chat history into RAM on every poll loop.
 

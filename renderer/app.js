@@ -78,6 +78,8 @@ let selectedFile = null;
 let filePaneOpen = false;
 let panelFullscreen = false;
 let focusedTask = null;
+let ceoContextTray = [];
+let domainArchitectSession = null;
 
 function setPanelTitle(text) {
   const title = $("#panel-title");
@@ -465,6 +467,7 @@ async function openTaskInStudio({ board, taskId, taskTitle, taskStatus } = {}) {
   focusedTask = { board, taskId, taskTitle, taskStatus };
   setAgentState("thinking");
   setStudioFocus(taskTitle || taskId, `${board || "board"} / ${taskStatus || "task"} / planning focus`, "Planning");
+  window.CEOConvai?.syncContext?.(`task → ${board || "board"} / ${taskId}`);
   setPanelTitle("Planning Brief");
   panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading task context...</div>';
   try {
@@ -531,6 +534,236 @@ function taskCardHtml(boardSlug, status, task) {
   </button>`;
 }
 
+function domainMiniList(items, emptyText, formatter) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2 text-xs text-neutral-600">${esc(emptyText)}</div>`;
+  return `<div class="space-y-2">${list.slice(0, 8).map(formatter).join("")}</div>`;
+}
+
+function domainArtifactRows(items, emptyText) {
+  return domainMiniList(items, emptyText, (item) => `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2">
+    <div class="flex items-start gap-2">
+      <div class="min-w-0 flex-1">
+        <div class="truncate text-xs font-medium text-neutral-300">${esc(item.title || item.name || item.path)}</div>
+        <div class="mt-0.5 truncate font-mono text-[10px] text-neutral-600">${esc(item.path || "")}</div>
+      </div>
+      ${item.path ? `<button class="domain-context-add shrink-0 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-[10px] text-neutral-300 hover:bg-neutral-800" data-context-kind="artifact" data-context-title="${esc(item.title || item.name || item.path)}" data-context-path="${esc(item.path)}">Context</button>` : ""}
+    </div>
+  </div>`);
+}
+
+function domainAgendaRows(items) {
+  return domainMiniList(items, "No captured Agenda Items yet.", (item) => `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2">
+    <div class="flex items-start gap-2">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2">
+          <span class="rounded border border-cyan-500/25 bg-cyan-950/25 px-1.5 py-0.5 text-[10px] text-cyan-300">${esc(item.type || "feature")}</span>
+          <span class="min-w-0 truncate text-xs font-medium text-neutral-300">${esc(item.title)}</span>
+        </div>
+        <div class="mt-1 text-[10px] uppercase tracking-wider text-neutral-600">${esc(item.status || "proposed")} &middot; human approval required</div>
+      </div>
+      <button class="domain-context-add shrink-0 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-[10px] text-neutral-300 hover:bg-neutral-800" data-context-kind="agenda" data-context-title="${esc(item.title)}" data-context-path="${esc(`domains/${slugifyName(currentDomain)}/captured-agenda-items.md`)}">Context</button>
+    </div>
+  </div>`);
+}
+
+function domainHandoffRows(items) {
+  return domainMiniList(items, "No handoffs captured yet.", (item) => `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2">
+    <div class="flex items-start gap-2">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2">
+          <span class="rounded border border-amber-500/25 bg-amber-950/20 px-1.5 py-0.5 text-[10px] text-amber-300">${esc(item.status || "pending")}</span>
+          <span class="min-w-0 truncate text-xs font-medium text-neutral-300">${esc(item.title)}</span>
+        </div>
+        <div class="mt-1 truncate font-mono text-[10px] text-neutral-600">${esc(item.path || item.id || "")}</div>
+      </div>
+      ${item.path ? `<button class="domain-context-add shrink-0 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-[10px] text-neutral-300 hover:bg-neutral-800" data-context-kind="handoff" data-context-title="${esc(item.title)}" data-context-path="${esc(item.path)}">Context</button>` : ""}
+    </div>
+  </div>`);
+}
+
+function domainLifecycleSection(title, body, actionHtml = "") {
+  return `<section class="rounded-2xl border border-neutral-800 bg-neutral-950/35 p-4">
+    <div class="mb-3 flex items-center gap-2">
+      <h2 class="text-sm font-semibold text-neutral-200">${esc(title)}</h2>
+      ${actionHtml ? `<div class="ml-auto">${actionHtml}</div>` : ""}
+    </div>
+    ${body}
+  </section>`;
+}
+
+function contextKey(item) {
+  return `${item.kind || "artifact"}:${item.path || item.title}`;
+}
+
+function renderCeoContextTray() {
+  const rows = ceoContextTray.length
+    ? ceoContextTray.map((item) => `<div class="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950/50 px-3 py-2">
+        <span class="rounded border border-cyan-500/20 bg-cyan-950/20 px-1.5 py-0.5 text-[10px] text-cyan-300">${esc(item.kind || "artifact")}</span>
+        <span class="min-w-0 flex-1 truncate text-xs text-neutral-300">${esc(item.title || item.path)}</span>
+        <span class="hidden max-w-[280px] truncate font-mono text-[10px] text-neutral-600 md:block">${esc(item.path || "")}</span>
+        <button class="domain-context-remove rounded-md px-2 py-1 text-[10px] text-neutral-500 hover:bg-neutral-900 hover:text-neutral-200" data-context-key="${esc(contextKey(item))}">Remove</button>
+      </div>`).join("")
+    : `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2 text-xs text-neutral-600">No CEO context selected. Add domain artifacts from the sections below.</div>`;
+  return `<section class="rounded-2xl border border-cyan-500/25 bg-cyan-950/10 p-4">
+    <div class="mb-3 flex flex-wrap items-center gap-2">
+      <h2 class="text-sm font-semibold text-neutral-100">CEO Context</h2>
+      <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] text-neutral-500">${ceoContextTray.length} selected</span>
+      <div class="ml-auto flex gap-2">
+        <button id="domain-context-clear" ${ceoContextTray.length ? "" : "disabled"} class="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800 disabled:opacity-40">Clear</button>
+        <button id="domain-context-ask" ${ceoContextTray.length ? "" : "disabled"} class="rounded-md bg-cyan-600 px-3 py-1 text-xs font-medium text-white hover:bg-cyan-500 disabled:opacity-40">Ask CEO</button>
+      </div>
+    </div>
+    <div class="space-y-2">${rows}</div>
+  </section>`;
+}
+
+function memberSummary(agent) {
+  if (!agent) return "missing";
+  const caps = (agent.capabilities || []).slice(0, 3).join(", ");
+  return [agent.provider || "unknown", agent.persona || "no persona", caps].filter(Boolean).join(" / ");
+}
+
+function teamContextText(team, agentsById, lanes) {
+  const members = (team.members || []).map((id) => {
+    const agent = agentsById.get(id);
+    return `- ${id}: ${memberSummary(agent)}`;
+  }).join("\n") || "- No members";
+  const owned = lanes.filter((lane) => lane.team === team.name);
+  const laneText = owned.length
+    ? owned.map((lane) => `- ${lane.lane}: ${lane.queueRole || "no queue role"} / ${lane.workflow || "no workflow"}`).join("\n")
+    : "- No lanes route to this team";
+  return [
+    `Team: ${team.name}`,
+    "",
+    "Members:",
+    members,
+    "",
+    "Routed Lanes:",
+    laneText,
+  ].join("\n");
+}
+
+function renderTeamsDomainIntelligence({ registry = {}, orchestration = {} } = {}) {
+  const agents = registry.agents || [];
+  const teams = registry.teams || [];
+  const lanes = orchestration.lanes || [];
+  const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
+  const laneTeams = new Set(lanes.map((lane) => lane.team).filter(Boolean));
+  const registryTeamNames = new Set(teams.map((team) => team.name));
+  const missingTeams = [...laneTeams].filter((name) => !registryTeamNames.has(name));
+  const unusedTeams = teams.filter((team) => !laneTeams.has(team.name));
+  const cards = teams.length ? teams.map((team) => {
+    const ownedLanes = lanes.filter((lane) => lane.team === team.name);
+    const missingMembers = (team.members || []).filter((id) => !agentsById.has(id));
+    const capabilitySet = new Set();
+    for (const id of team.members || []) {
+      const agent = agentsById.get(id);
+      for (const cap of agent?.capabilities || []) capabilitySet.add(cap);
+    }
+    const context = teamContextText(team, agentsById, lanes);
+    const memberRows = (team.members || []).map((id) => {
+      const agent = agentsById.get(id);
+      return `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2">
+        <div class="flex items-center gap-2">
+          <span class="min-w-0 flex-1 truncate text-xs font-medium text-neutral-200">${esc(agent?.name || id)}</span>
+          <span class="rounded border ${agent ? "border-neutral-700 text-neutral-400" : "border-red-500/30 text-red-300"} px-1.5 py-0.5 text-[10px]">${esc(agent ? agent.provider || "unknown" : "missing")}</span>
+        </div>
+        <div class="mt-1 truncate text-[10px] text-neutral-600">${esc([agent?.persona, ...(agent?.capabilities || []).slice(0, 3)].filter(Boolean).join(" / ") || "No persona or capabilities")}</div>
+      </div>`;
+    }).join("") || `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2 text-xs text-neutral-600">No members yet.</div>`;
+    return `<section class="rounded-2xl border border-neutral-800 bg-neutral-950/35 p-4">
+      <div class="mb-3 flex items-start gap-2">
+        <div class="min-w-0 flex-1">
+          <h3 class="truncate text-sm font-semibold text-neutral-100">${esc(team.name)}</h3>
+          <div class="mt-1 text-[10px] uppercase tracking-wider text-neutral-600">${(team.members || []).length} members · ${ownedLanes.length} routed lanes · ${capabilitySet.size} capabilities</div>
+        </div>
+        <button class="domain-context-add rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-[10px] text-neutral-300 hover:bg-neutral-800"
+          data-context-kind="team"
+          data-context-title="${esc(`Team: ${team.name}`)}"
+          data-context-text="${esc(context)}">Context</button>
+      </div>
+      <div class="mb-3 flex flex-wrap gap-1.5">${ownedLanes.length ? ownedLanes.map((lane) => `<span class="rounded border border-cyan-500/20 bg-cyan-950/15 px-2 py-0.5 text-[10px] text-cyan-200">${esc(lane.lane)}</span>`).join("") : `<span class="rounded border border-amber-500/25 bg-amber-950/15 px-2 py-0.5 text-[10px] text-amber-300">not routed</span>`}</div>
+      <div class="space-y-2">${memberRows}</div>
+      ${missingMembers.length ? `<div class="mt-3 rounded-lg border border-red-500/25 bg-red-950/10 px-3 py-2 text-xs text-red-200">Missing agents: ${esc(missingMembers.join(", "))}</div>` : ""}
+    </section>`;
+  }).join("") : `<div class="rounded-xl border border-neutral-800 bg-neutral-950/45 p-4 text-sm text-neutral-500">No registry teams found.</div>`;
+  const gapRows = [
+    ...missingTeams.map((name) => `Orchestration references missing team: ${name}`),
+    ...unusedTeams.map((team) => `Team has no routed lane yet: ${team.name}`),
+    ...teams.flatMap((team) => (team.members || []).filter((id) => !agentsById.has(id)).map((id) => `${team.name} references missing agent: ${id}`)),
+  ];
+  return `<section class="rounded-2xl border border-emerald-500/20 bg-emerald-950/10 p-4">
+    <div class="mb-3 flex flex-wrap items-center gap-2">
+      <h2 class="text-sm font-semibold text-neutral-100">Team Intelligence</h2>
+      <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] text-neutral-500">${teams.length} teams</span>
+      <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] text-neutral-500">${agents.length} agents</span>
+      <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] text-neutral-500">${lanes.length} lane policies</span>
+    </div>
+    <div class="grid grid-cols-1 gap-3 xl:grid-cols-2">${cards}</div>
+    <div class="mt-4 rounded-xl border border-neutral-800 bg-neutral-950/45 p-3">
+      <div class="text-[10px] uppercase tracking-wider text-neutral-600">Gaps / Ambiguity</div>
+      <div class="mt-2 space-y-1 text-xs text-neutral-400">${gapRows.length ? gapRows.map((gap) => `<div>${esc(gap)}</div>`).join("") : `<div class="text-neutral-600">No missing teams or members detected. Scope is still not first-class; teams are project-level registry entries today.</div>`}</div>
+    </div>
+  </section>`;
+}
+
+async function addDomainContextFromButton(btn) {
+  const item = {
+    kind: btn.dataset.contextKind || "artifact",
+    title: btn.dataset.contextTitle || btn.dataset.contextPath || "Selected context",
+    path: btn.dataset.contextPath || "",
+    text: btn.dataset.contextText || "",
+    domain: currentDomain,
+  };
+  if (!item.path && !item.title) return;
+  const key = contextKey(item);
+  if (!ceoContextTray.some((x) => contextKey(x) === key)) ceoContextTray.push(item);
+  setVoiceStatus(`Added CEO context: ${item.title}`);
+  await renderStudioBoard(currentDomain);
+}
+
+async function removeDomainContext(key) {
+  ceoContextTray = ceoContextTray.filter((item) => contextKey(item) !== key);
+  await renderStudioBoard(currentDomain);
+}
+
+async function readContextItem(item) {
+  if (item.text) return item;
+  if (!item.path || !window.ceo.docsRead) {
+    return { ...item, text: "" };
+  }
+  try {
+    const r = await window.ceo.docsRead(item.path);
+    return { ...item, text: r && r.ok ? String(r.text || "").slice(0, 6000) : `Could not read ${item.path}: ${r ? r.reason : "unknown"}` };
+  } catch (e) {
+    return { ...item, text: `Could not read ${item.path}: ${e.message}` };
+  }
+}
+
+async function askCeoAboutContext() {
+  if (!ceoContextTray.length) return;
+  setVoiceStatus("Reading selected domain context...");
+  const loaded = await Promise.all(ceoContextTray.map(readContextItem));
+  const prompt = [
+    `Use the selected ${currentDomain} domain artifacts below as the primary context.`,
+    "Tell me what is useful, what is missing, and what the next concrete step should be.",
+    "Keep actions proposal-only unless I explicitly approve creating Kanban work or dispatching agents.",
+    "",
+    ...loaded.map((item, idx) => [
+      `## Context ${idx + 1}: ${item.title}`,
+      `Kind: ${item.kind}`,
+      `Path: ${item.path || "inline"}`,
+      "",
+      item.text || "(no file content available)",
+      "",
+    ].join("\n")),
+  ].join("\n");
+  setVoiceStatus("Asking CEO with selected context...");
+  await runTurn(prompt);
+  setVoiceStatus("CEO context sent.");
+}
+
 async function renderStudioBoard(domain = currentDomain) {
   if (!currentProject) {
     renderPanel1Context(null, null);
@@ -547,10 +780,25 @@ async function renderStudioBoard(domain = currentDomain) {
     const data = boardSlug && window.ceo.ceoBoard ? await window.ceo.ceoBoard(boardSlug) : null;
     const domainRes = domain && domain !== "All" && window.ceo.getDomain ? await window.ceo.getDomain(domain) : null;
     const domainDef = domainRes && domainRes.ok ? domainRes.domain : null;
+    const isTeamsDomain = domainDef && (domainDef.slug === "teams" || String(domainDef.name || "").toLowerCase() === "teams");
+    let teamsDomainHtml = "";
+    if (isTeamsDomain) {
+      let registry = {};
+      let orchestration = {};
+      try {
+        [registry, orchestration] = await Promise.all([
+          window.ceo.registryList ? window.ceo.registryList() : null,
+          window.ceo.orchestrationSummary ? window.ceo.orchestrationSummary({ domain }) : null,
+        ]);
+      } catch {
+        registry = {};
+        orchestration = {};
+      }
+      teamsDomainHtml = renderTeamsDomainIntelligence({ registry: registry || {}, orchestration: orchestration || {} });
+    }
     const cols = (data && data.ok && data.columns) || {};
-    const ordered = ["planning", "triage", "todo", "ready", "running", "blocked", "review", "done"]
-      .filter((s) => Object.prototype.hasOwnProperty.call(cols, s))
-      .concat(Object.keys(cols).filter((s) => !["planning", "triage", "todo", "ready", "running", "blocked", "review", "done"].includes(s)));
+    const baseOrder = ["planning", "triage", "bug", "todo", "ready", "running", "blocked", "review", "done"];
+    const ordered = baseOrder.concat(Object.keys(cols).filter((s) => !baseOrder.includes(s)));
     const lanes = ordered.length ? ordered.map((status) => {
       const tasks = cols[status] || [];
       return `<section class="min-w-[240px] flex-1 rounded-2xl border border-neutral-800 bg-neutral-950/35">
@@ -566,7 +814,29 @@ async function renderStudioBoard(domain = currentDomain) {
     const domainPurpose = domainDef?.purpose || "This domain has not been defined yet. Use + -> New domain, or ask the voice CEO to define its purpose, goal, and team.";
     const domainGoal = domainDef?.overarchingGoal || domainDef?.currentState || "";
     const team = (domainDef?.coreAgents || []).filter(Boolean);
-    const responsibilities = (domainDef?.responsibilities || []).filter(Boolean);
+    const responsibilities = (domainDef?.boundaries || domainDef?.responsibilities || []).filter(Boolean);
+    const features = (domainDef?.features || domainDef?.activeEpics || []).filter(Boolean);
+    const relationships = (domainDef?.relationships || domainDef?.interfaces || []).filter(Boolean);
+    const artifacts = domainDef?.artifacts || {};
+    const handoffs = artifacts.handoffs || [];
+    const agendaItems = domainDef?.agendaItems || [];
+    const docs = [...(artifacts.featureDocs || []), ...(artifacts.designDocs || [])];
+    const personas = artifacts.personaDocs || [];
+    const showLifecycle = domain && domain !== "All" && domainDef;
+    const lifecycleHtml = showLifecycle ? `<div class="grid grid-cols-1 gap-3 xl:grid-cols-2">
+      ${domainLifecycleSection("Definition", `<div class="space-y-3 text-sm text-neutral-400">
+        <p class="leading-6">${esc(domainPurpose)}</p>
+        ${domainGoal ? `<p class="leading-6"><span class="text-neutral-500">Goal:</span> ${esc(domainGoal)}</p>` : `<div class="text-xs text-neutral-600">No long-term goal captured.</div>`}
+        <div>${domainArtifactRows([{ title: "definition.md", path: domainDef.artifactPaths?.definition || "" }], "definition.md is missing.")}</div>
+      </div>`)}
+      ${domainLifecycleSection("Captured Agenda Items", domainAgendaRows(agendaItems), `<button id="domain-propose-agenda" class="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-800">Triage handoffs</button>`)}
+      ${domainLifecycleSection("Handoffs", domainHandoffRows(handoffs), `<button id="domain-create-handoff" class="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-800">New handoff</button>`)}
+      ${domainLifecycleSection("Plans", domainArtifactRows(artifacts.plans, "No plans captured yet."))}
+      ${domainLifecycleSection("Requirements", domainArtifactRows(artifacts.requirements, "No requirements captured yet."))}
+      ${domainLifecycleSection("Agendas / Meetings", domainArtifactRows(artifacts.agendas, "No meeting outputs captured yet."), `<button id="domain-first-meeting" class="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-800">Dogfood meeting</button>`)}
+      ${domainLifecycleSection("Docs", domainArtifactRows(docs, "No feature or design docs captured yet."))}
+      ${domainLifecycleSection("Personas", domainArtifactRows(personas, "No domain persona docs captured yet."))}
+    </div>` : "";
 
     panelContent().innerHTML = `<div class="space-y-5">
       <div class="rounded-3xl border border-neutral-800 bg-[radial-gradient(circle_at_top_left,rgba(6,182,212,0.16),transparent_34%),linear-gradient(135deg,rgba(23,23,23,0.9),rgba(10,10,10,0.95))] p-5">
@@ -577,6 +847,8 @@ async function renderStudioBoard(domain = currentDomain) {
             <p class="mt-2 max-w-3xl text-sm leading-6 text-neutral-400">${esc(domain && domain !== "All" ? domainPurpose : "Project-wide planning across all domains. Pick a domain when you want its goal, team, and task board.")}</p>
             ${domainGoal ? `<p class="mt-2 max-w-3xl text-sm leading-6 text-cyan-100/80"><span class="text-neutral-500">Goal:</span> ${esc(domainGoal)}</p>` : ""}
             ${responsibilities.length ? `<div class="mt-3 flex flex-wrap gap-2">${responsibilities.slice(0, 5).map((r) => `<span class="rounded-full border border-neutral-800 bg-black/30 px-2 py-1 text-[11px] text-neutral-300">${esc(r)}</span>`).join("")}</div>` : ""}
+            ${features.length ? `<div class="mt-2 flex flex-wrap gap-2">${features.slice(0, 5).map((r) => `<span class="rounded-full border border-cyan-500/20 bg-cyan-950/15 px-2 py-1 text-[11px] text-cyan-200/90">${esc(r)}</span>`).join("")}</div>` : ""}
+            ${relationships.length ? `<div class="mt-2 text-xs text-neutral-500">Relationships: ${esc(relationships.join(", "))}</div>` : ""}
           </div>
           <button id="studio-add-task" data-board="${esc(boardSlug || "")}" class="rounded-xl bg-cyan-600 px-4 py-2 text-sm font-semibold text-white shadow-[0_0_28px_rgba(8,145,178,0.25)] transition hover:bg-cyan-500">Add task</button>
         </div>
@@ -587,11 +859,97 @@ async function renderStudioBoard(domain = currentDomain) {
           <div class="rounded-xl border border-neutral-800 bg-black/25 p-3"><div class="text-[10px] uppercase tracking-wider text-neutral-600">Team</div><div class="mt-1 truncate text-xs text-neutral-300">${esc(team.length ? team.join(", ") : "not assigned")}</div></div>
         </div>
       </div>
-      <div class="flex gap-3 overflow-x-auto pb-2">${lanes}</div>
+      ${showLifecycle ? renderCeoContextTray() : ""}
+      ${teamsDomainHtml}
+      ${lifecycleHtml}
+      <section class="rounded-2xl border border-neutral-800 bg-neutral-950/35 p-4">
+        <div class="mb-3 flex items-center gap-2">
+          <h2 class="text-sm font-semibold text-neutral-200">Board / Work</h2>
+          <span class="ml-auto font-mono text-[10px] text-neutral-600">${esc(boardSlug || "no board")}</span>
+        </div>
+        <div class="flex gap-3 overflow-x-auto pb-2">${lanes}</div>
+      </section>
     </div>`;
   } catch (e) {
     window.ceoUI.showPanel("Domain", `Could not load domain board: ${e.message}`);
   }
+}
+
+async function createDomainHandoffFromView() {
+  if (!currentProject || !currentDomain || currentDomain === "All" || !window.ceo.createDomainHandoff) return;
+  const title = prompt("Handoff title:", `${currentDomain} handoff`);
+  if (!title || !title.trim()) return;
+  const r = await window.ceo.createDomainHandoff({
+    domain: currentDomain,
+    title: title.trim(),
+    status: "pending",
+    userConfirmation: true,
+    sourceLinks: [`domains/${slugifyName(currentDomain)}/definition.md`, `domains/${slugifyName(currentDomain)}/captured-agenda-items.md`],
+    capturedEntities: ["Domain package confirmed by human"],
+    suggestedAgendaItems: [
+      { type: "handoff-triage", title: `Triage ${title.trim()}`, priority: "high" },
+      { type: "documentation", title: `Check docs handoff for ${currentDomain}`, priority: "normal" },
+    ],
+    body: "Manual handoff created from the domain cockpit. Agenda Agent should acknowledge and propose next Agenda Items only.",
+  });
+  setVoiceStatus(r && r.ok ? "Handoff captured." : `Handoff failed: ${r ? r.reason : "unknown"}`);
+  await renderStudioBoard(currentDomain);
+}
+
+async function triageDomainHandoffFromView() {
+  if (!currentProject || !currentDomain || currentDomain === "All" || !window.ceo.proposeAgendaFromHandoff) return;
+  const proposal = await window.ceo.proposeAgendaFromHandoff({ domain: currentDomain });
+  if (!proposal || !proposal.ok) {
+    setVoiceStatus(`Triage failed: ${proposal ? proposal.reason : "unknown"}`);
+    return;
+  }
+  let created = 0;
+  for (const item of proposal.proposals || []) {
+    const r = await window.ceo.createAgendaItem({ domain: currentDomain, item });
+    if (r && r.ok) created++;
+  }
+  setVoiceStatus(`Agenda Agent proposed ${created} item${created === 1 ? "" : "s"}.`);
+  await renderStudioBoard(currentDomain);
+}
+
+async function startDomainDogfoodMeeting() {
+  if (!currentProject || !currentDomain || currentDomain === "All" || !window.ceo.meetingStart) return;
+  const agenda = "Plan the first complete Domain Creation workflow implementation.";
+  const criteria = "Produce a concrete implementation plan, risks, required artifacts, and next Agenda Items for the selected domain.";
+  const members = "domain-architect,agenda-agent,docs-steward,self-repair-engineer";
+  const info = {
+    room: `domain-creation-${slugifyName(currentDomain)}-${Date.now()}`,
+    agenda,
+    criteria,
+    members,
+    allowPaid: false,
+  };
+  const r = await window.ceo.meetingStart(info);
+  if (!r || !r.ok) {
+    if (window.ceo.createAgendaItem) {
+      await window.ceo.createAgendaItem({
+        domain: currentDomain,
+        item: {
+          type: "bug/system repair",
+          title: "Repair Domain Lifecycle dogfood meeting provider/registry support",
+          priority: "high",
+          source: "domain-cockpit meeting start",
+          body: `Meeting start failed: ${r ? r.reason : "unknown"}. Provider/registry support must be fixed or explicitly documented before this capability is considered complete.`,
+        },
+      });
+    }
+    setVoiceStatus(`Meeting failed; captured repair Agenda Item.`);
+    await renderStudioBoard(currentDomain);
+    return;
+  }
+  navMeetingRoom = r.room;
+  navMeetingMeta = { domain: currentDomain, agenda, participants: members, expectedOutcome: criteria, saved: false };
+  setVoiceStatus(`Meeting started: ${r.room}`);
+  await openView("meetings");
+  const roomLabel = $("#nav-mtg-room"); if (roomLabel) roomLabel.textContent = r.room;
+  pollNavMeeting();
+  stopNavMeetingPoll();
+  navMeetingTimer = setInterval(pollNavMeeting, 2500);
 }
 
 async function openProject(id) {
@@ -656,6 +1014,131 @@ function closeCreateMenu() {
   if (menu) menu.classList.add("hidden");
 }
 
+function collectDomainWizardDraft() {
+  return {
+    name: $("#domain-name")?.value.trim() || "",
+    purpose: $("#domain-purpose")?.value.trim() || "",
+    overarchingGoal: $("#domain-goal")?.value.trim() || "",
+    boundaries: splitLines($("#domain-responsibilities")?.value || ""),
+    features: splitLines($("#domain-features")?.value || ""),
+    coreAgents: [...document.querySelectorAll('input[name="domain-agent"]:checked')].map((x) => x.value).filter(Boolean),
+    kanbanBoard: $("#domain-board")?.value || "",
+    relativePath: $("#domain-path")?.value.trim() || "",
+  };
+}
+
+function applyDomainArchitectDraftToForm(session) {
+  const draft = session?.draft || {};
+  const set = (id, value) => { const el = $(`#${id}`); if (el) el.value = value || ""; };
+  set("domain-name", draft.name);
+  set("domain-purpose", draft.purpose);
+  set("domain-goal", draft.overarchingGoal);
+  set("domain-responsibilities", (draft.boundaries || draft.responsibilities || []).join("\n"));
+  set("domain-features", (draft.features || draft.activeEpics || []).join("\n"));
+  set("domain-path", draft.relativePath || (draft.name ? `domains/${slugifyName(draft.name)}` : ""));
+  const board = $("#domain-board");
+  if (board && draft.kanbanBoard) board.value = draft.kanbanBoard;
+  for (const input of document.querySelectorAll('input[name="domain-agent"]')) {
+    input.checked = (draft.coreAgents || []).includes(input.value);
+  }
+}
+
+function renderDomainArchitectPanel(session = domainArchitectSession) {
+  const host = $("#domain-architect-panel");
+  if (!host) return;
+  if (!session) {
+    host.innerHTML = `<div class="rounded-2xl border border-cyan-500/20 bg-cyan-950/10 p-4">
+      <div class="text-[10px] uppercase tracking-wider text-cyan-300/80">Domain Architect</div>
+      <div class="mt-2 text-sm font-medium text-neutral-100">Guided creation interview</div>
+      <p class="mt-2 text-xs leading-5 text-neutral-500">Start an interview session. The agent tracks missing essentials and only creates the domain after explicit confirmation.</p>
+      <button id="domain-architect-start" class="mt-3 w-full rounded-lg bg-cyan-600 px-3 py-2 text-sm font-medium text-white hover:bg-cyan-500">Start interview</button>
+    </div>`;
+    return;
+  }
+  const outline = session.outline || [];
+  const current = session.currentQuestion || "Review the definition.";
+  host.innerHTML = `<div class="rounded-2xl border border-cyan-500/20 bg-cyan-950/10 p-4">
+    <div class="flex items-center gap-2">
+      <div class="text-[10px] uppercase tracking-wider text-cyan-300/80">Domain Architect</div>
+      <span class="ml-auto rounded border border-neutral-700 bg-neutral-950/60 px-1.5 py-0.5 text-[10px] text-neutral-400">${session.readyToConfirm ? "ready" : "interviewing"}</span>
+    </div>
+    <div class="mt-3 rounded-xl border border-neutral-800 bg-neutral-950/50 p-3">
+      <div class="text-xs font-medium text-neutral-200">${esc(current)}</div>
+      <textarea id="domain-architect-answer" rows="4" class="mt-2 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" placeholder="Answer this question, then record it..."></textarea>
+      <button id="domain-architect-answer-save" ${session.readyToConfirm ? "disabled" : ""} class="mt-2 rounded-md border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800 disabled:opacity-40">Record answer</button>
+    </div>
+    <div class="mt-3 space-y-1.5">
+      ${outline.map((item) => `<div class="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950/45 px-2 py-1.5">
+        <span class="h-2 w-2 rounded-full ${item.complete ? "bg-emerald-500" : "bg-amber-500"}"></span>
+        <span class="min-w-0 flex-1 truncate text-xs text-neutral-300">${esc(item.label)}</span>
+        <span class="text-[10px] text-neutral-600">${item.complete ? "captured" : "missing"}</span>
+      </div>`).join("")}
+    </div>
+    <div class="mt-3 flex flex-wrap gap-2">
+      <button id="domain-architect-apply" class="rounded-md border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800">Apply draft</button>
+      <button id="domain-architect-ask" class="rounded-md border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800">Ask Hermes</button>
+      <button id="domain-architect-confirm" ${session.readyToConfirm ? "" : "disabled"} class="rounded-md bg-cyan-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-cyan-500 disabled:opacity-40">Confirm & create</button>
+    </div>
+    <div id="domain-architect-msg" class="mt-2 min-h-4 text-[10px] text-neutral-500">${session.missing?.length ? `Missing: ${session.missing.join(", ")}` : "Ready for confirmation."}</div>
+  </div>`;
+}
+
+async function startDomainArchitectInterview() {
+  if (!window.ceo.domainArchitectStart) return;
+  const r = await window.ceo.domainArchitectStart(collectDomainWizardDraft());
+  if (!r || !r.ok) {
+    setVoiceStatus(`Domain Architect failed: ${r ? r.reason : "unknown"}`);
+    return;
+  }
+  domainArchitectSession = r.session;
+  renderDomainArchitectPanel();
+  setVoiceStatus("Domain Architect interview started.");
+}
+
+async function saveDomainArchitectAnswer() {
+  const answer = $("#domain-architect-answer")?.value.trim();
+  const msg = $("#domain-architect-msg");
+  if (!domainArchitectSession || !answer) {
+    if (msg) msg.textContent = "Answer required.";
+    return;
+  }
+  if (msg) msg.textContent = "Recording...";
+  const r = await window.ceo.domainArchitectAnswer({ id: domainArchitectSession.id, answer });
+  if (!r || !r.ok) {
+    if (msg) msg.textContent = `failed: ${r ? r.reason : "unknown"}`;
+    return;
+  }
+  domainArchitectSession = r.session;
+  applyDomainArchitectDraftToForm(domainArchitectSession);
+  renderDomainArchitectPanel();
+}
+
+async function askHermesDomainArchitect() {
+  const draft = collectDomainWizardDraft();
+  const prompt = [
+    "Act as the Domain Architect for a domain creation interview.",
+    "Review the current draft below. Ask only the next missing essential question, or say it is ready for confirmation.",
+    "Do not create the domain. Do not create Kanban work.",
+    "",
+    JSON.stringify(draft, null, 2),
+  ].join("\n");
+  await runTurn(prompt);
+}
+
+async function confirmDomainArchitectSession() {
+  if (!domainArchitectSession || !window.ceo.domainArchitectConfirm) return;
+  const msg = $("#domain-architect-msg");
+  if (msg) msg.textContent = "Creating confirmed domain...";
+  const r = await window.ceo.domainArchitectConfirm(domainArchitectSession.id);
+  if (!r || !r.ok) {
+    if (msg) msg.textContent = `create failed: ${r ? r.reason : "unknown"}`;
+    return;
+  }
+  await refreshDomains(currentProject, r.definition.name);
+  await window.ceoUI.setDomainUI(r.definition.name);
+  setVoiceStatus(`Domain Architect created: ${r.definition.name}`);
+}
+
 async function createProject() {
   closeCreateMenu();
   const p = await window.ceo.addProject();
@@ -707,6 +1190,7 @@ async function openDomainWizard(seed = {}) {
         </label>`;
       }).join("")
     : `<div class="rounded-xl border border-neutral-800 bg-neutral-950/45 p-3 text-sm text-neutral-500">No agents found in the registry yet.</div>`;
+  domainArchitectSession = null;
 
   panelContent().innerHTML = `<div class="space-y-5">
     <div class="rounded-3xl border border-cyan-500/25 bg-[radial-gradient(circle_at_top_left,rgba(6,182,212,0.18),transparent_34%),linear-gradient(135deg,rgba(23,23,23,0.9),rgba(8,8,8,0.96))] p-5">
@@ -730,12 +1214,17 @@ async function openDomainWizard(seed = {}) {
           <textarea id="domain-goal" rows="3" placeholder="What is the long-running outcome this domain is trying to make true?" class="mt-2 w-full rounded-xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-neutral-100 outline-none focus:border-cyan-500">${esc(seed.overarchingGoal || "")}</textarea>
         </label>
         <label class="block">
-          <span class="text-[10px] uppercase tracking-wider text-neutral-600">Responsibilities</span>
+          <span class="text-[10px] uppercase tracking-wider text-neutral-600">Boundaries / ownership</span>
           <textarea id="domain-responsibilities" rows="4" placeholder="One per line: planning, intake, UX research, launch readiness..." class="mt-2 w-full rounded-xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-neutral-100 outline-none focus:border-cyan-500">${esc((seed.responsibilities || []).join("\n"))}</textarea>
+        </label>
+        <label class="block">
+          <span class="text-[10px] uppercase tracking-wider text-neutral-600">Initial features / capabilities</span>
+          <textarea id="domain-features" rows="4" placeholder="One per line: handoff workflow, meeting artifact flow, scheduling integration..." class="mt-2 w-full rounded-xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-neutral-100 outline-none focus:border-cyan-500">${esc((seed.features || seed.initialFeatures || []).join("\n"))}</textarea>
         </label>
       </section>
 
       <aside class="space-y-3">
+        <div id="domain-architect-panel"></div>
         <div class="rounded-2xl border border-neutral-800 bg-neutral-950/45 p-4">
           <div class="text-[10px] uppercase tracking-wider text-neutral-600">Board and files</div>
           <label class="mt-3 block text-xs text-neutral-500">Kanban board</label>
@@ -756,11 +1245,12 @@ async function openDomainWizard(seed = {}) {
 
     <div class="flex flex-wrap items-center gap-2">
       <button id="domain-create-save" class="rounded-xl bg-cyan-600 px-4 py-2 text-sm font-semibold text-white hover:bg-cyan-500">Create domain</button>
-      <button id="domain-draft-ceo" class="rounded-xl border border-neutral-700 bg-neutral-900 px-4 py-2 text-sm text-neutral-200 hover:bg-neutral-800">Ask CEO to help define</button>
+      <button id="domain-draft-ceo" class="rounded-xl border border-neutral-700 bg-neutral-900 px-4 py-2 text-sm text-neutral-200 hover:bg-neutral-800">Ask Hermes</button>
       <button id="domain-create-cancel" class="rounded-xl border border-neutral-800 px-4 py-2 text-sm text-neutral-400 hover:bg-neutral-900">Cancel</button>
       <span id="domain-create-msg" class="text-xs text-neutral-500"></span>
     </div>
   </div>`;
+  renderDomainArchitectPanel();
 }
 
 async function saveDomainFromWizard() {
@@ -770,6 +1260,7 @@ async function saveDomainFromWizard() {
   const purpose = $("#domain-purpose")?.value.trim() || "";
   const overarchingGoal = $("#domain-goal")?.value.trim() || "";
   const responsibilities = splitLines($("#domain-responsibilities")?.value || "");
+  const features = splitLines($("#domain-features")?.value || "");
   const coreAgents = [...document.querySelectorAll('input[name="domain-agent"]:checked')].map((x) => x.value).filter(Boolean);
   const kanbanBoard = $("#domain-board")?.value || null;
   const relativePath = $("#domain-path")?.value.trim() || `domains/${slugifyName(name)}`;
@@ -781,7 +1272,9 @@ async function saveDomainFromWizard() {
     overarchingGoal,
     currentState: overarchingGoal,
     priorities: overarchingGoal ? [overarchingGoal] : [],
-    activeEpics: overarchingGoal ? [overarchingGoal] : [],
+    activeEpics: features,
+    features,
+    boundaries: responsibilities,
     responsibilities,
     coreAgents,
     kanbanBoard,
@@ -875,6 +1368,7 @@ async function openTaskWizard(boardOverride = null, seed = {}) {
           <label class="mt-3 block text-xs text-neutral-500">Lane</label>
           <select id="task-new-status" class="mt-1 w-full rounded-xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-neutral-100">
             <option value="triage" ${!seed.status || seed.status === "triage" ? "selected" : ""}>Triage / planning</option>
+            <option value="bug" ${seed.status === "bug" ? "selected" : ""}>Bug</option>
             <option value="todo" ${seed.status === "todo" ? "selected" : ""}>Todo</option>
             <option value="ready" ${seed.status === "ready" ? "selected" : ""}>Ready</option>
           </select>
@@ -941,7 +1435,8 @@ let studioView = "domain";
 let navMeetingOpts = null;     // cached {agents, teams, personas} for the meetings view
 let navMeetingRoom = null;
 let navMeetingTimer = null;
-const NAV_COL_ORDER = ["planning", "triage", "todo", "ready", "running", "blocked", "scheduled", "review", "done"];
+let navMeetingMeta = null;
+const NAV_COL_ORDER = ["planning", "triage", "bug", "todo", "ready", "running", "blocked", "scheduled", "review", "done"];
 
 function setActiveNav(view) {
   document.querySelectorAll("#studio-nav .nav-item").forEach((b) => {
@@ -974,7 +1469,7 @@ async function renderBoardView() {
   try { data = await window.ceo.ceoBoard(slug); } catch { data = {}; }
   const cols = (data && data.columns) || {};
   const present = Object.keys(cols);
-  const ordered = NAV_COL_ORDER.filter((c) => present.includes(c)).concat(present.filter((c) => !NAV_COL_ORDER.includes(c)));
+  const ordered = NAV_COL_ORDER.concat(present.filter((c) => !NAV_COL_ORDER.includes(c)));
   if (!ordered.length) { panelContent().innerHTML = navEmpty(`Board "${slug}" is empty.`); return; }
   const lanes = ordered.map((status) => {
     const tasks = cols[status] || [];
@@ -1018,26 +1513,28 @@ async function renderTasksView() {
 }
 
 // --- Registry (agents + teams) — the single source of truth for the Team panel.
-let registryState = { agents: [], teams: [], personas: [], providers: [] };
+let registryState = { agents: [], teams: [], personas: [], providers: [], models: {} };
 
 async function loadRegistry() {
-  const [reg, per, prov] = await Promise.all([
+  const [reg, per, prov, mods] = await Promise.all([
     window.ceo.registryList ? window.ceo.registryList() : { agents: [], teams: [] },
     window.ceo.registryPersonas ? window.ceo.registryPersonas() : { personas: [] },
-    window.ceo.registryProviders ? window.ceo.registryProviders() : { providers: ["echo"] },
+    window.ceo.registryProviders ? window.ceo.registryProviders() : { providers: ["vertex"] },
+    window.ceo.registryModels ? window.ceo.registryModels() : { providers: {} },
   ]);
   registryState = {
     agents: (reg && reg.agents) || [],
     teams: (reg && reg.teams) || [],
     personas: (per && per.personas) || [],
-    providers: (prov && prov.providers) || ["echo"],
+    providers: (prov && prov.providers) || ["vertex"],
+    models: (mods && mods.providers) || {},   // providerName -> [{id,label,...}]
   };
   return registryState;
 }
 
 function agentSubtitle(a) {
   const persona = a.persona ? esc(a.persona) : "no persona";
-  const brain = esc(a.provider || "echo") + (a.model ? ` · ${esc(a.model)}` : "");
+  const brain = esc(a.provider || "vertex") + (a.model ? ` · ${esc(a.model)}` : "");
   return `${persona} · ${brain}`;
 }
 
@@ -1057,7 +1554,7 @@ function renderTeamPanel() {
       <div class="flex items-center gap-2">
         <span class="w-2 h-2 rounded-full ${a.tmux_session ? "bg-emerald-500" : "bg-neutral-600"}"></span>
         <span class="text-sm font-medium text-neutral-100 truncate">${esc(a.name || a.id)}</span>
-        <span class="ml-auto text-[10px] uppercase tracking-wider text-neutral-500">${esc(a.provider || "echo")}</span>
+        <span class="ml-auto text-[10px] uppercase tracking-wider text-neutral-500">${esc(a.provider || "vertex")}</span>
       </div>
       <div class="mt-1.5 text-[11px] text-neutral-500 truncate">${agentSubtitle(a)}</div>
       ${(a.capabilities || []).length ? `<div class="mt-2 flex flex-wrap gap-1">${a.capabilities.slice(0, 3).map((c) => `<span class="text-[9px] bg-neutral-800 text-neutral-400 px-1.5 py-0.5 rounded">${esc(c)}</span>`).join("")}</div>` : ""}
@@ -1111,20 +1608,178 @@ function renderTeamPanel() {
     </div>`;
 }
 
+// --- Personas library view (file-backed markdown, project + domain scoped) --
+// Personas are written under runtime/harness/personas/{domains/<domain>,general}.
+// registry.listPersonas() reads the same tree, so anything created here is
+// immediately assignable to agents in the New/Edit agent modal. Generation
+// uses the Gemma utility model (Cloudflare AI Gateway), NOT the CEO (Hermes).
+let personaListCache = [];
+
+function personaScopeLabel() {
+  return currentDomain && currentDomain !== "All"
+    ? `${currentDomain} + shared` : "project-wide";
+}
+
+async function renderPersonasView() {
+  setPanelTitle("Personas");
+  if (!currentProject) { panelContent().innerHTML = navEmpty("Open a project to manage personas."); return; }
+  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading personas…</div>';
+  let res = {};
+  try { res = await window.ceo.personaFiles(); } catch { res = {}; }
+  if (!res || !res.ok) { panelContent().innerHTML = navEmpty((res && res.reason) || "Could not load personas."); return; }
+  personaListCache = res.personas || [];
+  const cards = personaListCache.length ? personaListCache.map((p) => `
+    <button class="persona-card text-left rounded-xl border border-neutral-800 bg-neutral-900/60 p-3 hover:border-cyan-500/40 transition" data-id="${esc(p.id)}">
+      <div class="flex items-center gap-2">
+        <span class="text-sm font-medium text-neutral-100 truncate">${esc(p.name || p.id)}</span>
+        <span class="ml-auto text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded ${p.scope === "domain" ? "bg-cyan-500/15 text-cyan-300" : "bg-neutral-800 text-neutral-400"}">${esc(p.scope)}</span>
+      </div>
+      <div class="mt-1 text-[11px] text-neutral-500 truncate">${esc(p.summary || "—")}</div>
+    </button>`).join("")
+    : navEmpty("No personas yet. Generate one with Gemma or create a blank one.");
+  panelContent().innerHTML = `
+    <div class="space-y-4">
+      <div class="flex items-center gap-2">
+        <span class="text-sm font-semibold text-neutral-100">Personas</span>
+        <span class="text-[11px] text-neutral-500">${personaListCache.length} · ${esc(personaScopeLabel())}</span>
+        <button id="persona-generate" class="ml-auto text-xs bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-3 py-1 font-medium transition">✦ Generate with Gemma</button>
+        <button id="persona-new" class="text-xs bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 rounded-md px-3 py-1 font-medium transition">+ Blank</button>
+      </div>
+      <div class="text-[11px] text-neutral-600">Personas saved here are assignable to agents in Teams → New/Edit agent.</div>
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">${cards}</div>
+    </div>`;
+}
+
+async function openPersonaEditor(id, opts = {}) {
+  setPanelTitle(id ? `Persona · ${id}` : "New persona");
+  let content = opts.content || "";
+  let name = opts.name || id || "";
+  if (id && !opts.content) {
+    let r = {};
+    try { r = await window.ceo.personaRead(id); } catch { r = {}; }
+    if (r && r.ok) { content = r.content; name = r.name || id; }
+    else { panelContent().innerHTML = navEmpty((r && r.reason) || "Could not read persona."); return; }
+  }
+  panelContent().innerHTML = `
+    <div class="space-y-3 max-w-3xl">
+      <button id="persona-back" class="text-xs text-neutral-400 hover:text-neutral-200">← Back to personas</button>
+      <input type="hidden" id="pe-id" value="${esc(id || "")}" />
+      <div class="flex items-center gap-2">
+        <input id="pe-name" class="flex-1 bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 ${id ? "opacity-70" : ""}" value="${esc(name)}" placeholder="Persona name (e.g. Release Manager)" ${id ? "readonly" : ""} />
+        <button id="pe-save" class="text-sm bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-4 py-1.5 font-medium transition">Save</button>
+        ${id ? `<button id="pe-delete" class="text-sm bg-red-900/40 hover:bg-red-900/70 border border-red-900/60 text-red-300 rounded-md px-3 py-1.5 transition">Delete</button>` : ""}
+      </div>
+      <textarea id="pe-content" rows="22" class="w-full bg-neutral-950/60 border border-neutral-800 rounded-lg px-3 py-2 text-[13px] font-mono text-neutral-100 leading-relaxed focus:outline-none focus:ring-1 focus:ring-cyan-500/50" placeholder="# Role&#10;&#10;## Core Responsibility&#10;…">${esc(content)}</textarea>
+      <span id="pe-msg" class="text-xs text-neutral-500"></span>
+    </div>`;
+  const ta = document.getElementById("pe-content");
+  if (ta && !id) ta.focus();
+}
+
+function openPersonaGenerateModal() {
+  const existing = document.getElementById("persona-gen-modal");
+  if (existing) existing.remove();
+  const wrap = document.createElement("div");
+  wrap.id = "persona-gen-modal";
+  wrap.className = "fixed inset-0 z-[80] bg-neutral-950/80 backdrop-blur-sm flex items-start justify-center p-6 pt-16 overflow-auto";
+  wrap.innerHTML = `
+    <div class="w-[460px] max-w-[92vw] rounded-2xl border border-neutral-800 bg-neutral-900 shadow-2xl p-5 space-y-4">
+      <div class="flex items-center">
+        <span class="text-base font-semibold text-neutral-100">Generate persona with Gemma</span>
+        <div class="flex-1"></div>
+        <button id="pg-close" class="text-sm text-neutral-400 hover:text-neutral-100">✕</button>
+      </div>
+      <div class="text-[11px] text-neutral-500">Scope: ${esc(personaScopeLabel())}</div>
+      <label class="block text-xs text-neutral-400">Role name
+        <input id="pg-name" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100" placeholder="e.g. Release Manager" />
+      </label>
+      <label class="block text-xs text-neutral-400">Brief — what they own / how they behave
+        <textarea id="pg-brief" rows="4" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100" placeholder="Owns cutting releases, changelogs, and rollback plans for the app."></textarea>
+      </label>
+      <div class="flex items-center gap-2">
+        <button id="pg-go" class="text-sm bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-4 py-1.5 font-medium transition">Generate draft</button>
+        <span id="pg-msg" class="text-xs text-neutral-500"></span>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener("click", (e) => { if (e.target === wrap) wrap.remove(); });
+  document.getElementById("pg-close").addEventListener("click", () => wrap.remove());
+  document.getElementById("pg-go").addEventListener("click", async () => {
+    const name = (document.getElementById("pg-name").value || "").trim();
+    const brief = (document.getElementById("pg-brief").value || "").trim();
+    const msg = document.getElementById("pg-msg");
+    if (!name) { if (msg) msg.textContent = "name required"; return; }
+    if (msg) msg.textContent = "generating with Gemma…";
+    let r = {};
+    try { r = await window.ceo.personaGenerate(name, brief, false); } catch (e) { r = { ok: false, reason: e.message }; }
+    if (!r || !r.ok) { if (msg) msg.textContent = "failed: " + ((r && r.reason) || "unknown"); return; }
+    wrap.remove();
+    // Open the draft in the editor so the user can review/edit before saving.
+    openPersonaEditor(null, { content: r.content, name });
+  });
+}
+
+async function savePersonaFromEditor() {
+  const idField = document.getElementById("pe-id");
+  const nameEl = document.getElementById("pe-name");
+  const contentEl = document.getElementById("pe-content");
+  const msg = document.getElementById("pe-msg");
+  if (!nameEl || !contentEl) return;
+  const id = (idField && idField.value) || nameEl.value.trim();
+  const content = contentEl.value;
+  if (!id) { if (msg) msg.textContent = "name required"; return; }
+  if (!content.trim()) { if (msg) msg.textContent = "content is empty"; return; }
+  if (msg) msg.textContent = "saving…";
+  let r = {};
+  try { r = await window.ceo.personaSave(id, content); } catch (e) { r = { ok: false, reason: e.message }; }
+  if (!r || !r.ok) { if (msg) msg.textContent = "failed: " + ((r && r.reason) || "unknown"); return; }
+  await renderPersonasView();
+}
+
+async function deletePersonaFromEditor() {
+  const idField = document.getElementById("pe-id");
+  const id = idField && idField.value;
+  if (!id) return;
+  if (!confirm(`Delete persona "${id}"? This removes the markdown file.`)) return;
+  let r = {};
+  try { r = await window.ceo.personaDelete(id); } catch (e) { r = { ok: false, reason: e.message }; }
+  if (r && r.ok) await renderPersonasView();
+}
+
 // --- Agent create/edit modal (appended to <body> so panel re-renders don't wipe it).
 function closeAgentModal() {
   const m = document.getElementById("agent-modal");
   if (m) m.remove();
 }
 
+// Build <option>s for the model dropdown from the captured catalog
+// (registryState.models[provider]). Marks `current` selected; if `current` is
+// set but not in the catalog, the "Custom…" option is selected instead.
+function _modelSelectOptions(provider, current) {
+  const list = (registryState.models && registryState.models[provider]) || [];
+  const opts = [`<option value="">— default —</option>`];
+  let matched = false;
+  for (const m of list) {
+    const sel = current && current === m.id ? "selected" : "";
+    if (sel) matched = true;
+    const ctx = m.context ? ` · ${esc(String(m.context))}` : "";
+    opts.push(`<option value="${esc(m.id)}" ${sel}>${esc(m.label || m.id)}${ctx}</option>`);
+  }
+  const customSel = current && !matched ? "selected" : "";
+  opts.push(`<option value="__custom__" ${customSel}>Custom…</option>`);
+  return opts.join("");
+}
+
 function openAgentModal(agentId) {
   closeAgentModal();
   const editing = agentId ? registryState.agents.find((a) => a.id === agentId) : null;
   const personas = registryState.personas || [];
-  const providers = registryState.providers || ["echo"];
+  const providers = registryState.providers || ["vertex"];
   const personaOpts = `<option value="">— none —</option>` +
     personas.map((p) => `<option value="${esc(p.id)}" ${editing && editing.persona === p.id ? "selected" : ""}>${esc(p.name || p.id)}</option>`).join("");
   const providerOpts = providers.map((p) => `<option value="${esc(p)}" ${editing && editing.provider === p ? "selected" : ""}>${esc(p)}</option>`).join("");
+  const initialProvider = (editing && editing.provider) || providers[0] || "vertex";
+  const modelOpts = _modelSelectOptions(initialProvider, editing && editing.model);
   const wrap = document.createElement("div");
   wrap.id = "agent-modal";
   wrap.className = "fixed inset-0 z-[80] bg-neutral-950/80 backdrop-blur-sm flex items-start justify-center p-6 pt-16 overflow-auto";
@@ -1142,8 +1797,9 @@ function openAgentModal(agentId) {
         <label class="flex-1 text-xs text-neutral-400">Brain / provider
           <select id="am-provider" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100">${providerOpts}</select>
         </label>
-        <label class="flex-1 text-xs text-neutral-400">Model (optional)
-          <input id="am-model" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100" value="${editing && editing.model ? esc(editing.model) : ""}" placeholder="e.g. grok-build" />
+        <label class="flex-1 text-xs text-neutral-400">Model
+          <select id="am-model-select" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100">${modelOpts}</select>
+          <input id="am-model" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 font-mono" style="display:none" value="${editing && editing.model ? esc(editing.model) : ""}" placeholder="custom model id" />
         </label>
       </div>
       <label id="am-command-row" class="block text-xs text-neutral-400" style="display:none">Command template
@@ -1176,8 +1832,28 @@ function openAgentModal(agentId) {
   const provSel = document.getElementById("am-provider");
   const cmdRow = document.getElementById("am-command-row");
   const syncCmdRow = () => { cmdRow.style.display = provSel.value === "command" ? "block" : "none"; };
-  provSel.addEventListener("change", syncCmdRow);
+  // Model dropdown: scoped to the chosen provider, with a "Custom…" free-text fallback.
+  // The hidden #am-model input is the source of truth saveAgentModal() reads.
+  const modelSel = document.getElementById("am-model-select");
+  const modelInput = document.getElementById("am-model");
+  const syncModelField = () => {
+    if (modelSel.value === "__custom__") {
+      modelInput.style.display = "";            // reveal free-text
+      if (!modelInput.value) modelInput.focus();
+    } else {
+      modelInput.style.display = "none";
+      modelInput.value = modelSel.value;        // mirror selection into the saved field
+    }
+  };
+  modelSel.addEventListener("change", syncModelField);
+  provSel.addEventListener("change", () => {
+    syncCmdRow();
+    modelSel.innerHTML = _modelSelectOptions(provSel.value, "");  // re-scope models to new provider
+    modelInput.value = "";
+    syncModelField();
+  });
   syncCmdRow();
+  syncModelField();
   document.getElementById("am-save").addEventListener("click", () => saveAgentModal(editing ? editing.id : null));
   const del = document.getElementById("am-delete");
   if (del) del.addEventListener("click", () => deleteAgentFromModal(editing.id));
@@ -1188,7 +1864,7 @@ async function saveAgentModal(existingId) {
   const val = (id) => (document.getElementById(id) && document.getElementById(id).value) || "";
   const spec = {
     name: val("am-name").trim(),
-    provider: val("am-provider") || "echo",
+    provider: val("am-provider") || "vertex",
     model: val("am-model").trim() || null,
     command: val("am-command").trim() || null,
     persona: val("am-persona") || null,
@@ -1230,6 +1906,7 @@ let selectedAgentId = null;
 let selectedAgentRoom = "discovery";
 let agentSurfaceTab = "terminal";
 let agentTermTimer = null;
+let agentInputMode = "room"; // "room" or "terminal"
 
 function detailRow(label, valueHtml) {
   return `<div class="rounded-lg border border-neutral-800 bg-neutral-950/40 p-2">
@@ -1252,7 +1929,7 @@ async function renderAgentDetail(a) {
   if (a.tmux_session) {
     try { const live = await window.ceo.registryAlive(a.id); mounted = !!(live && live.alive); } catch { mounted = false; }
   }
-  const brain = esc(a.provider || "echo") + (a.model ? " · " + esc(a.model) : "");
+  const brain = esc(a.provider || "vertex") + (a.model ? " · " + esc(a.model) : "");
   panelContent().innerHTML = `
     <div class="space-y-4 max-w-2xl">
       <button id="agent-back" class="text-xs text-neutral-400 hover:text-neutral-200">← Back to team</button>
@@ -1260,7 +1937,7 @@ async function renderAgentDetail(a) {
         <div class="flex items-center gap-2">
           <span class="w-2.5 h-2.5 rounded-full ${mounted ? "bg-emerald-500" : "bg-neutral-600"}"></span>
           <span class="text-base font-semibold text-neutral-100">${esc(a.name || a.id)}</span>
-          <span class="ml-auto text-[10px] uppercase tracking-wider text-neutral-500">${esc(a.provider || "echo")}</span>
+          <span class="ml-auto text-[10px] uppercase tracking-wider text-neutral-500">${esc(a.provider || "vertex")}</span>
         </div>
         <div class="grid grid-cols-2 gap-2 text-xs">
           ${detailRow("Persona", esc(a.persona || "—"))}
@@ -1375,12 +2052,45 @@ async function sendAgentKeys() {
   const text = input.value;
   if (!text.trim()) return;
   input.value = "";
-  // Talk to the agent by posting into its A2A room (the real channel), not by
-  // typing into a watcher pane. Then show the room transcript in Logs.
-  const r = await window.ceo.registryMessage(selectedAgentId, text, "CEO");
-  if (r && r.room) selectedAgentRoom = r.room;
-  setAgentSurfaceTab("logs");
-  setTimeout(pollAgentSurface, 400);
+  
+  if (agentInputMode === "terminal") {
+    // Send directly to tmux terminal
+    const a = registryState.agents.find((x) => x.id === selectedAgentId);
+    const tmuxWindow = (a && a.tmux_window) || "main";
+    const r = await window.ceo.registryTerminalSend(selectedAgentId, text, tmuxWindow);
+    if (r && r.ok) {
+      // Force a refresh of the terminal output
+      setTimeout(pollAgentSurface, 200);
+    }
+  } else {
+    // Talk to the agent by posting into its A2A room (the real channel), not by
+    // typing into a watcher pane. Then show the room transcript in Logs.
+    const r = await window.ceo.registryMessage(selectedAgentId, text, "CEO");
+    if (r && r.room) selectedAgentRoom = r.room;
+    setAgentSurfaceTab("logs");
+    setTimeout(pollAgentSurface, 400);
+  }
+}
+
+function setAgentInputMode(mode) {
+  agentInputMode = mode;
+  const roomBtn = document.getElementById("as-mode-room");
+  const termBtn = document.getElementById("as-mode-terminal");
+  const input = document.getElementById("as-input");
+  
+  if (mode === "room") {
+    roomBtn.classList.remove("bg-neutral-800", "text-neutral-400");
+    roomBtn.classList.add("bg-cyan-600/80", "text-white");
+    termBtn.classList.remove("bg-cyan-600/80", "text-white");
+    termBtn.classList.add("bg-neutral-800", "text-neutral-400");
+    if (input) input.placeholder = "Message this agent in its room (as CEO)…";
+  } else {
+    termBtn.classList.remove("bg-neutral-800", "text-neutral-400");
+    termBtn.classList.add("bg-cyan-600/80", "text-white");
+    roomBtn.classList.remove("bg-cyan-600/80", "text-white");
+    roomBtn.classList.add("bg-neutral-800", "text-neutral-400");
+    if (input) input.placeholder = "Type terminal command to send to agent…";
+  }
 }
 
 // Agent surface buttons live in panel2 (outside the left panelContent that the rest of
@@ -1391,6 +2101,8 @@ function wireAgentSurface() {
     if (e.target.closest("#as-close")) { closeAgentSurface(); renderTeamPanel(); return; }
     if (e.target.closest("#as-tab-terminal")) { setAgentSurfaceTab("terminal"); return; }
     if (e.target.closest("#as-tab-logs")) { setAgentSurfaceTab("logs"); return; }
+    if (e.target.closest("#as-mode-room")) { setAgentInputMode("room"); return; }
+    if (e.target.closest("#as-mode-terminal")) { setAgentInputMode("terminal"); return; }
     if (e.target.closest("#as-send")) { sendAgentKeys(); return; }
   });
   document.addEventListener("keydown", (e) => {
@@ -1416,7 +2128,7 @@ async function renderChannelsView() {
   const dms = agents.map((a) => `
     <button class="channel-item w-full text-left flex items-center gap-2 rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition" data-channel="dm:${esc(a.id)}">
       <span class="text-neutral-500">◌</span><span>${esc(a.name || a.id)}</span>
-      <span class="ml-auto text-[10px] text-neutral-600">${esc(a.provider || "echo")}</span>
+      <span class="ml-auto text-[10px] text-neutral-600">${esc(a.provider || "vertex")}</span>
     </button>`).join("") || '<div class="px-3 py-2 text-xs text-neutral-600">No agents in registry.</div>';
   panelContent().innerHTML = `
     <div class="space-y-4 max-w-2xl">
@@ -1434,58 +2146,257 @@ async function renderChannelsView() {
 
 function stopNavMeetingPoll() { if (navMeetingTimer) { clearInterval(navMeetingTimer); navMeetingTimer = null; } }
 
+const MEETING_TEMPLATES = {
+  kickoff: {
+    label: "Kickoff",
+    agenda: (domain) => `Kick off the ${domain} domain. Clarify ownership, initial capabilities, first artifacts, open risks, and the next Agenda Item proposals.`,
+    criteria: "A concise domain plan with decisions, unresolved questions, owner recommendations, and proposal-only next Agenda Items.",
+    team: "product-discovery",
+  },
+  handoff: {
+    label: "Handoff triage",
+    agenda: (domain) => `Triage the selected ${domain} handoff or domain context. Identify what is confirmed, what needs human attention, and which Agenda Items should be proposed.`,
+    criteria: "Proposal-only Agenda Items with provenance, priority, routing suggestions, and human-approval flags.",
+    team: "product-discovery",
+  },
+  requirements: {
+    label: "Requirements",
+    agenda: (domain) => `Turn the selected ${domain} context into implementation-ready requirements without creating Kanban work yet.`,
+    criteria: "A requirements artifact with scope, non-goals, acceptance criteria, dependencies, and traceable source context.",
+    team: "documentation-stewards",
+  },
+  planning: {
+    label: "Build plan",
+    agenda: (domain) => `Plan the next concrete implementation pass for the ${domain} domain. Sequence the work, identify files to change, tests to run, and risks to watch.`,
+    criteria: "A practical build plan that can be handed to a coding agent after human approval.",
+    team: "self-repair",
+  },
+  repair: {
+    label: "Repair review",
+    agenda: (domain) => `Review the selected ${domain} bug, gap, or failed workflow. Diagnose the likely cause and propose a repair path.`,
+    criteria: "A repair brief with reproduction notes, affected surface, likely files, owner, and verification gates.",
+    team: "self-repair",
+  },
+};
+
+function meetingDomainName() {
+  return currentDomain && currentDomain !== "All" ? currentDomain : (currentProject?.name || "Project");
+}
+
+function agentAvailability(agent) {
+  if (agent?.mounted || agent?.tmux_session) return "mounted";
+  return "available";
+}
+
+function mergeMeetingRoster(options = {}) {
+  const optionAgents = Array.isArray(options.agents) ? options.agents : [];
+  const mounted = new Set((options.mounted || []).concat(optionAgents.filter((a) => a.mounted).map((a) => a.id)));
+  const registryAgents = registryState.agents || [];
+  const sourceAgents = registryAgents.length ? registryAgents : optionAgents;
+  const optionById = new Map(optionAgents.map((agent) => [agent.id, agent]));
+  const agents = sourceAgents.map((agent) => ({
+    ...optionById.get(agent.id),
+    ...agent,
+    mounted: mounted.has(agent.id) || !!agent.tmux_session || !!agent.mounted,
+  }));
+  return {
+    agents,
+    teams: (registryState.teams && registryState.teams.length) ? registryState.teams : (options.teams || []),
+    personas: options.personas || registryState.personas || [],
+    mounted: [...mounted],
+  };
+}
+
+function renderMeetingTemplates() {
+  return Object.entries(MEETING_TEMPLATES).map(([key, tmpl]) => `
+    <button class="nav-mtg-template rounded-md border border-neutral-700 bg-neutral-900 px-2.5 py-1.5 text-xs text-neutral-200 hover:border-cyan-500/50 hover:bg-cyan-950/20"
+      data-template="${esc(key)}">${esc(tmpl.label)}</button>
+  `).join("");
+}
+
+function renderMeetingTeamCards(teams, agentsById) {
+  if (!teams.length) return `<div class="rounded-xl border border-neutral-800 bg-neutral-950/45 p-3 text-xs text-neutral-600">No teams in the registry.</div>`;
+  return teams.map((team) => {
+    const members = team.members || [];
+    const mountedCount = members.filter((id) => {
+      const agent = agentsById.get(id);
+      return agent && (agent.mounted || agent.tmux_session);
+    }).length;
+    const sample = members.slice(0, 4).map((id) => agentsById.get(id)?.name || id).join(", ") || "No members";
+    return `<button class="nav-mtg-team-card text-left rounded-xl border border-neutral-800 bg-neutral-950/45 p-3 hover:border-cyan-500/45 hover:bg-cyan-950/15"
+      data-mtg-team="${esc(team.name)}">
+      <div class="flex items-center gap-2">
+        <span class="min-w-0 flex-1 truncate text-sm font-medium text-neutral-100">${esc(team.name)}</span>
+        <span class="rounded border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400">${members.length} agents</span>
+      </div>
+      <div class="mt-1 truncate text-[11px] text-neutral-500">${esc(sample)}</div>
+      <div class="mt-2 text-[10px] uppercase tracking-wider text-neutral-600">${mountedCount} mounted now</div>
+    </button>`;
+  }).join("");
+}
+
+function renderMeetingAgentChecks(agents) {
+  if (!agents.length) return '<div class="text-[11px] text-neutral-600">No agents in registry.</div>';
+  return agents.map((a) => {
+    const status = agentAvailability(a);
+    const statusClass = status === "mounted" ? "bg-emerald-500" : "bg-neutral-600";
+    const caps = (a.capabilities || []).slice(0, 3).join(", ");
+    return `<label class="flex items-start gap-2 rounded-lg border border-neutral-800 bg-neutral-950/35 px-2 py-2 text-xs text-neutral-300">
+      <input type="checkbox" class="nav-mtg-member mt-0.5 accent-cyan-500" value="${esc(a.id)}" />
+      <span class="mt-1 h-2 w-2 shrink-0 rounded-full ${statusClass}"></span>
+      <span class="min-w-0 flex-1">
+        <span class="block truncate text-neutral-200">${esc(a.name || a.id)}</span>
+        <span class="block truncate text-[10px] text-neutral-500">${esc([a.provider || "vertex", a.persona, caps].filter(Boolean).join(" / "))}</span>
+      </span>
+      <span class="shrink-0 text-[10px] text-neutral-600">${esc(status)}</span>
+    </label>`;
+  }).join("");
+}
+
+function selectMeetingTeam(teamName) {
+  const select = $("#nav-mtg-team");
+  if (select) select.value = teamName || "";
+  const t = ((navMeetingOpts && navMeetingOpts.teams) || []).find((x) => x.name === teamName);
+  const ids = new Set((t && t.members) || []);
+  document.querySelectorAll(".nav-mtg-member").forEach((c) => { c.checked = ids.has(c.value); });
+  document.querySelectorAll(".nav-mtg-team-card").forEach((card) => {
+    const active = card.dataset.mtgTeam === teamName;
+    card.classList.toggle("border-cyan-500", active);
+    card.classList.toggle("bg-cyan-950/20", active);
+  });
+}
+
+function applyMeetingTemplate(templateKey) {
+  const tmpl = MEETING_TEMPLATES[templateKey];
+  if (!tmpl) return;
+  const domain = meetingDomainName();
+  const agenda = $("#nav-mtg-agenda");
+  const criteria = $("#nav-mtg-criteria");
+  if (agenda) agenda.value = tmpl.agenda(domain);
+  if (criteria) criteria.value = tmpl.criteria;
+  if (tmpl.team && (navMeetingOpts?.teams || []).some((team) => team.name === tmpl.team)) selectMeetingTeam(tmpl.team);
+  const msg = $("#nav-mtg-msg");
+  if (msg) msg.textContent = `${tmpl.label} brief loaded`;
+}
+
+async function selectedMeetingContext() {
+  if (!ceoContextTray.length) return [];
+  const include = $("#nav-mtg-include-context");
+  if (include && !include.checked) return [];
+  const loaded = await Promise.all(ceoContextTray.slice(0, 6).map(readContextItem));
+  return loaded.map((item) => ({
+    kind: item.kind || "artifact",
+    title: item.title || item.path || "Selected context",
+    path: item.path || "",
+    text: String(item.text || "").slice(0, 5000),
+  }));
+}
+
+function meetingContextAgendaBlock(items) {
+  if (!items.length) return "";
+  return [
+    "Selected domain context:",
+    ...items.map((item, idx) => [
+      `Context ${idx + 1}: ${item.title}`,
+      `Kind: ${item.kind}`,
+      `Path: ${item.path || "inline"}`,
+      item.text || "(no content)",
+    ].join("\n")),
+  ].join("\n\n");
+}
+
 async function renderMeetingsView() {
   setPanelTitle("Meetings");
   stopNavMeetingPoll();
   panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading session setup…</div>';
-  await loadRegistry();
-  navMeetingOpts = { agents: registryState.agents, teams: registryState.teams };
+  const [meetingOptions] = await Promise.all([
+    window.ceo.meetingOptions ? safeIpc(() => window.ceo.meetingOptions(), {}) : {},
+    loadRegistry(),
+  ]);
+  navMeetingOpts = mergeMeetingRoster(meetingOptions || {});
   const teams = navMeetingOpts.teams;
   const agents = navMeetingOpts.agents;
+  const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
+  const domainName = meetingDomainName();
   const teamOpts = `<option value="">— pick a team —</option>` +
     teams.map((t) => `<option value="${esc(t.name)}">${esc(t.name)} (${(t.members || []).length})</option>`).join("");
-  const agentChecks = agents.map((a) => `
-    <label class="flex items-center gap-2 text-xs text-neutral-300">
-      <input type="checkbox" class="nav-mtg-member accent-cyan-500" value="${esc(a.id)}" />
-      <span class="text-neutral-200">${esc(a.name || a.id)}</span>
-      <span class="text-[10px] text-neutral-500">${esc(a.provider || "echo")}${a.persona ? " · " + esc(a.persona) : ""}</span>
-    </label>`).join("") || '<div class="text-[11px] text-neutral-600">No agents in registry.</div>';
+  const contextRows = ceoContextTray.length
+    ? ceoContextTray.map((item) => `<div class="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2">
+        <span class="rounded border border-cyan-500/20 bg-cyan-950/20 px-1.5 py-0.5 text-[10px] text-cyan-300">${esc(item.kind || "artifact")}</span>
+        <span class="min-w-0 flex-1 truncate text-xs text-neutral-300">${esc(item.title || item.path)}</span>
+      </div>`).join("")
+    : `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2 text-xs text-neutral-600">No selected domain context.</div>`;
   panelContent().innerHTML = `
-    <div class="space-y-4 max-w-3xl">
-      <div class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4 space-y-3">
-        <div class="text-sm font-semibold text-neutral-100">Working session</div>
-        <p class="text-[12px] leading-5 text-neutral-500">A meeting is a group room: a team works an agenda toward a goal and produces a written result. Pick a team (or members), give it a goal, and start.</p>
-        <label class="block text-xs text-neutral-400">Goal / agenda
-          <textarea id="nav-mtg-agenda" rows="2" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-cyan-500/50" placeholder="What should the team work out?"></textarea>
-        </label>
-        <label class="block text-xs text-neutral-400">Good outcome (optional)
-          <input id="nav-mtg-criteria" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-cyan-500/50" placeholder="What a good result looks like" />
-        </label>
-        <label class="block text-xs text-neutral-400">Team
-          <select id="nav-mtg-team" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-cyan-500/50">${teamOpts}</select>
-        </label>
-        <div class="text-xs text-neutral-400">Or pick members
-          <div class="mt-1 max-h-[160px] overflow-auto rounded-md border border-neutral-800 bg-neutral-950/40 p-2 space-y-1">${agentChecks}</div>
-        </div>
-        <label class="flex items-center gap-2 text-xs text-amber-300/90">
-          <input id="nav-mtg-paid" type="checkbox" class="accent-amber-500" /> Use real agents (devin/grok) — costs credits
-        </label>
-        <div class="flex items-center gap-2">
-          <button id="nav-mtg-start" class="text-sm bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-4 py-1.5 font-medium transition">Start session</button>
-          <span id="nav-mtg-msg" class="text-xs text-neutral-500"></span>
-        </div>
+    <div class="space-y-4">
+      <div class="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(340px,0.95fr)]">
+        <section class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+          <div class="mb-3 flex flex-wrap items-center gap-2">
+            <div class="min-w-0 flex-1">
+              <div class="text-sm font-semibold text-neutral-100">Meeting Brief</div>
+              <div class="mt-1 text-[11px] uppercase tracking-wider text-neutral-600">${esc(domainName)} domain workspace</div>
+            </div>
+            <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] text-neutral-500">${agents.length} agents</span>
+            <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] text-neutral-500">${teams.length} teams</span>
+          </div>
+          <div class="mb-3 flex flex-wrap gap-2">${renderMeetingTemplates()}</div>
+          <label class="block text-xs text-neutral-400">Agenda
+            <textarea id="nav-mtg-agenda" rows="5" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-800/70 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" placeholder="What should this room decide, synthesize, or plan?"></textarea>
+          </label>
+          <label class="mt-3 block text-xs text-neutral-400">Expected outcome
+            <input id="nav-mtg-criteria" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-800/70 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" placeholder="Artifact, decision, proposal, or repair brief expected from this session" />
+          </label>
+          <div class="mt-3 rounded-xl border border-cyan-500/20 bg-cyan-950/10 p-3">
+            <div class="mb-2 flex items-center gap-2">
+              <div class="text-xs font-medium text-cyan-100">Selected Context</div>
+              <span class="rounded border border-cyan-500/20 px-1.5 py-0.5 text-[10px] text-cyan-300">${ceoContextTray.length} items</span>
+              <label class="ml-auto flex items-center gap-2 text-[11px] text-neutral-300">
+                <input id="nav-mtg-include-context" type="checkbox" class="accent-cyan-500" ${ceoContextTray.length ? "checked" : "disabled"} />
+                Include
+              </label>
+            </div>
+            <div class="space-y-2">${contextRows}</div>
+          </div>
+          <label class="mt-3 flex items-center gap-2 text-xs text-amber-300/90">
+            <input id="nav-mtg-paid" type="checkbox" class="accent-amber-500" /> Allow paid providers for this session
+          </label>
+          <div class="mt-4 flex flex-wrap items-center gap-2">
+            <button id="nav-mtg-start" class="rounded-md bg-cyan-600 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-cyan-500">Start Meeting</button>
+            <span id="nav-mtg-msg" class="text-xs text-neutral-500"></span>
+          </div>
+        </section>
+        <section class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+          <div class="mb-3 flex items-center gap-2">
+            <div>
+              <div class="text-sm font-semibold text-neutral-100">Room Roster</div>
+              <div class="mt-1 text-[11px] uppercase tracking-wider text-neutral-600">${navMeetingOpts.mounted.length} mounted agents now</div>
+            </div>
+            <select id="nav-mtg-team" class="ml-auto max-w-[220px] rounded-md border border-neutral-700 bg-neutral-800/70 px-2 py-1.5 text-xs text-neutral-100 outline-none focus:border-cyan-500">${teamOpts}</select>
+          </div>
+          <div class="grid grid-cols-1 gap-2 md:grid-cols-2">${renderMeetingTeamCards(teams, agentsById)}</div>
+          <div class="mt-4 text-xs text-neutral-400">Participants
+            <div class="mt-2 max-h-[260px] space-y-2 overflow-auto rounded-xl border border-neutral-800 bg-neutral-950/35 p-2">${renderMeetingAgentChecks(agents)}</div>
+          </div>
+        </section>
       </div>
-      <div class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+      <section class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
         <div class="flex items-center gap-2 text-[11px] uppercase tracking-wider text-neutral-500">
-          <span>Transcript</span><span id="nav-mtg-room" class="font-mono text-neutral-400 normal-case"></span><span id="nav-mtg-state" class="ml-auto normal-case"></span>
+          <span>Live Room</span><span id="nav-mtg-room" class="font-mono text-neutral-400 normal-case">${esc(navMeetingRoom || "")}</span><span id="nav-mtg-state" class="ml-auto normal-case"></span>
         </div>
-        <div id="nav-mtg-transcript" class="mt-2 space-y-2 text-sm"><div class="text-neutral-600">No session yet.</div></div>
-        <div id="nav-mtg-req" class="hidden mt-3 border-t border-neutral-800/60 pt-3">
-          <div class="text-[11px] uppercase tracking-wider text-emerald-400/80 mb-1">Result</div>
+        <div id="nav-mtg-transcript" class="mt-3 space-y-2 text-sm"><div class="rounded-lg border border-neutral-800 bg-neutral-950/45 p-3 text-neutral-600">No meeting started.</div></div>
+        <div id="nav-mtg-req" class="hidden mt-4 border-t border-neutral-800/60 pt-3">
+          <div class="mb-1 flex items-center gap-2">
+            <div class="text-[11px] uppercase tracking-wider text-emerald-400/80">Saved Result</div>
+            <span id="nav-mtg-saved-path" class="font-mono text-[10px] text-neutral-600"></span>
+          </div>
           <div id="nav-mtg-req-body" class="prose prose-invert prose-sm max-w-none text-neutral-200"></div>
         </div>
-      </div>
+      </section>
     </div>`;
+  if (navMeetingRoom) {
+    pollNavMeeting();
+    stopNavMeetingPoll();
+    navMeetingTimer = setInterval(pollNavMeeting, 2500);
+  }
 }
 
 async function startNavMeeting() {
@@ -1497,14 +2408,19 @@ async function startNavMeeting() {
   const allowPaid = !!($("#nav-mtg-paid") && $("#nav-mtg-paid").checked);
   if (!agenda) { if (msg) msg.textContent = "goal required"; return; }
   if (!team && !members) { if (msg) msg.textContent = "pick a team or members"; return; }
-  if (msg) msg.textContent = "starting…";
-  const info = { room: `session-${Date.now()}`, agenda, criteria, allowPaid };
+  if (msg) msg.textContent = "reading context...";
+  const sourceContext = await selectedMeetingContext();
+  const contextBlock = meetingContextAgendaBlock(sourceContext);
+  const meetingAgenda = contextBlock ? `${agenda}\n\n${contextBlock}` : agenda;
+  if (msg) msg.textContent = "starting...";
+  const info = { room: `session-${Date.now()}`, agenda: meetingAgenda, criteria, allowPaid };
   if (team) info.team = team; else info.members = members;
   let r = {};
   try { r = await window.ceo.meetingStart(info); } catch (e) { r = { ok: false, reason: String(e) }; }
   if (!r || !r.ok) { if (msg) msg.textContent = `failed: ${r ? r.reason : "unknown"}`; return; }
-  if (msg) msg.textContent = "running — watch below";
+  if (msg) msg.textContent = "running - watch below";
   navMeetingRoom = r.room;
+  navMeetingMeta = { domain: currentDomain, agenda, participants: team || members, expectedOutcome: criteria, sourceContext, saved: false, artifactPath: "" };
   const lbl = $("#nav-mtg-room"); if (lbl) lbl.textContent = r.room;
   pollNavMeeting();
   stopNavMeetingPoll();
@@ -1534,6 +2450,22 @@ async function pollNavMeeting() {
     if (r.requirements) { reqWrap.classList.remove("hidden"); reqBody.innerHTML = window.marked ? window.marked.parse(r.requirements) : esc(r.requirements); }
     else reqWrap.classList.add("hidden");
   }
+  if (r.requirements && navMeetingMeta && !navMeetingMeta.saved && window.ceo.saveMeetingArtifact) {
+    navMeetingMeta.saved = true;
+    const saved = await window.ceo.saveMeetingArtifact({
+      domain: navMeetingMeta.domain,
+      room: navMeetingRoom,
+      agenda: navMeetingMeta.agenda,
+      participants: navMeetingMeta.participants,
+      expectedOutcome: navMeetingMeta.expectedOutcome,
+      requirements: r.requirements,
+      sourceContext: navMeetingMeta.sourceContext || [],
+    });
+    if (saved && saved.ok && saved.artifact) navMeetingMeta.artifactPath = saved.artifact.path || "";
+    const savedPath = $("#nav-mtg-saved-path");
+    if (savedPath && navMeetingMeta.artifactPath) savedPath.textContent = navMeetingMeta.artifactPath;
+    if (studioView === "domain") await renderStudioBoard(currentDomain);
+  }
   if (!r.running) stopNavMeetingPoll();
 }
 
@@ -1546,6 +2478,7 @@ async function openView(view) {
     case "board": return renderBoardView();
     case "tasks": return renderTasksView();
     case "teams": return renderTeamsView();
+    case "personas": return renderPersonasView();
     case "channels": return renderChannelsView();
     case "meetings": return renderMeetingsView();
     case "domain":
@@ -1560,6 +2493,12 @@ window.ceoUI = {
     project: currentProject ? { id: currentProject.id, name: currentProject.name, slug: currentProject.slug } : null,
     domain: currentDomain,
     selectedFile: selectedFile ? { path: selectedFile.path, preview: selectedFile.text.slice(0, 4000) } : null,
+    focusedTask: focusedTask ? { ...focusedTask } : null,
+    panel: {
+      title: $("#panel-title") ? $("#panel-title").textContent : "",
+      mode: $("#studio-mode-pill") ? $("#studio-mode-pill").textContent : "",
+      focusTitle: $("#studio-focus-title") ? $("#studio-focus-title").textContent : "",
+    },
   }),
   // Render arbitrary markdown into Panel 1 (used by the voice agent's tools).
   showPanel(title, markdown) {
@@ -1683,9 +2622,65 @@ panelContent().addEventListener("click", async (e) => {
     const context = [
       "Help me define a new project domain.",
       name ? `Domain name: ${name}` : "I have not named it yet.",
-      "Ask me only for missing essentials, then call define_domain with purpose, overarchingGoal, responsibilities, kanbanBoard, relativePath, and coreAgents.",
+      "Ask me only for missing essentials, then call define_domain with purpose, overarchingGoal, boundaries, features, kanbanBoard, relativePath, and coreAgents.",
     ].join("\n");
     await runTurn(context);
+    return;
+  }
+  if (e.target.closest("#domain-architect-start")) {
+    await startDomainArchitectInterview();
+    return;
+  }
+  if (e.target.closest("#domain-architect-answer-save")) {
+    await saveDomainArchitectAnswer();
+    return;
+  }
+  if (e.target.closest("#domain-architect-apply")) {
+    applyDomainArchitectDraftToForm(domainArchitectSession);
+    return;
+  }
+  if (e.target.closest("#domain-architect-ask")) {
+    await askHermesDomainArchitect();
+    return;
+  }
+  if (e.target.closest("#domain-architect-confirm")) {
+    await confirmDomainArchitectSession();
+    return;
+  }
+  const domainHandoff = e.target.closest("#domain-create-handoff");
+  if (domainHandoff) {
+    await createDomainHandoffFromView();
+    return;
+  }
+  const domainAgenda = e.target.closest("#domain-propose-agenda");
+  if (domainAgenda) {
+    await triageDomainHandoffFromView();
+    return;
+  }
+  const domainMeeting = e.target.closest("#domain-first-meeting");
+  if (domainMeeting) {
+    await startDomainDogfoodMeeting();
+    return;
+  }
+  const contextAdd = e.target.closest(".domain-context-add");
+  if (contextAdd) {
+    await addDomainContextFromButton(contextAdd);
+    return;
+  }
+  const contextRemove = e.target.closest(".domain-context-remove");
+  if (contextRemove) {
+    await removeDomainContext(contextRemove.dataset.contextKey || "");
+    return;
+  }
+  const contextClear = e.target.closest("#domain-context-clear");
+  if (contextClear) {
+    ceoContextTray = [];
+    await renderStudioBoard(currentDomain);
+    return;
+  }
+  const contextAsk = e.target.closest("#domain-context-ask");
+  if (contextAsk) {
+    await askCeoAboutContext();
     return;
   }
   const taskSave = e.target.closest("#task-new-save");
@@ -1756,6 +2751,18 @@ document.querySelectorAll("#studio-nav .nav-item").forEach((b) => {
 // Meetings + Team panel controls (delegated, since panels re-render on open).
 panelContent().addEventListener("click", async (e) => {
   if (e.target.closest("#nav-mtg-start")) { startNavMeeting(); return; }
+  const tmpl = e.target.closest(".nav-mtg-template");
+  if (tmpl) { applyMeetingTemplate(tmpl.dataset.template); return; }
+  const teamCard = e.target.closest(".nav-mtg-team-card");
+  if (teamCard) { selectMeetingTeam(teamCard.dataset.mtgTeam || ""); return; }
+  // Personas view: library + editor
+  if (e.target.closest("#persona-generate")) { openPersonaGenerateModal(); return; }
+  if (e.target.closest("#persona-new")) { openPersonaEditor(null, { content: "" }); return; }
+  if (e.target.closest("#persona-back")) { renderPersonasView(); return; }
+  if (e.target.closest("#pe-save")) { savePersonaFromEditor(); return; }
+  if (e.target.closest("#pe-delete")) { deletePersonaFromEditor(); return; }
+  const personaCard = e.target.closest(".persona-card");
+  if (personaCard) { openPersonaEditor(personaCard.dataset.id); return; }
   // Team panel: roster + team management
   if (e.target.closest("#agent-new")) { openAgentModal(null); return; }
   const card = e.target.closest(".team-agent-card");
@@ -1787,9 +2794,7 @@ panelContent().addEventListener("click", async (e) => {
 });
 panelContent().addEventListener("change", async (e) => {
   if (e.target && e.target.id === "nav-mtg-team") {
-    const t = ((navMeetingOpts && navMeetingOpts.teams) || []).find((x) => x.name === e.target.value);
-    const ids = new Set((t && t.members) || []);
-    document.querySelectorAll(".nav-mtg-member").forEach((c) => { c.checked = ids.has(c.value); });
+    selectMeetingTeam(e.target.value);
     return;
   }
   if (e.target && e.target.classList && e.target.classList.contains("team-add") && e.target.value) {

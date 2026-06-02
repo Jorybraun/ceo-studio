@@ -21,32 +21,44 @@ const projects = require("./core/projects");
 const brain = require("./core/brain");
 const gbrain = require("./core/gbrain");
 const domains = require("./core/domains");
+const domainArchitect = require("./core/domain-architect");
 const user = require("./core/user");
 const soul = require("./core/soul");
 const hermes = require("./core/hermes");
 const domainBoard = require("./core/domain-board");
 const autonomy = require("./core/autonomy");
 const autonomyLoop = require("./core/autonomy-loop");
+const autonomyRunner = require("./core/autonomy-runner");
 const provenance = require("./core/provenance");
 const goals = require("./core/goals");
 const goalReview = require("./core/goal-review");
 const selfRepair = require("./core/self-repair");
+const orchestrationOrg = require("./core/orchestration-org");
 const meetings = require("./core/meetings");
 const registry = require("./core/registry");
+const models = require("./core/models");
+const personas = require("./core/personas");
 const mount = require("./core/mount");
 const aguiServer = require("./core/agui-server");
 const jobs = require("./core/jobs");
 const ticketPlanner = require("./core/ticket-planner");
 const { CostMeter } = require("./core/cost");
-const { createProvider } = require("./core/llm");
+const { createProvider, createUtilityProvider } = require("./core/llm");
 const { DocumentAgent } = require("./core/agent");
 const voice = require("./core/voice");
 const convai = require("./core/convai");
+
+const remoteDebugPort = String(process.env.CEO_STUDIO_REMOTE_DEBUG_PORT || process.env.ELECTRON_REMOTE_DEBUG_PORT || "").trim();
+if (remoteDebugPort) {
+  app.commandLine.appendSwitch("remote-debugging-port", remoteDebugPort);
+  app.commandLine.appendSwitch("remote-allow-origins", `http://localhost:${remoteDebugPort}`);
+}
 
 // --- Session state (single active project at a time in M0) ---
 const session = {
   project: null,
   domain: "All",
+  focusedTask: null,
   cost: null,
   provider: null,
   providerNote: null,
@@ -54,10 +66,26 @@ const session = {
 };
 
 let autonomyTimer = null;
+let runnerTimer = null;
 
 function stopAutonomyTimer() {
   if (autonomyTimer) clearInterval(autonomyTimer);
   autonomyTimer = null;
+}
+
+function stopRunnerTimer() {
+  if (runnerTimer) clearInterval(runnerTimer);
+  runnerTimer = null;
+}
+
+function runRunnerCycle(extraPolicy = {}, { force = false } = {}) {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return autonomyRunner.runCycle({
+    projectSlug: session.project.slug,
+    projectPath: session.project.path,
+    force,
+    policy: extraPolicy,
+  });
 }
 
 function autonomyStatus() {
@@ -325,50 +353,43 @@ ipcMain.handle("domain:define", (_e, domainDef) => {
     if (/[\\/]/.test(cleanName)) return { ok: false, reason: "Domain name cannot contain path separators" };
     let relativePath = domainDef.relativePath ? String(domainDef.relativePath).trim() : null;
     if (relativePath && !safeProjectPath(relativePath)) return { ok: false, reason: "Domain path is outside the project" };
-    const responsibilities = Array.isArray(domainDef.responsibilities)
-      ? domainDef.responsibilities
-      : String(domainDef.responsibilities || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+    const responsibilities = Array.isArray(domainDef.responsibilities || domainDef.boundaries)
+      ? (domainDef.responsibilities || domainDef.boundaries)
+      : String(domainDef.responsibilities || domainDef.boundaries || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+    const features = Array.isArray(domainDef.features || domainDef.initialFeatures || domainDef.activeEpics)
+      ? (domainDef.features || domainDef.initialFeatures || domainDef.activeEpics)
+      : String(domainDef.features || domainDef.initialFeatures || domainDef.activeEpics || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
     const coreAgents = Array.isArray(domainDef.coreAgents)
       ? domainDef.coreAgents
       : String(domainDef.coreAgents || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
-    if (domainDef.createScaffold) {
-      relativePath = relativePath || path.join("domains", cleanName.toLowerCase().replace(/\s+/g, "-"));
-      const safe = safeProjectPath(relativePath);
-      if (!safe) return { ok: false, reason: "Domain path is outside the project" };
-      fs.mkdirSync(safe.resolved, { recursive: true });
-      const agentsPath = path.join(safe.resolved, "AGENTS.md");
-      if (!fs.existsSync(agentsPath)) {
-        fs.writeFileSync(agentsPath,
-          `# ${cleanName}\n\n` +
-          `**Purpose**: ${domainDef.purpose || ""}\n\n` +
-          `**Overarching Goal**: ${domainDef.overarchingGoal || domainDef.currentState || ""}\n\n` +
-          `## Responsibilities\n\n` +
-          `${responsibilities.map((r) => `- ${r}`).join("\n") || "- TBD"}\n\n` +
-          `## Team Agents\n\n` +
-          `${coreAgents.map((a) => `- ${a}`).join("\n") || "- TBD"}\n`,
-          "utf-8");
-      }
-    }
+    if (domainDef.createScaffold) relativePath = relativePath || path.join("domains", domains.domainSlug(cleanName));
     const definition = domains.defineDomain(session.project.slug, {
       ...domainDef,
       name: cleanName,
+      boundaries: responsibilities,
       responsibilities,
+      features,
       coreAgents,
       relativePath,
       sourcePath: relativePath ? path.join(session.project.path, relativePath) : domainDef.sourcePath,
       sourceType: domainDef.sourceType || (relativePath ? "manual-scaffold" : "manual"),
+      userConfirmed: domainDef.userConfirmed !== false,
+    }, {
+      projectPath: session.project.path,
+      createScaffold: domainDef.createScaffold !== false,
+      createHandoff: domainDef.createHandoff !== false,
     });
     rememberProjectDomain(definition.name, definition.sourceType);
     return { ok: true, definition };
   } catch (e) {
-    return { ok: false, reason: e.message };
+    return { ok: false, reason: e.message, missing: e.missing || null };
   }
 });
 
 ipcMain.handle("domain:get", (_e, domainName) => {
   if (!session.project) return { ok: false, reason: "No project open" };
   try {
-    const domain = domains.getDomain(session.project.slug, domainName);
+    const domain = domains.getDomain(session.project.slug, domainName, { projectPath: session.project.path });
     return { ok: true, domain };
   } catch (e) {
     return { ok: false, reason: e.message };
@@ -378,7 +399,7 @@ ipcMain.handle("domain:get", (_e, domainName) => {
 ipcMain.handle("domain:get_all", () => {
   if (!session.project) return { ok: false, reason: "No project open" };
   try {
-    const allDomains = domains.getAllDomains(session.project.slug);
+    const allDomains = domains.getAllDomains(session.project.slug, { projectPath: session.project.path });
     return { ok: true, domains: allDomains };
   } catch (e) {
     return { ok: false, reason: e.message };
@@ -419,7 +440,7 @@ ipcMain.handle("domain:ingest", () => {
 ipcMain.handle("domain:get_path", (_e, domainName) => {
   if (!session.project) return { ok: false, reason: "No project open" };
   try {
-    const domain = domains.getDomain(session.project.slug, domainName);
+    const domain = domains.getDomain(session.project.slug, domainName, { projectPath: session.project.path });
     if (!domain) return { ok: false, reason: "Domain not found" };
     
     // sourcePath is already the full path from detection
@@ -436,6 +457,108 @@ ipcMain.handle("domain:get_path", (_e, domainName) => {
     };
   } catch (e) {
     return { ok: false, reason: e.message };
+  }
+});
+
+ipcMain.handle("domain:create_handoff", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "No project open" };
+  return domains.createHandoffRecord({
+    projectSlug: session.project.slug,
+    projectPath: session.project.path,
+    domain: info.domain || session.domain,
+    title: info.title,
+    status: info.status || "pending",
+    userConfirmation: !!info.userConfirmation,
+    sourceLinks: info.sourceLinks || [],
+    capturedEntities: info.capturedEntities || [],
+    suggestedAgendaItems: info.suggestedAgendaItems || [],
+    body: info.body || "",
+  });
+});
+
+ipcMain.handle("domain:list_handoffs", (_e, domainName) => {
+  if (!session.project) return { ok: false, reason: "No project open" };
+  return domains.listHandoffs({ projectPath: session.project.path, domain: domainName || session.domain });
+});
+
+ipcMain.handle("domain:create_agenda_item", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "No project open" };
+  return domains.createAgendaItem({
+    projectSlug: session.project.slug,
+    projectPath: session.project.path,
+    domain: info.domain || session.domain,
+    item: info.item || info,
+  });
+});
+
+ipcMain.handle("domain:propose_agenda_from_handoff", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "No project open" };
+  return domains.proposeAgendaFromHandoff({
+    projectSlug: session.project.slug,
+    projectPath: session.project.path,
+    domain: info.domain || session.domain,
+    handoffId: info.handoffId,
+  });
+});
+
+ipcMain.handle("domain:save_meeting_artifact", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "No project open" };
+  return domains.saveMeetingArtifact({
+    projectSlug: session.project.slug,
+    projectPath: session.project.path,
+    domain: info.domain || session.domain,
+    room: info.room,
+    agenda: info.agenda,
+    participants: info.participants,
+    expectedOutcome: info.expectedOutcome,
+    requirements: info.requirements,
+    sourceHandoff: info.sourceHandoff,
+    sourceContext: info.sourceContext,
+  });
+});
+
+ipcMain.handle("domain_architect:start", (_e, seed = {}) => {
+  if (!session.project) return { ok: false, reason: "No project open" };
+  try {
+    return { ok: true, session: domainArchitect.start(session.project.slug, seed || {}) };
+  } catch (e) {
+    return { ok: false, reason: e.message };
+  }
+});
+
+ipcMain.handle("domain_architect:get", (_e, id) => {
+  if (!session.project) return { ok: false, reason: "No project open" };
+  const architectSession = domainArchitect.get(session.project.slug, id);
+  return architectSession ? { ok: true, session: architectSession } : { ok: false, reason: "Domain Architect session not found" };
+});
+
+ipcMain.handle("domain_architect:answer", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "No project open" };
+  return domainArchitect.answer(session.project.slug, info.id, info.answer, info.field);
+});
+
+ipcMain.handle("domain_architect:update", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "No project open" };
+  return domainArchitect.updateDraft(session.project.slug, info.id, info.patch || {});
+});
+
+ipcMain.handle("domain_architect:confirm", (_e, id) => {
+  if (!session.project) return { ok: false, reason: "No project open" };
+  try {
+    const pkg = domainArchitect.confirmationPackage(session.project.slug, id);
+    if (!pkg.ok) return pkg;
+    const missing = domains.validateDomainDefinition(pkg.domainPackage);
+    if (missing.length) return { ok: false, reason: `Missing required domain fields: ${missing.join(", ")}`, missing, session: pkg.session };
+    const definition = domains.defineDomain(session.project.slug, pkg.domainPackage, {
+      projectPath: session.project.path,
+      createScaffold: true,
+      createHandoff: true,
+    });
+    rememberProjectDomain(definition.name, definition.sourceType);
+    domainArchitect.updateDraft(session.project.slug, id, { status: "confirmed" });
+    return { ok: true, definition, session: pkg.session };
+  } catch (e) {
+    return { ok: false, reason: e.message, missing: e.missing || null };
   }
 });
 
@@ -847,6 +970,53 @@ ipcMain.handle("agents:terminal_send", (_e, { agentId, text } = {}) => {
 ipcMain.handle("agents:set_persona", (_e, { agentId, personaId } = {}) => setHarnessAgentPersona(agentId, personaId));
 ipcMain.handle("personas:create", (_e, persona = {}) => createHarnessPersona(persona));
 
+// --- Editable file-based personas (markdown), scoped to project + domain ---
+// Backed by main/core/personas.js. Generation uses the Gemma utility model
+// (Cloudflare AI Gateway -> Vertex), NOT the conversational CEO (Hermes).
+ipcMain.handle("personas:files_list", () => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return { ok: true, personas: personas.list(session.project.path, session.domain) };
+});
+ipcMain.handle("personas:read", (_e, id) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return personas.read(session.project.path, session.domain, id);
+});
+ipcMain.handle("personas:save", (_e, { id, content } = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return personas.save(session.project.path, session.domain, id, content);
+});
+ipcMain.handle("personas:delete", (_e, id) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return personas.remove(session.project.path, session.domain, id);
+});
+ipcMain.handle("personas:generate", async (_e, { name, brief, save = false } = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  if (!String(name || "").trim()) return { ok: false, reason: "persona name required" };
+  const { provider, note } = createUtilityProvider();
+  if (provider.id === "null") {
+    return { ok: false, reason: note || "no generation model configured (set CF_AI_GATEWAY_URL + CF_API_TOKEN)" };
+  }
+  const prompt = personas.buildGeneratePrompt(name, brief, session.domain);
+  try {
+    const { text, usage } = await provider.complete({
+      system: "You write crisp, high-signal agent persona briefs in Markdown.",
+      messages: [{ role: "user", content: prompt }],
+      maxTokens: 1200,
+    });
+    const content = personas.cleanGenerated(text);
+    if (!content) return { ok: false, reason: "model returned empty content" };
+    let saved = null;
+    if (save) {
+      const res = personas.save(session.project.path, session.domain, name, content);
+      if (!res.ok) return res;
+      saved = res.persona;
+    }
+    return { ok: true, name, content, saved, model: usage && usage.model };
+  } catch (e) {
+    return { ok: false, reason: e.message };
+  }
+});
+
 // --- Personas & Skills ---
 ipcMain.handle("personas:list", () => {
   const builtin = [
@@ -1002,7 +1172,16 @@ ipcMain.handle("hermes:ask", async (_e, message) => {
   if (session.cost && !session.cost.canProceed().ok) {
     return { ok: false, reason: "Halted by cost guardrail" };
   }
-  return hermes.ask(message);
+  const contextBits = [];
+  if (session.project) contextBits.push(`Project: ${session.project.name || session.project.slug || "unknown"}`);
+  if (session.domain) contextBits.push(`Domain: ${session.domain}`);
+  if (session.focusedTask && session.focusedTask.taskId) {
+    contextBits.push(`Focused task: ${session.focusedTask.taskTitle || session.focusedTask.taskId} (ID: ${session.focusedTask.taskId}, status: ${session.focusedTask.taskStatus || "unknown"}, board: ${session.focusedTask.board || "unknown"})`);
+  }
+  const msg = contextBits.length ? `[Context: ${contextBits.join(" | ")}]
+
+${message}` : message;
+  return hermes.ask(msg);
 });
 // Config panel: read config + authed providers/models, switch model, gateway control
 ipcMain.handle("hermes:config", () => hermes.getConfig());
@@ -1015,7 +1194,10 @@ ipcMain.handle("hermes:gateway_start", async () => {
   return hermes.gatewayStart();
 });
 ipcMain.handle("hermes:gateway_stop", () => hermes.gatewayStop());
-ipcMain.handle("hermes:focus_task", (_e, taskInfo) => hermes.focusTask(taskInfo));
+ipcMain.handle("hermes:focus_task", (_e, taskInfo) => {
+  session.focusedTask = taskInfo || null;
+  return hermes.focusTask(taskInfo);
+});
 ipcMain.handle("hermes:add_task", (_e, taskInfo) => hermes.addTask(taskInfo));
 ipcMain.handle("hermes:assign_task", (_e, taskInfo) => hermes.assignTask(taskInfo));
 ipcMain.handle("hermes:task_action", (_e, actionInfo) => hermes.taskAction(actionInfo));
@@ -1026,7 +1208,7 @@ ipcMain.handle("hermes:comment_task", (_e, commentInfo) => hermes.addComment(com
 function boardForDomain(explicitBoard, domainName) {
   if (explicitBoard) return explicitBoard;
   if (!session.project || !domainName || domainName === "All") return null;
-  const domain = domains.getDomain(session.project.slug, domainName);
+  const domain = domains.getDomain(session.project.slug, domainName, { projectPath: session.project.path });
   return domain && domain.kanbanBoard ? domain.kanbanBoard : null;
 }
 ipcMain.handle("domain_board:create_brief", (_e, brief = {}) =>
@@ -1034,6 +1216,7 @@ ipcMain.handle("domain_board:create_brief", (_e, brief = {}) =>
     ...brief,
     domain: brief.domain || session.domain || "All",
     board: boardForDomain(brief.board, brief.domain || session.domain || "All"),
+    projectPath: session.project && session.project.path,
     source: brief.source || "CEO Studio voice/planner intake",
   }, { projectSlug: session.project && session.project.slug }));
 ipcMain.handle("domain_board:create_bug", (_e, bug = {}) =>
@@ -1041,12 +1224,15 @@ ipcMain.handle("domain_board:create_bug", (_e, bug = {}) =>
     ...bug,
     domain: bug.domain || session.domain || "All",
     board: boardForDomain(bug.board, bug.domain || session.domain || "All"),
+    projectPath: session.project && session.project.path,
     source: bug.source || "CEO Studio voice/planner intake",
   }, { projectSlug: session.project && session.project.slug }));
 ipcMain.handle("domain_board:create_child_task", (_e, task = {}) =>
   domainBoard.createChildTask({
     ...task,
+    domain: task.domain || session.domain || "All",
     board: boardForDomain(task.board, task.domain || session.domain || "All"),
+    projectPath: session.project && session.project.path,
     requestedBy: task.requestedBy || "voice/planner",
   }, { projectSlug: session.project && session.project.slug }));
 ipcMain.handle("domain_board:record_asset", (_e, asset = {}) =>
@@ -1056,9 +1242,32 @@ ipcMain.handle("domain_board:record_asset", (_e, asset = {}) =>
   }, { projectSlug: session.project && session.project.slug }));
 ipcMain.handle("domain_board:decompose_brief", (_e, info = {}) =>
   domainBoard.decomposeBrief(info, { projectSlug: session.project && session.project.slug }));
+
+// New sectional decomposer (proposal + apply) – see brief-sectional-decomposer.md in Domain Lifecycle
+ipcMain.handle("domain_board:propose_brief_decomposition", (_e, info = {}) =>
+  domainBoard.proposeSectionalBreakdown({
+    ...info,
+    projectPath: session.project && session.project.path,
+    projectSlug: session.project && session.project.slug,
+  }));
+
+ipcMain.handle("domain_board:apply_brief_decomposition", (_e, proposal = {}) =>
+  domainBoard.applySectionalDecomposition(proposal, { projectSlug: session.project && session.project.slug }));
 ipcMain.handle("provenance:graph", (_e, parentId) => {
   if (!session.project) return { ok: false, reason: "open a project first" };
   return provenance.graph(session.project.slug, parentId);
+});
+ipcMain.handle("orchestration:summary", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return orchestrationOrg.summary(session.project.path, { domain: info.domain || session.domain || "All" });
+});
+ipcMain.handle("orchestration:route", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return orchestrationOrg.route(session.project.path, {
+    domain: info.domain || session.domain || "All",
+    status: info.status,
+    kind: info.kind,
+  });
 });
 ipcMain.handle("goals:list", (_e, filters = {}) => {
   if (!session.project) return { ok: false, reason: "open a project first" };
@@ -1088,6 +1297,8 @@ ipcMain.handle("autonomy:analyze_blocked", (_e, info = {}) => {
   return autonomy.analyzeBlocked({
     board: boardForDomain(info.board, domainName) || info.board,
     projectSlug: session.project && session.project.slug,
+    projectPath: session.project && session.project.path,
+    domain: domainName,
     dryRun: !!info.dryRun,
     limit: info.limit,
   });
@@ -1103,6 +1314,7 @@ ipcMain.handle("autonomy:configure", (_e, patch = {}) => {
       const domainName = session.domain || "All";
       autonomyLoop.runCycle({
         projectSlug: session.project.slug,
+        projectPath: session.project.path,
         board: boardForDomain(null, domainName) || hermes.currentBoard(),
         domain: domainName,
       });
@@ -1116,6 +1328,7 @@ ipcMain.handle("autonomy:run_cycle", (_e, info = {}) => {
   const domainName = info.domain || session.domain || "All";
   return autonomyLoop.runCycle({
     projectSlug: session.project.slug,
+    projectPath: session.project.path,
     board: boardForDomain(info.board, domainName) || info.board || hermes.currentBoard(),
     domain: domainName,
     force: !!info.force,
@@ -1130,6 +1343,7 @@ ipcMain.handle("autonomy:start", (_e, info = {}) => {
     const domainName = session.domain || "All";
     autonomyLoop.runCycle({
       projectSlug: session.project.slug,
+      projectPath: session.project.path,
       board: boardForDomain(info.board, domainName) || info.board || hermes.currentBoard(),
       domain: domainName,
     });
@@ -1142,6 +1356,37 @@ ipcMain.handle("autonomy:stop", () => {
   if (session.project) autonomyLoop.setPolicy(session.project.slug, { enabled: false });
   return { ok: true, running: false };
 });
+
+// --- Autonomy Runner: the self-driving swarm loop (plan -> assign -> Devin
+// execute -> review/test gate). Drives all boards from inside the app. ---
+ipcMain.handle("runner:status", () => {
+  if (!session.project) return { ok: false, reason: "open a project first", running: false };
+  return { ...autonomyRunner.status(session.project.slug), running: !!runnerTimer };
+});
+ipcMain.handle("runner:configure", (_e, patch = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return autonomyRunner.setPolicy(session.project.slug, patch || {});
+});
+ipcMain.handle("runner:run_once", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return runRunnerCycle(info.policy || {}, { force: true });
+});
+ipcMain.handle("runner:start", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  const configured = autonomyRunner.setPolicy(session.project.slug, { ...(info.policy || {}), enabled: true });
+  stopRunnerTimer();
+  // Kick a first cycle immediately so the swarm starts without waiting an interval.
+  const first = runRunnerCycle({}, { force: true });
+  const ms = Math.max(1, configured.policy.intervalMinutes) * 60 * 1000;
+  runnerTimer = setInterval(() => { try { runRunnerCycle({}); } catch (_) { /* logged in run record */ } }, ms);
+  if (runnerTimer.unref) runnerTimer.unref();
+  return { ok: true, running: true, policy: configured.policy, firstCycle: first };
+});
+ipcMain.handle("runner:stop", () => {
+  stopRunnerTimer();
+  if (session.project) autonomyRunner.setPolicy(session.project.slug, { enabled: false });
+  return { ok: true, running: false };
+});
 ipcMain.handle("self_repair:report_bug", (_e, bug = {}) => {
   if (!session.project) return { ok: false, reason: "open a project first" };
   const domainName = bug.domain || session.domain || "Engineering";
@@ -1150,7 +1395,46 @@ ipcMain.handle("self_repair:report_bug", (_e, bug = {}) => {
     domain: domainName,
     board: boardForDomain(bug.board, domainName) || bug.board,
     requestedBy: bug.requestedBy || "voice/planner",
-  }, { projectSlug: session.project.slug });
+  }, { projectSlug: session.project.slug, projectPath: session.project.path });
+});
+ipcMain.handle("self_repair:consult", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  const domainName = info.domain || session.domain || "Engineering";
+  const request = String(info.request || info.observedBehavior || info.title || "Diagnose and repair the reported issue.").trim();
+  const source = String(info.source || "voice-agent self-repair request").trim();
+  const result = selfRepair.reportSystemBug({
+    ...info,
+    domain: domainName,
+    board: boardForDomain(info.board, domainName) || info.board,
+    source,
+    observedBehavior: info.observedBehavior || request,
+    expectedBehavior: info.expectedBehavior || "The self-repair engineer should diagnose the issue or improvement, implement a verified fix when appropriate, log evidence, and commit the work.",
+    severity: info.severity || "medium",
+    createRepairTask: info.createRepairTask !== false,
+    requestedBy: info.requestedBy || "voice-agent/self-repair-consult",
+  }, { projectSlug: session.project.slug, projectPath: session.project.path });
+  if (!result || !result.ok) return result;
+  const bugId = result.bug && result.bug.task && result.bug.task.taskId;
+  const repairTaskId = result.repairTask && result.repairTask.task && result.repairTask.task.taskId;
+  const target = "self-repair-engineer";
+  const plan = mount.lookup(_projPath(), target);
+  const room = (plan && (plan.canonical_room || plan.default_room)) || "self-repair";
+  const sessionName = (plan && plan.tmux_session) || `pipe-${target}`;
+  let mountResult = null;
+  if (info.autoMount !== false && !mount.alive(sessionName)) {
+    mountResult = mount.mount(_projPath(), target);
+  }
+  const message = selfRepair.buildConsultMessage({
+    request,
+    source,
+    bugId,
+    repairTaskId,
+    bugTitle: info.title || (result.bug && result.bug.task && result.bug.task.title),
+    severity: info.severity || "medium",
+    evidence: info.evidence || info.output || info.evidencePath,
+  });
+  const post = mount.post(_projPath(), room, "Voice Agent", message);
+  return { ...result, room, post, mount: mountResult, message, target };
 });
 // AGUI: the local AG-UI server URL the renderer's HttpAgent connects to.
 ipcMain.handle("agui:url", () => aguiServer.url());
@@ -1160,6 +1444,7 @@ const _projPath = () => (session.project && session.project.path) || null;
 ipcMain.handle("registry:list", () => registry.read(_projPath()));
 ipcMain.handle("registry:personas", () => ({ ok: true, personas: registry.listPersonas(_projPath()) }));
 ipcMain.handle("registry:providers", () => ({ ok: true, providers: registry.listProviders() }));
+ipcMain.handle("registry:models", () => models.catalog(_projPath()));
 ipcMain.handle("registry:create_agent", (_e, spec = {}) => registry.createAgent(_projPath(), spec));
 ipcMain.handle("registry:update_agent", (_e, { id, updates } = {}) => registry.updateAgent(_projPath(), id, updates || {}));
 ipcMain.handle("registry:delete_agent", (_e, id) => registry.deleteAgent(_projPath(), id));
@@ -1354,7 +1639,16 @@ ipcMain.handle("agent:ask", async (_e, prompt) => {
   if (session.cost && !session.cost.canProceed().ok) {
     return { text: "⛔ Halted by cost guardrail.", halted: true, cost: session.cost.status() };
   }
-  const r = await hermes.ask(prompt);
+  const contextBits = [];
+  if (session.project) contextBits.push(`Project: ${session.project.name || session.project.slug || "unknown"}`);
+  if (session.domain) contextBits.push(`Domain: ${session.domain}`);
+  if (session.focusedTask && session.focusedTask.taskId) {
+    contextBits.push(`Focused task: ${session.focusedTask.taskTitle || session.focusedTask.taskId} (ID: ${session.focusedTask.taskId}, status: ${session.focusedTask.taskStatus || "unknown"}, board: ${session.focusedTask.board || "unknown"})`);
+  }
+  const msg = contextBits.length ? `[Context: ${contextBits.join(" | ")}]
+
+${prompt}` : prompt;
+  const r = await hermes.ask(msg);
   const cost = session.cost ? session.cost.status() : null;
   if (!r.ok) return { text: r.reason || "CEO unavailable.", error: true, cost };
   return { text: r.reply, cost, halted: false };
@@ -1715,7 +2009,12 @@ if (!gotLock) {
     mainWin = createWindow();
     // The cockpit is up, so the CEO should be too: ensure the Hermes gateway
     // (which also runs the Kanban dispatcher → the swarm) is running.
-    try { hermes.ensureUp(); } catch { /* best-effort; never block UI */ }
+    try {
+      const ceo = hermes.ensureUp();
+      if (!ceo || !ceo.up) console.warn("[hermes] CEO gateway startup did not report online:", ceo && (ceo.reason || ceo.serviceReason || ceo.gatewayState));
+    } catch (e) {
+      console.warn("[hermes] CEO gateway startup failed:", e && e.message);
+    }
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) mainWin = createWindow();
     });
