@@ -294,6 +294,7 @@
       <div class="flex items-center gap-1 bg-neutral-800/50 rounded-md p-0.5">
         <button id="tab-kanban" class="tab-btn px-3 py-1 text-xs font-medium rounded-md transition bg-neutral-700 text-neutral-100">Kanban</button>
         <button id="tab-agents" class="tab-btn px-3 py-1 text-xs font-medium rounded-md transition text-neutral-400 hover:text-neutral-200">Agents</button>
+        <button id="tab-autonomy" class="tab-btn px-3 py-1 text-xs font-medium rounded-md transition text-neutral-400 hover:text-neutral-200">Autonomy</button>
         <button id="tab-meetings" class="tab-btn px-3 py-1 text-xs font-medium rounded-md transition text-neutral-400 hover:text-neutral-200">Meetings</button>
         <button id="tab-config" class="tab-btn px-3 py-1 text-xs font-medium rounded-md transition text-neutral-400 hover:text-neutral-200">Config</button>
       </div>
@@ -399,7 +400,15 @@
           <div class="text-neutral-600 text-sm">Loading agents...</div>
         </div>
       </div>
-      
+
+      <!-- Autonomy section: live swarm status -->
+      <div id="section-autonomy" class="hidden flex-1 min-w-0 flex flex-col">
+        <div class="px-3 py-1.5 text-[11px] uppercase tracking-wider text-neutral-500 border-b border-neutral-800/60">Autonomy Swarm Status</div>
+        <div id="dash-autonomy" class="flex-1 overflow-auto p-4">
+          <div class="text-neutral-600 text-sm">Loading swarm status...</div>
+        </div>
+      </div>
+
       <!-- Config section -->
       <div id="section-config" class="hidden flex-1 min-w-0 flex flex-col">
         <div class="px-3 py-1.5 text-[11px] uppercase tracking-wider text-neutral-500 border-b border-neutral-800/60">Configuration</div>

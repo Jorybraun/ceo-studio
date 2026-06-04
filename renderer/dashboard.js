@@ -18,10 +18,11 @@
   let open = false;
   let refreshTimer = null;
   let statusTimer = null;
-  let currentTab = "kanban";  // current tab: kanban, agents, config
+  let currentTab = "kanban";  // current tab: kanban, agents, autonomy, config
   let agents = [];            // cached agent list
   let agentFilter = "all";    // current agent filter
   let selectedAgentId = null;
+  let swarmPollTimer = null;  // timer for swarm status polling
 
   // Preferred left-to-right column order; unknown statuses are appended.
   const COL_ORDER = ["planning", "triage", "bug", "todo", "ready", "running", "blocked", "scheduled", "review", "done"];
@@ -391,19 +392,20 @@
     }
     
     // Show/hide sections
-    ["section-kanban", "section-agents", "section-config", "section-meetings"].forEach((s) => {
+    ["section-kanban", "section-agents", "section-autonomy", "section-config", "section-meetings"].forEach((s) => {
       const el = $(s); if (el) el.classList.add("hidden");
     });
     const sec = $(`section-${tabName}`); if (sec) sec.classList.remove("hidden");
-    
+
     // Show/hide control bars
     $("kanban-controls").classList.add("hidden");
     $("agents-controls").classList.add("hidden");
     if (tabName === "kanban") $("kanban-controls").classList.remove("hidden");
     if (tabName === "agents") $("agents-controls").classList.remove("hidden");
-    
+
     // Load data for the tab
     if (tabName === "agents") loadAgents();
+    if (tabName === "autonomy") loadAutonomy(); else stopSwarmPoll();
     if (tabName === "meetings") loadMeetings(); else stopMeetingPoll();
   }
 
@@ -506,6 +508,103 @@
       }
     }
     if (!r.running) stopMeetingPoll();
+  }
+
+  // --- Autonomy tab ---
+  function stopSwarmPoll() {
+    if (swarmPollTimer) { clearInterval(swarmPollTimer); swarmPollTimer = null; }
+  }
+
+  async function loadAutonomy() {
+    if (!ceo.autonomySwarm) return;
+    const host = $("dash-autonomy");
+    if (!host) return;
+    host.innerHTML = '<div class="text-neutral-600 text-sm">Loading swarm status...</div>';
+    await refreshSwarm();
+    swarmPollTimer = setInterval(refreshSwarm, 5000);
+  }
+
+  async function refreshSwarm() {
+    if (!ceo.autonomySwarm) return;
+    const host = $("dash-autonomy");
+    if (!host) return;
+    try {
+      const r = await ceo.autonomySwarm();
+      if (!r || !r.ok) {
+        host.innerHTML = `<div class="text-red-400/80 text-sm">Could not load swarm status: ${r ? r.reason : "unknown"}</div>`;
+        return;
+      }
+      renderSwarm(r.swarm);
+    } catch (e) {
+      host.innerHTML = `<div class="text-red-400/80 text-sm">Error loading swarm: ${esc(e.message)}</div>`;
+    }
+  }
+
+  function renderSwarm(swarm) {
+    const host = $("dash-autonomy");
+    if (!host) return;
+    const workers = (swarm && swarm.workers) || [];
+    const updatedAt = swarm && swarm.updatedAt ? new Date(swarm.updatedAt).toLocaleString() : "never";
+
+    if (!workers.length) {
+      host.innerHTML = `
+        <div class="rounded-2xl border border-neutral-800 bg-neutral-950/45 p-4">
+          <div class="flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full bg-neutral-500"></span>
+            <span class="text-sm font-medium text-neutral-300">No active workers</span>
+          </div>
+          <div class="mt-2 text-xs text-neutral-500">Swarm is idle. Last updated: ${esc(updatedAt)}</div>
+        </div>
+      `;
+      return;
+    }
+
+    const workerCards = workers.map((w) => {
+      const statusColor = "bg-emerald-500";
+      return `<div class="rounded-xl border border-neutral-800 bg-neutral-900/60 p-3">
+        <div class="flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full ${statusColor} animate-pulse"></span>
+          <span class="text-sm font-medium text-neutral-200">${esc(w.agentId || "unknown")}</span>
+          <span class="ml-auto text-[10px] font-mono text-neutral-500">PID ${w.pid || "?"}</span>
+        </div>
+        <div class="mt-2 space-y-1 text-xs">
+          <div class="flex items-center gap-2 text-neutral-400">
+            <span class="text-neutral-600">Board:</span>
+            <span class="font-mono">${esc(w.board || "unknown")}</span>
+          </div>
+          <div class="flex items-center gap-2 text-neutral-400">
+            <span class="text-neutral-600">Task:</span>
+            <span class="font-mono">${esc(w.taskId || "unknown")}</span>
+          </div>
+          ${w.title ? `<div class="flex items-start gap-2 text-neutral-400">
+            <span class="text-neutral-600 shrink-0">Title:</span>
+            <span class="line-clamp-2">${esc(w.title)}</span>
+          </div>` : ""}
+          <div class="flex items-center gap-2 text-neutral-400">
+            <span class="text-neutral-600">Model:</span>
+            <span class="font-mono">${esc(w.model || "unknown")}</span>
+          </div>
+        </div>
+      </div>`;
+    }).join("");
+
+    host.innerHTML = `
+      <div class="space-y-4">
+        <div class="rounded-2xl border border-emerald-500/25 bg-[radial-gradient(circle_at_top_left,rgba(16,185,129,0.12),transparent_32%),linear-gradient(135deg,rgba(23,23,23,0.92),rgba(10,10,10,0.86))] p-4">
+          <div class="flex items-center gap-3">
+            <div class="flex items-center gap-2">
+              <span class="w-3 h-3 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_12px_2px_rgba(16,185,129,0.4)]"></span>
+              <span class="text-base font-semibold text-neutral-100">Swarm Active</span>
+            </div>
+            <div class="ml-auto text-sm font-mono text-emerald-300">${workers.length} worker${workers.length !== 1 ? "s" : ""}</div>
+          </div>
+          <div class="mt-2 text-xs text-neutral-500">Last updated: ${esc(updatedAt)}</div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          ${workerCards}
+        </div>
+      </div>
+    `;
   }
 
   // --- Renderers ---
@@ -632,6 +731,8 @@
     open = false;
     $("dashboard").classList.add("hidden");
     clearInterval(refreshTimer);
+    stopSwarmPoll();
+    stopMeetingPoll();
   }
 
   // --- Config panel ---
@@ -857,10 +958,12 @@
     // Tab switching
     const tabKanban = $("tab-kanban");
     const tabAgents = $("tab-agents");
+    const tabAutonomy = $("tab-autonomy");
     const tabConfig = $("tab-config");
     const tabMeetings = $("tab-meetings");
     if (tabKanban) tabKanban.addEventListener("click", () => switchTab("kanban"));
     if (tabAgents) tabAgents.addEventListener("click", () => switchTab("agents"));
+    if (tabAutonomy) tabAutonomy.addEventListener("click", () => switchTab("autonomy"));
     if (tabMeetings) tabMeetings.addEventListener("click", () => switchTab("meetings"));
     if (tabConfig) tabConfig.addEventListener("click", () => {
       switchTab("config");

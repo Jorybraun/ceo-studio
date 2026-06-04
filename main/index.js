@@ -1786,6 +1786,20 @@ ipcMain.handle("autonomy:analyze_blocked", (_e, info = {}) => {
   });
 });
 ipcMain.handle("autonomy:status", () => autonomyStatus());
+ipcMain.handle("autonomy:swarm", () => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  try {
+    const { brainDir } = require("./core/paths");
+    const swarmPath = path.join(brainDir(session.project.slug), "autonomy", "runner", "swarm.json");
+    if (!fs.existsSync(swarmPath)) {
+      return { ok: true, swarm: { updatedAt: null, workers: [] } };
+    }
+    const swarm = JSON.parse(fs.readFileSync(swarmPath, "utf8"));
+    return { ok: true, swarm };
+  } catch (e) {
+    return { ok: false, reason: String(e.message || e) };
+  }
+});
 ipcMain.handle("autonomy:configure", (_e, patch = {}) => {
   if (!session.project) return { ok: false, reason: "open a project first" };
   const result = autonomyLoop.setPolicy(session.project.slug, patch || {});

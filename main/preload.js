@@ -119,6 +119,7 @@ contextBridge.exposeInMainWorld("ceo", {
   autonomyRunCycle: (info) => ipcRenderer.invoke("autonomy:run_cycle", info),
   autonomyStart: (info) => ipcRenderer.invoke("autonomy:start", info),
   autonomyStop: () => ipcRenderer.invoke("autonomy:stop"),
+  autonomySwarm: () => ipcRenderer.invoke("autonomy:swarm"),
   runnerStatus: () => ipcRenderer.invoke("runner:status"),
   runnerReport: () => ipcRenderer.invoke("runner:report"),
   runnerConfigure: (patch) => ipcRenderer.invoke("runner:configure", patch),
