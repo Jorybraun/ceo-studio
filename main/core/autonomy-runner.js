@@ -7,14 +7,18 @@
  * runtime/harness/architecture/AUTONOMY_RUNNER_PLAN.md. One cycle, per board:
  *
  *   1. ensure the Hermes gateway (CEO brain) is up
- *   2. goal review + blocked analysis (delegated to autonomy-loop)
- *   3. PLAN     — decompose planning-lane briefs into linked child tasks
- *   4. ASSIGN   — route unassigned actionable work to the owning registry agent
- *   5. EXECUTE  — spawn capped, real Devin (swe-1.6) workers on ready work,
+ *   2. STANDUP  — reconcile completed rooms and start due proposal-only cadence
+ *   3. REAP     — collect finished workers before optional portfolio work
+ *   4. goal review + blocked analysis (delegated to autonomy-loop)
+ *   5. RESEARCH — normalize raw triage intake through Hermes specify/promote
+ *   6. CLEANUP  — detect stale running cards with no live worker
+ *   7. PLAN     — decompose planning-lane briefs into linked child tasks
+ *   8. ASSIGN   — route unassigned actionable work to the owning registry agent
+ *   9. EXECUTE  — spawn capped, real Devin (swe-1.6) workers on ready work,
  *                 in the project repo, non-blocking (detached + reaped later)
- *   6. REVIEW   — a strong test gate: nothing reaches Done until the project's
+ *  10. REVIEW   — a strong test gate: nothing reaches Done until the project's
  *                 verification commands pass; failures file self-repair bugs
- *   7. persist a run record; never run overlapping cycles for the same project
+ *  11. persist a run record; never run overlapping cycles for the same project
  *
  * Why Devin directly (not the Hermes profile-worker dispatcher)?
  * Hermes spawns workers as `hermes -p <profile>` agents and has no Devin model
@@ -27,6 +31,7 @@
  * is fully testable without a live board, gateway, or Devin credits.
  */
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { spawn, execFileSync } = require("child_process");
 const { brainDir } = require("./paths");
@@ -37,6 +42,9 @@ const registry = require("./registry");
 const autonomyLoop = require("./autonomy-loop");
 const selfRepair = require("./self-repair");
 const meetings = require("./meetings");
+const standups = require("./standups");
+const unblocker = require("./unblocker");
+const briefRuns = require("./brief-runs");
 
 const DEFAULT_POLICY = {
   enabled: false,
@@ -44,15 +52,32 @@ const DEFAULT_POLICY = {
   boards: "all", // "all" | [slugs]
   domain: "All",
   dryRun: false, // master switch: when true, no board mutations, just propose
+  allowStandups: true, // start due proposal-only standups and reconcile completed rooms
+  maxStandupsPerCycle: 2,
+  allowGoalReview: true, // broad portfolio analysis; targeted cycles skip it
+  allowUnblocker: true, // blocked-lane plans + unblock work
+  maxBlockedUnblocksPerCycle: 10,
+  allowTriage: true, // TRIAGE phase: ask Hermes to normalize intake/specify briefs
+  maxTriagePerCycle: 3,
+  allowStaleRunningCleanup: true,
   allowDecompose: true, // PLAN phase
   allowAssign: true, // ASSIGN phase
   execute: true, // EXECUTE phase (spawn real Devin workers). User chose live, capped.
   allowReviewGate: true, // REVIEW phase (test gate -> Done / self-repair)
   model: "swe-1.6",
-  // Headcount is orchestrator-driven. 0 = unlimited (the orchestrator/CEO
-  // decides how many Devins to run); a positive number is a hard safety cap.
+  // Headcount safety caps. A positive number is a hard ceiling. 0 means
+  // "unlimited" and must be opted into EXPLICITLY — it is deliberately NOT the
+  // default, because an unconfigured runner defaulting to unlimited concurrency
+  // is exactly how a runaway self-repair loop burned a large amount of spend.
   maxDispatchPerCycle: 3, // new workers spawned per cycle (0 = unlimited)
-  maxConcurrentWorkers: 0, // total live Devin workers across all boards (0 = unlimited)
+  maxConcurrentWorkers: 3, // total live Devin workers across all boards (0 = unlimited)
+  // Self-repair $-spiral guard. A failed worker can file a repair task that is
+  // dispatched to another paid worker; if that repair ALSO fails (e.g. an
+  // unsatisfiable browser-E2E gate no headless `devin -p` worker can pass), the
+  // naive behaviour files yet another repair forever. After this many repair
+  // GENERATIONS, escalate to a human/CEO decision (leave the task blocked)
+  // instead of dispatching more workers. 0 = never auto-repair (always escalate).
+  maxRepairGenerations: 1,
   workerTimeoutMinutes: 45,
   // Unattended workers run non-interactively (`devin -p`): there is no human to
   // approve tool calls, so "auto" (read-only auto-approve) leaves them unable to
@@ -61,9 +86,11 @@ const DEFAULT_POLICY = {
   devinPermissionMode: "dangerous",
   protectedBoards: ["domain-lifecycle"], // human-only per its own design docs
   protectDecomposeOnProtected: true, // don't auto-decompose protected boards
+  triageLanes: ["triage"],
   decomposeLanes: ["planning"],
   assignLanes: ["todo", "ready", "bug", "review"],
   executeLanes: ["ready"],
+  targetTaskIds: [], // optional focus set for a goal-specific runner pass
   verifyCommands: [["npm", ["run", "check"]], ["npm", ["test"]]],
   staleWorkerSkipReap: false,
 };
@@ -109,23 +136,42 @@ function normalizePolicy(input = {}) {
     ...m,
     enabled: !!m.enabled,
     dryRun: !!m.dryRun,
+    allowStandups: m.allowStandups !== false,
+    allowGoalReview: m.allowGoalReview !== false,
     allowDecompose: m.allowDecompose !== false,
+    allowTriage: m.allowTriage !== false,
+    allowStaleRunningCleanup: m.allowStaleRunningCleanup !== false,
+    allowUnblocker: m.allowUnblocker !== false,
     allowAssign: m.allowAssign !== false,
     execute: m.execute !== false,
     allowReviewGate: m.allowReviewGate !== false,
     protectDecomposeOnProtected: m.protectDecomposeOnProtected !== false,
     intervalMinutes: clampPositive(m.intervalMinutes, DEFAULT_POLICY.intervalMinutes),
     maxDispatchPerCycle: Math.max(0, Number(m.maxDispatchPerCycle) || 0),
+    maxStandupsPerCycle: Math.max(1, Number(m.maxStandupsPerCycle) || DEFAULT_POLICY.maxStandupsPerCycle),
     maxConcurrentWorkers: Math.max(0, Number(m.maxConcurrentWorkers) || 0),
+    maxRepairGenerations: ((g) => (Number.isFinite(g) && g >= 0 ? Math.floor(g) : DEFAULT_POLICY.maxRepairGenerations))(Number(m.maxRepairGenerations)),
+    maxBlockedUnblocksPerCycle: Math.max(1, Number(m.maxBlockedUnblocksPerCycle) || DEFAULT_POLICY.maxBlockedUnblocksPerCycle),
+    maxTriagePerCycle: Math.max(1, Number(m.maxTriagePerCycle) || DEFAULT_POLICY.maxTriagePerCycle),
     workerTimeoutMinutes: clampPositive(m.workerTimeoutMinutes, DEFAULT_POLICY.workerTimeoutMinutes),
     devinPermissionMode: String(m.devinPermissionMode || DEFAULT_POLICY.devinPermissionMode),
     model: String(m.model || DEFAULT_POLICY.model),
     boards: m.boards === "all" || !Array.isArray(m.boards) ? "all" : m.boards.map(String),
     protectedBoards: arr(m.protectedBoards, DEFAULT_POLICY.protectedBoards),
+    triageLanes: arr(m.triageLanes, DEFAULT_POLICY.triageLanes),
     decomposeLanes: arr(m.decomposeLanes, DEFAULT_POLICY.decomposeLanes),
     assignLanes: arr(m.assignLanes, DEFAULT_POLICY.assignLanes),
     executeLanes: arr(m.executeLanes, DEFAULT_POLICY.executeLanes),
+    targetTaskIds: arr(m.targetTaskIds, DEFAULT_POLICY.targetTaskIds),
   };
+}
+
+function policyFromRequest(info = {}) {
+  if (!info || typeof info !== "object" || Array.isArray(info)) return {};
+  if (info.policy && typeof info.policy === "object" && !Array.isArray(info.policy)) {
+    return info.policy;
+  }
+  return info;
 }
 
 function getPolicy(slug) { return normalizePolicy(readJson(policyPath(slug), DEFAULT_POLICY)); }
@@ -164,24 +210,33 @@ function branchNameFor(board, taskId) {
 function ensureWorktree({ projectPath, board, taskId }) {
   const branch = branchNameFor(board, taskId);
   const wt = path.join(projectPath, ".worktrees", `${board}-${taskId}`.replace(/[^a-zA-Z0-9._-]+/g, "-"));
-  if (fs.existsSync(wt)) return { ok: true, worktree: wt, branch, reused: true };
+  if (fs.existsSync(wt)) {
+    let baseCommit = null;
+    try { baseCommit = String(_git(projectPath, ["merge-base", "HEAD", branch])).trim() || null; } catch { baseCommit = null; }
+    return { ok: true, worktree: wt, branch, baseCommit, reused: true };
+  }
   fs.mkdirSync(path.join(projectPath, ".worktrees"), { recursive: true });
+  const headCommit = String(_git(projectPath, ["rev-parse", "HEAD"])).trim();
   // If the branch already exists, attach to it; otherwise create it off HEAD.
   let hasBranch = false;
   try { _git(projectPath, ["rev-parse", "--verify", branch]); hasBranch = true; } catch { hasBranch = false; }
   const args = hasBranch ? ["worktree", "add", wt, branch] : ["worktree", "add", wt, "-b", branch, "HEAD"];
   _git(projectPath, args, 120000);
-  return { ok: true, worktree: wt, branch, reused: false };
+  let baseCommit = headCommit;
+  if (hasBranch) {
+    try { baseCommit = String(_git(projectPath, ["merge-base", "HEAD", branch])).trim() || headCommit; } catch { baseCommit = headCommit; }
+  }
+  return { ok: true, worktree: wt, branch, baseCommit, reused: false };
 }
 
 function defaultSpawnWorker({ projectPath, model, prompt, logPath, board, taskId, permissionMode }) {
   // Each worker runs in its own git worktree (isolation). Detached so the Devin
   // session outlives this cycle; output captured to a log file the next cycle
   // reaps. Mirrors how the Hermes dispatcher detaches its workers.
-  let worktree = projectPath, branch = null;
+  let worktree = projectPath, branch = null, baseCommit = null;
   try {
     const wt = ensureWorktree({ projectPath, board, taskId });
-    worktree = wt.worktree; branch = wt.branch;
+    worktree = wt.worktree; branch = wt.branch; baseCommit = wt.baseCommit || null;
   } catch (e) {
     return { ok: false, reason: `worktree setup failed: ${String(e.message || e).slice(0, 300)}` };
   }
@@ -196,7 +251,78 @@ function defaultSpawnWorker({ projectPath, model, prompt, logPath, board, taskId
     stdio: ["ignore", out, out],
   });
   child.unref();
-  return { ok: true, pid: child.pid, worktree, branch };
+  return { ok: true, pid: child.pid, worktree, branch, baseCommit };
+}
+
+function defaultListChildPids(pid) {
+  try {
+    return String(execFileSync("pgrep", ["-P", String(pid)], {
+      encoding: "utf8",
+      timeout: 2000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }))
+      .split(/\s+/)
+      .map(Number)
+      .filter((value) => Number.isInteger(value) && value > 0);
+  } catch {
+    return [];
+  }
+}
+
+function collectDescendantPids(rootPid, listChildren = defaultListChildPids) {
+  const found = [];
+  const queue = [Number(rootPid)];
+  const seen = new Set(queue);
+  while (queue.length) {
+    const parent = queue.shift();
+    for (const child of listChildren(parent) || []) {
+      const childPid = Number(child);
+      if (!Number.isInteger(childPid) || childPid <= 0 || seen.has(childPid)) continue;
+      seen.add(childPid);
+      found.push(childPid);
+      queue.push(childPid);
+    }
+  }
+  return found;
+}
+
+function terminateProcessTree(pid, { listChildren = defaultListChildPids, kill = process.kill } = {}) {
+  const workerPid = Number(pid);
+  if (!Number.isInteger(workerPid) || workerPid <= 0) {
+    return { ok: false, reason: "valid worker pid required" };
+  }
+  const descendants = collectDescendantPids(workerPid, listChildren).reverse();
+  const signaled = [];
+  const failures = [];
+  for (const targetPid of [...descendants, workerPid]) {
+    try {
+      kill(-targetPid, "SIGTERM");
+      signaled.push({ pid: targetPid, processGroup: true });
+    } catch (groupError) {
+      try {
+        kill(targetPid, "SIGTERM");
+        signaled.push({ pid: targetPid, processGroup: false });
+      } catch (processError) {
+        failures.push({
+          pid: targetPid,
+          reason: String(processError && processError.message || groupError && groupError.message || "worker termination failed"),
+        });
+      }
+    }
+  }
+  return {
+    ok: signaled.length > 0,
+    pid: workerPid,
+    signal: "SIGTERM",
+    descendants,
+    signaled,
+    failures,
+    reason: signaled.length ? undefined : (failures[0] && failures[0].reason || "worker termination failed"),
+  };
+}
+
+function defaultTerminateWorker(pid) {
+  return terminateProcessTree(pid);
 }
 
 function defaultReadLogTail(logPath, max = 4000) {
@@ -206,24 +332,192 @@ function defaultReadLogTail(logPath, max = 4000) {
   } catch { return ""; }
 }
 
-function defaultVerify({ projectPath, cwd, commands, timeoutMs = 1000 * 60 * 8 }) {
+function readPackageScripts(projectPath) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(projectPath, "package.json"), "utf8"));
+    return pkg && pkg.scripts && typeof pkg.scripts === "object" ? pkg.scripts : {};
+  } catch {
+    return {};
+  }
+}
+
+function npmScriptName(cmd, args = []) {
+  if (cmd !== "npm") return "";
+  if (args[0] === "run" && args[1]) return String(args[1]);
+  if (args[0] === "test") return "test";
+  return "";
+}
+
+function runVerifyCommand(cmd, args, cwd, timeoutMs) {
+  try {
+    const out = execFileSync(cmd, args, {
+      cwd,
+      encoding: "utf8",
+      timeout: timeoutMs,
+      maxBuffer: 16 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return { ok: true, tail: String(out).slice(-2500) };
+  } catch (e) {
+    const tail = String((e.stdout || "") + "\n" + (e.stderr || e.message || "")).slice(-5000);
+    return { ok: false, tail };
+  }
+}
+
+function failureSignatures(output) {
+  const plain = String(output || "")
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .replace(/\.worktrees\/[^/\s]+\/(?=(?:workers|src|agent-harness|e2e|test|tests)\/)/g, "")
+    .replace(/\/[^\s:]*\/(?=(?:workers|src|agent-harness|e2e|test|tests)\/)/g, "")
+    .replace(/\/[^\s:]+\/\.worktrees\/[^\s:]+/g, "<worktree>")
+    .replace(/\/Users\/[^\s:]+/g, "<path>")
+    .replace(/\b\d+(?:\.\d+)?(?:ms|s)\b/g, "<time>")
+    .toLowerCase();
+  const lines = plain.split(/\r?\n/)
+    .map((line) => line.trim().replace(/\b\d+\b/g, "#"))
+    .filter((line) => (
+      /unhandled rejection|missing script|error:|failed|failing|problems \(|\.test\.[jt]sx?|\.spec\.[jt]sx?/.test(line)
+    ))
+    .map((line) => line.slice(0, 500));
+  return [...new Set(lines)];
+}
+
+function normalizeFailurePath(value) {
+  return String(value || "")
+    .replace(/^["'`]+|["'`,.:;]+$/g, "")
+    .replace(/^.*?\.worktrees\/[^/]+\//, "")
+    .replace(/^.*?(?=(?:workers|src|agent-harness|e2e|test|tests)\/)/, "")
+    .replace(/:\d+(?::\d+)?$/, "");
+}
+
+function failureFingerprints(output) {
+  const lines = String(output || "")
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .split(/\r?\n/);
+  const fingerprints = [];
+  const pathPattern = /((?:\.worktrees\/[^/]+\/)?(?:workers|src|agent-harness|e2e|test|tests)\/[^\s"'`]+\.(?:[cm]?[jt]sx?))(?::\d+){0,2}/i;
+  for (let i = 0; i < lines.length; i += 1) {
+    const error = lines[i].match(/^\s*Error:\s*(.+?)\s*$/i);
+    if (error) {
+      let file = "";
+      for (let j = i + 1; j < Math.min(lines.length, i + 18); j += 1) {
+        const pathMatch = lines[j].match(pathPattern);
+        if (pathMatch) {
+          file = normalizeFailurePath(pathMatch[1]);
+          break;
+        }
+      }
+      const message = error[1].trim().toLowerCase().replace(/\s+/g, " ");
+      fingerprints.push(`error:${message}|file:${file || "unknown"}`);
+    }
+    const failedFile = lines[i].match(/\b(?:FAIL|FAILED)\b.*?((?:workers|src|agent-harness|e2e|test|tests)\/[^\s"'`]+\.(?:[cm]?[jt]sx?))/i);
+    if (failedFile) fingerprints.push(`failed-file:${normalizeFailurePath(failedFile[1])}`);
+    const missingScript = lines[i].match(/missing script:\s*["']?([^"'\s]+)["']?/i);
+    if (missingScript) fingerprints.push(`missing-script:${missingScript[1].toLowerCase()}`);
+  }
+  return [...new Set(fingerprints)];
+}
+
+function matchesBaselineFailure(workerTail, baselineTail) {
+  const workerFingerprints = failureFingerprints(workerTail);
+  const baselineFingerprints = new Set(failureFingerprints(baselineTail));
+  if (workerFingerprints.length) {
+    return workerFingerprints.every((fingerprint) => baselineFingerprints.has(fingerprint));
+  }
+  const worker = failureSignatures(workerTail);
+  const baseline = new Set(failureSignatures(baselineTail));
+  return worker.length > 0 && worker.every((line) => baseline.has(line));
+}
+
+function defaultResolveBaselineRef({ projectPath, branch } = {}) {
+  if (!projectPath || !branch) return null;
+  try {
+    return String(_git(projectPath, ["merge-base", "HEAD", branch])).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function prepareBaselineCheckout(projectPath, baselineRef) {
+  if (!projectPath || !baselineRef) return null;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ceo-studio-baseline-"));
+  const checkout = path.join(root, "repo");
+  try {
+    _git(projectPath, ["worktree", "add", "--detach", checkout, baselineRef], 120000);
+    const sourceModules = path.join(projectPath, "node_modules");
+    const targetModules = path.join(checkout, "node_modules");
+    if (fs.existsSync(sourceModules) && !fs.existsSync(targetModules)) {
+      fs.symlinkSync(sourceModules, targetModules, "dir");
+    }
+    return { root, checkout };
+  } catch (e) {
+    try { _git(projectPath, ["worktree", "remove", "--force", checkout], 60000); } catch { /* ignore */ }
+    fs.rmSync(root, { recursive: true, force: true });
+    return null;
+  }
+}
+
+function cleanupBaselineCheckout(projectPath, baseline) {
+  if (!baseline) return;
+  try { _git(projectPath, ["worktree", "remove", "--force", baseline.checkout], 60000); } catch { /* ignore */ }
+  fs.rmSync(baseline.root, { recursive: true, force: true });
+}
+
+function defaultVerify({ projectPath, cwd, commands, baselineRef, timeoutMs = 1000 * 60 * 8 }) {
   const results = [];
   let allOk = true;
-  for (const [cmd, args] of commands || []) {
-    try {
-      const out = execFileSync(cmd, args, {
-        cwd: cwd || projectPath || process.cwd(),
-        encoding: "utf8",
-        timeout: timeoutMs,
-        maxBuffer: 16 * 1024 * 1024,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      results.push({ cmd: `${cmd} ${(args || []).join(" ")}`, ok: true, tail: String(out).slice(-1500) });
-    } catch (e) {
+  const verifyCwd = cwd || projectPath || process.cwd();
+  const baselineCheckout = prepareBaselineCheckout(projectPath, baselineRef);
+  const baselineCwd = (baselineCheckout && baselineCheckout.checkout) || projectPath || verifyCwd;
+  const baseScripts = readPackageScripts(baselineCwd);
+  try {
+    for (const [cmd, args] of commands || []) {
+      const label = `${cmd} ${(args || []).join(" ")}`.trim();
+      const script = npmScriptName(cmd, args || []);
+      if (script && !baseScripts[script]) {
+        results.push({
+          cmd: label,
+          ok: true,
+          skipped: true,
+          reason: `base project does not define npm script "${script}"`,
+          tail: `Skipped: base project does not define npm script "${script}".`,
+        });
+        continue;
+      }
+
+      const worker = runVerifyCommand(cmd, args || [], verifyCwd, timeoutMs);
+      if (worker.ok) {
+        results.push({ cmd: label, ok: true, tail: worker.tail.slice(-1500) });
+        continue;
+      }
+
+      const canCompareBaseline = baselineCwd && path.resolve(verifyCwd) !== path.resolve(baselineCwd);
+      let baselineResult = null;
+      if (canCompareBaseline) {
+        baselineResult = runVerifyCommand(cmd, args || [], baselineCwd, timeoutMs);
+        if (!baselineResult.ok && matchesBaselineFailure(worker.tail, baselineResult.tail)) {
+          results.push({
+            cmd: label,
+            ok: true,
+            baselineFailure: true,
+            reason: "worker failure matches the clean base commit's existing failure signature",
+            tail: worker.tail.slice(-2500),
+            baselineTail: baselineResult.tail.slice(-2500),
+          });
+          continue;
+        }
+      }
+
       allOk = false;
-      const tail = String((e.stdout || "") + "\n" + (e.stderr || e.message || "")).slice(-2500);
-      results.push({ cmd: `${cmd} ${(args || []).join(" ")}`, ok: false, tail });
+      results.push({
+        cmd: label,
+        ok: false,
+        tail: worker.tail.slice(-2500),
+        baselineTail: baselineResult ? baselineResult.tail.slice(-2500) : "",
+      });
     }
+  } finally {
+    cleanupBaselineCheckout(projectPath, baselineCheckout);
   }
   return { ok: allOk, results };
 }
@@ -234,10 +528,49 @@ function defaultMergeBranch({ projectPath, branch }) {
   try {
     const ahead = Number(String(_git(projectPath, ["rev-list", "--count", `HEAD..${branch}`])).trim() || "0");
     if (!ahead) return { ok: true, merged: false, reason: "branch has no new commits" };
+    const cherry = String(_git(projectPath, ["cherry", "HEAD", branch])).trim().split(/\r?\n/).filter(Boolean);
+    if (cherry.length && cherry.every((line) => line.startsWith("- "))) {
+      return {
+        ok: true,
+        merged: true,
+        integrated: true,
+        commits: 0,
+        equivalentCommits: cherry.length,
+        reason: "all branch patches are already integrated in HEAD",
+      };
+    }
     _git(projectPath, ["merge", "--ff-only", branch], 120000);
     return { ok: true, merged: true, commits: ahead };
   } catch (e) {
     return { ok: false, reason: String((e.stderr || e.message || e)).slice(0, 300) };
+  }
+}
+
+function defaultPrepareReviewBranch({ projectPath, worktree, branch } = {}) {
+  if (!projectPath || !worktree || !branch) return { ok: true, rebased: false, baselineRef: null };
+  try {
+    const head = String(_git(projectPath, ["rev-parse", "HEAD"])).trim();
+    const mergeBase = String(_git(projectPath, ["merge-base", "HEAD", branch])).trim();
+    if (mergeBase === head) return { ok: true, rebased: false, baselineRef: head };
+
+    const cherry = String(_git(projectPath, ["cherry", "HEAD", branch])).trim().split(/\r?\n/).filter(Boolean);
+    if (cherry.length && cherry.every((line) => line.startsWith("- "))) {
+      return { ok: true, rebased: false, integrated: true, baselineRef: head };
+    }
+
+    try {
+      _git(worktree, ["rebase", head], 120000);
+    } catch (e) {
+      try { _git(worktree, ["rebase", "--abort"], 60000); } catch { /* ignore */ }
+      return {
+        ok: false,
+        reason: String((e.stderr || e.message || e)).slice(-1200),
+        baselineRef: head,
+      };
+    }
+    return { ok: true, rebased: true, baselineRef: head };
+  } catch (e) {
+    return { ok: false, reason: String((e.stderr || e.message || e)).slice(-1200) };
   }
 }
 
@@ -263,10 +596,16 @@ const REAL_DEPS = {
   registry,
   autonomyLoop,
   selfRepair,
+  standups,
+  unblocker,
+  briefRuns,
   isAlive: _isAlive,
+  terminateWorker: defaultTerminateWorker,
   spawnWorker: defaultSpawnWorker,
   readLogTail: defaultReadLogTail,
   verify: defaultVerify,
+  resolveBaselineRef: defaultResolveBaselineRef,
+  prepareReviewBranch: defaultPrepareReviewBranch,
   mergeBranch: defaultMergeBranch,
   cleanupWorktree: defaultCleanupWorktree,
   postWork: defaultPostWork,
@@ -287,14 +626,29 @@ function buildSwarmRoster(workers = [], { board, taskId } = {}) {
   return others.map((w) => `- ${w.agentId} (Devin ${w.model}) is working on ${w.board}/${w.taskId}${w.title ? ` — "${w.title}"` : ""}`).join("\n");
 }
 
-function buildWorkerPrompt({ task, agent, board, projectPath, persona, swarm = [], branch }) {
+function buildPromptComments(comments = []) {
+  const rows = (Array.isArray(comments) ? comments : [])
+    .filter((c) => c && String(c.body || "").trim())
+    .slice(0, 8)
+    .map((c) => {
+      const author = String(c.author || "unknown").trim();
+      const body = String(c.body || "").trim().slice(0, 1200);
+      return `### ${author}\n${body}`;
+    });
+  return rows.length ? rows.join("\n\n") : "No recent Kanban comments were loaded with this dispatch.";
+}
+
+function buildWorkerPrompt({ task, agent, board, projectPath, persona, swarm = [], branch, projectSlug, comments = [] }) {
   const accept = task.acceptanceCriteria || "";
   const roster = buildSwarmRoster(swarm, { board, taskId: task.id });
+  const promptComments = buildPromptComments(comments);
+  const sharedWorkLogPath = path.join(brainDir(projectSlug || "ceo-studio"), "autonomy", "shared-work-log.md");
+  const projectName = path.basename(projectPath || "the active project");
   return [
-    `You are "${agent.id}" (persona: ${persona || agent.persona || agent.id}), one agent in a multi-agent swarm that is autonomously building and self-repairing the CEO Studio project. The app is dogfooding itself.`,
+    `You are "${agent.id}" (persona: ${persona || agent.persona || agent.id}), one agent in a multi-agent swarm that is autonomously building and self-repairing the active project: ${projectName}. CEO Studio is the cockpit and orchestration layer driving this work.`,
     "",
     "## Workspace isolation (critical)",
-    `Your current working directory is an ISOLATED git worktree of the CEO Studio repo${branch ? `, checked out on branch \`${branch}\`` : ""}. Work ONLY here. Do NOT \`cd\` to any other directory or absolute repo path, do NOT switch branches, and do NOT touch the main checkout — other swarm workers are running in their own worktrees in parallel and you must not collide with them. Commit your work on the current branch.`,
+    `Your current working directory is an ISOLATED git worktree of ${projectName}${branch ? `, checked out on branch \`${branch}\`` : ""}. Work ONLY here. Do NOT \`cd\` to any other directory or absolute repo path, do NOT switch branches, and do NOT touch the main checkout — other swarm workers are running in their own worktrees in parallel and you must not collide with them. Commit your work on the current branch.`,
     "",
     `Hermes Kanban board: ${board}`,
     `Task id: ${task.id}`,
@@ -304,6 +658,9 @@ function buildWorkerPrompt({ task, agent, board, projectPath, persona, swarm = [
     task.body || "(no body provided)",
     accept ? `\n## Acceptance criteria\n${accept}` : "",
     "",
+    "## Recent Kanban comments and evidence",
+    promptComments,
+    "",
     "## Your swarm (A2A — stay aware of each other)",
     roster,
     "",
@@ -312,6 +669,19 @@ function buildWorkerPrompt({ task, agent, board, projectPath, persona, swarm = [
     "- POST progress as Kanban comments on your task as you go (plan, key decisions, files you're touching, blockers). Other agents and the orchestrator read these — it is your shared communication channel.",
     "- If your work overlaps or conflicts with another active task, coordinate by commenting on the relevant task rather than stepping on it. Prefer narrow, non-overlapping changes.",
     "- Use the `gbrain` MCP tools for durable, cross-session memory: recall relevant prior context first, and record durable learnings/decisions when done.",
+    "",
+    "## Shared Work Log (mandatory visibility)",
+    `- Shared work log path: ${sharedWorkLogPath}`,
+    "- You MUST append to this log on every significant action (START, PROGRESS, DECISION, BLOCKER, COMPLETE, ERROR).",
+    "- Format: [TIMESTAMP] [AGENT] [TASK_ID] [ACTIVITY_TYPE] Message",
+    "- Use ISO 8601 timestamps in UTC.",
+    "- This is the single source of truth for swarm activity — all agents must append here.",
+    "- Before starting work: append START entry with your plan.",
+    "- During work: append PROGRESS entries every 10-15 minutes or at milestones.",
+    "- On decisions: append DECISION entry with rationale.",
+    "- On blockers: append BLOCKER entry with what's needed.",
+    "- On completion: append COMPLETE entry with summary.",
+    "- On errors: append ERROR entry with details and impact.",
     "",
     "## Operating contract (mandatory)",
     "- Work ONLY in this repo. Make the smallest correct change that satisfies the task.",
@@ -348,11 +718,26 @@ function laneTasks(boardData, lane) {
   return ((boardData && boardData.columns && boardData.columns[lane]) || []);
 }
 
-function resolveBoards(deps, policy) {
+function sameWorkspace(left, right) {
+  if (!left || !right) return false;
+  try {
+    return path.resolve(String(left)) === path.resolve(String(right));
+  } catch {
+    return false;
+  }
+}
+
+function resolveBoards(deps, policy, { projectSlug, projectPath } = {}) {
   if (policy.boards !== "all") return policy.boards;
   try {
     const boards = deps.hermes.listBoards() || [];
-    return boards.map((b) => b.slug).filter(Boolean);
+    const owned = boards
+      .filter((board) => board && board.slug && sameWorkspace(board.default_workdir, projectPath))
+      .map((board) => board.slug);
+    if (owned.length) return owned;
+    return boards
+      .filter((board) => board && board.slug === projectSlug)
+      .map((board) => board.slug);
   } catch { return []; }
 }
 
@@ -361,6 +746,162 @@ function resolveAgent(deps, projectPath, assigneeId) {
     const reg = deps.registry.read(projectPath);
     return (reg.agents || []).find((a) => a.id === assigneeId) || null;
   } catch { return null; }
+}
+
+function recordBoardReadFailure(errors, board, boardData, phase = "getBoard") {
+  if (!boardData || boardData.ok !== false) return false;
+  errors.push({
+    phase,
+    board,
+    error: boardData.reason || "Hermes board read failed",
+  });
+  return true;
+}
+
+function documentGate(deps, { projectSlug, board, task } = {}) {
+  if (!deps.briefRuns || !deps.briefRuns.planningGate) {
+    return { ok: true, allowed: true, reason: "document gate unavailable" };
+  }
+  let fullTask = task;
+  if (task && task.id && deps.hermes && deps.hermes.getTask && (!task.body || !String(task.body).trim())) {
+    try {
+      const detail = deps.hermes.getTask(board, task.id);
+      if (detail && detail.ok && detail.task) fullTask = { ...task, ...detail.task };
+    } catch { /* summary task is still better than crashing the cycle */ }
+  }
+  const gate = deps.briefRuns.planningGate({ projectSlug, board, task: fullTask });
+  return gate && typeof gate === "object" ? { task: fullTask, ...gate } : gate;
+}
+
+function blockDirtyBrief(deps, { board, task, gate, phase } = {}) {
+  const taskId = task && task.id;
+  if (!taskId) return;
+  deps.hermes.addComment({
+    board,
+    taskId,
+    author: "autonomy-runner/document-gate",
+    body: gate.comment || "Document validation failed; returning this item to planning before autonomous work can continue.",
+  });
+  deps.hermes.setTaskStatus({
+    board,
+    taskId,
+    status: "planning",
+    reason: `document validation gate blocked ${phase || "autonomy"}`,
+  });
+}
+
+function reviewFailureOutput(failTail, reviewInfo) {
+  const lines = [];
+  if (reviewInfo && (reviewInfo.branch || reviewInfo.worktree || reviewInfo.agentId)) {
+    lines.push("### Failed worker branch context");
+    if (reviewInfo.branch) lines.push(`- Branch: ${reviewInfo.branch}`);
+    if (reviewInfo.worktree) lines.push(`- Worktree: ${reviewInfo.worktree}`);
+    if (reviewInfo.agentId) lines.push(`- Agent: ${reviewInfo.agentId}`);
+    lines.push("- Repair worker instruction: inspect or cherry-pick the failed branch/worktree before fixing the remaining gate failures, so previous repair work is not lost.");
+    lines.push("");
+  }
+  if (failTail) lines.push(failTail);
+  return lines.join("\n");
+}
+
+function assessWorkerCompletion(task = {}, output = "") {
+  const contract = `${task.title || ""}\n${task.body || ""}`.toLowerCase();
+  const requiresBrowserE2e = /(e2e|end-to-end)/.test(contract)
+    && /(playwright|chrome devtools|browser automation|two contexts)/.test(contract);
+  if (!requiresBrowserE2e) return { ok: true };
+
+  const log = String(output || "").replace(/\u001b\[[0-9;]*m/g, "").toLowerCase();
+  const requiresTwoContexts = /(two|separate) (?:browser )?contexts?|recruiter and recipient (?:browser )?contexts?/.test(contract);
+  const explicitlyNotRun = /(would require|not (?:present|available|run|executed)|code inspection|test structure|structural e2e|unable to run|could not run)/.test(log);
+  const substitutedApiCoverage = /(api-level validation instead of ui automation|api[- ]only|endpoint exists|mock invite id|accept(?:ed|ing)? (?:a )?(?:401|403|404))/.test(log);
+  const actualBrowserEvidence = [
+    /(?:npx\s+)?playwright(?:\s+test)?[\s\S]{0,240}(?:\b\d+\s+passed\b|exit(?:ed)?\s+(?:with\s+)?(?:code\s+)?0)/,
+    /chrome devtools[\s\S]{0,240}(?:verified|passed|completed)/,
+    /two (?:browser )?contexts?[\s\S]{0,240}(?:verified|passed|joined|completed)/,
+  ].some((pattern) => pattern.test(log));
+  const contextEvidence = !requiresTwoContexts || [
+    /(?:two|separate) (?:browser )?contexts?[\s\S]{0,240}(?:verified|passed|joined|completed|exercised)/,
+    /recruiter and recipient (?:browser )?contexts?[\s\S]{0,240}(?:verified|passed|joined|completed|exercised)/,
+  ].some((pattern) => pattern.test(log));
+
+  if (explicitlyNotRun || substitutedApiCoverage || !actualBrowserEvidence || !contextEvidence) {
+    return {
+      ok: false,
+      reason: "required browser E2E evidence is missing; the worker reported structure, API-only, or incomplete context coverage instead of the executed Playwright or Chrome DevTools flow",
+    };
+  }
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Repair-chain cap — the guard that stops the self-repair $-spiral.
+//
+// Every acceptance/integration/test-gate failure can file a repair task that is
+// dispatched to a fresh paid Devin worker. If that repair task ALSO fails
+// (classically: an unsatisfiable browser-E2E gate that no headless `devin -p`
+// worker can pass), the naive behaviour files yet another repair task with a
+// new id, forever — `t_fb6de5bf -> t_7ed4c3d5 -> t_b16016a0 -> ...`. We tag
+// each auto-generated repair task with its "generation" in `state.repairChains`
+// and, once a failing task is already at policy.maxRepairGenerations, escalate
+// it to a human/CEO decision (leave it blocked) instead of spending on yet
+// another worker.
+// ---------------------------------------------------------------------------
+function repairGeneration(state, taskId) {
+  return (state && state.repairChains && state.repairChains[String(taskId)]) || 0;
+}
+function recordRepairChild(state, childTaskId, generation) {
+  if (!state || !childTaskId) return;
+  state.repairChains = state.repairChains || {};
+  state.repairChains[String(childTaskId)] = generation;
+}
+function repairCapReached(state, policy, failingTaskId) {
+  const cap = policy && Number.isFinite(policy.maxRepairGenerations) ? policy.maxRepairGenerations : 1;
+  return repairGeneration(state, failingTaskId) >= cap;
+}
+
+function hasTrackedWorker(workers, board, taskId) {
+  return workers.some((w) => w.board === board && w.taskId === taskId);
+}
+
+function isAlreadyReapedStatus(status) {
+  const s = String(status || "").trim().toLowerCase();
+  return !!s && s !== "running";
+}
+
+function isStaleRunningTask(task, workers, board) {
+  if (!task || task.status !== "running") return false;
+  if (hasTrackedWorker(workers, board, task.id)) return false;
+  if (task.workerAlive === false) return true;
+  return !task.worker_pid && !task.current_run_id;
+}
+
+function inTargetSet(policy, task) {
+  const targets = policy && Array.isArray(policy.targetTaskIds) ? policy.targetTaskIds : [];
+  if (!targets.length) return true;
+  return task && targets.includes(String(task.id));
+}
+
+function reviewCandidates(boardData, board, policy, state) {
+  const review = [...laneTasks(boardData, "review")];
+  const targets = policy && Array.isArray(policy.targetTaskIds) ? policy.targetTaskIds : [];
+  if (!targets.length) return review;
+  const seen = new Set(review.map((task) => String(task.id)));
+  for (const task of laneTasks(boardData, "blocked")) {
+    const taskId = String(task && task.id || "");
+    if (!taskId || seen.has(taskId) || !targets.includes(taskId)) continue;
+    if (!state.reviews || !state.reviews[`${board}:${taskId}`]) continue;
+    review.push(task);
+    seen.add(taskId);
+  }
+  return review;
+}
+
+function verificationEvidence(results = []) {
+  return results.map((result) => {
+    const state = result.skipped ? "SKIP" : result.baselineFailure ? "BASELINE" : result.ok ? "PASS" : "FAIL";
+    const reason = result.reason ? ` — ${result.reason}` : "";
+    return `- ${state} \`${result.cmd}\`${reason}`;
+  }).join("\n");
 }
 
 /**
@@ -380,7 +921,19 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
 
   const startedAt = now.toISOString();
   const errors = [];
-  const phases = { gateway: null, goals: null, reap: [], plan: [], assign: [], execute: [], review: [] };
+  const phases = {
+    gateway: null,
+    standups: null,
+    goals: null,
+    unblock: [],
+    reap: [],
+    research: [],
+    staleRunning: [],
+    plan: [],
+    assign: [],
+    execute: [],
+    review: [],
+  };
   const state = getState(projectSlug);
   state.decomposed = state.decomposed || {};
   let workers = getWorkers(projectSlug);
@@ -396,55 +949,202 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
     // 1. Gateway up
     phases.gateway = safe("gateway", () => deps.hermes.ensureUp());
 
-    const boards = resolveBoards(deps, policy);
+    const boards = resolveBoards(deps, policy, { projectSlug, projectPath });
+    const hasTargetTasks = policy.targetTaskIds.length > 0;
 
-    // 2. Goal review + blocked analysis (delegated). Use the first board as the
-    //    primary lens; goal layers are project-wide. Skipped in dry-run because
-    //    the delegated loop can write goal artifacts + blocked-lane comments.
-    phases.goals = policy.dryRun
-      ? { ok: true, skipped: "dry-run" }
-      : safe("goals", () => deps.autonomyLoop.runCycle({
-        projectSlug,
-        projectPath,
-        board: boards[0] || null,
-        domain: policy.domain,
-        force: true, // we own cooldown at the runner level
-        now,
-      }));
+    // 2. Daily cadence. A standup needs both an enabled standup policy and an
+    // enabled runner policy. It remains proposal-only and never receives paid
+    // provider permission. Targeted task cycles skip unrelated cadence work.
+    phases.standups = (!policy.allowStandups || hasTargetTasks)
+      ? {
+        ok: true,
+        skipped: hasTargetTasks ? "targeted-task-cycle" : "disabled",
+        reconcile: null,
+        due: null,
+      }
+      : {
+        ok: true,
+        reconcile: safe("standups:reconcile", () => deps.standups.reconcile({
+          projectSlug,
+          projectPath,
+          dryRun: policy.dryRun,
+        })),
+        due: safe("standups:due", () => deps.standups.runDue({
+          projectSlug,
+          projectPath,
+          now,
+          dryRun: policy.dryRun,
+          limit: policy.maxStandupsPerCycle,
+        })),
+      };
 
     // 3. Reap finished workers (move running -> review, post their output).
+    //    Agent lifecycle management is higher priority than portfolio analysis:
+    //    a slow goal-review dependency must never leave completed workers stuck
+    //    in running or prevent their review metadata from being recovered.
     //    Never in dry-run: reaping mutates the board AND worker tracking, so a
     //    dry-run must leave workers untouched for a real cycle to reap.
     if (!policy.staleWorkerSkipReap && !policy.dryRun) {
       const stillRunning = [];
       for (const w of workers) {
-        if (deps.isAlive(w.pid)) { stillRunning.push(w); continue; }
+        const alive = deps.isAlive(w.pid);
+        const startedMs = Date.parse(String(w.startedAt || ""));
+        const timedOut = alive
+          && Number.isFinite(startedMs)
+          && (now.getTime() - startedMs) >= policy.workerTimeoutMinutes * 60 * 1000;
+        if (alive && !timedOut) { stillRunning.push(w); continue; }
+        if (timedOut) safe("terminate-worker", () => deps.terminateWorker(w.pid));
         safe("reap", () => {
           const tail = deps.readLogTail(w.logPath);
-          const failed = /\[devin error|Unknown model|error rc=|Traceback/i.test(tail);
+          const detail = deps.hermes.getTask ? deps.hermes.getTask(w.board, w.taskId) : null;
+          const completion = timedOut
+            ? { ok: false, reason: `worker exceeded the ${policy.workerTimeoutMinutes}-minute timeout and was terminated` }
+            : assessWorkerCompletion(detail && detail.task || {}, tail);
+          const workerErrored = timedOut || /\[devin error|Unknown model|error rc=|Traceback/i.test(tail);
+          const failed = workerErrored || !completion.ok;
+          const currentStatus = detail && detail.ok && detail.task && detail.task.status;
+          const alreadyReaped = isAlreadyReapedStatus(currentStatus);
           if (!policy.dryRun) {
-            deps.hermes.addComment({
-              board: w.board, taskId: w.taskId, author: `autonomy-runner/${w.agentId}`,
-              body: `Devin worker (${w.model}) finished (pid ${w.pid}).${w.branch ? ` Work is on branch \`${w.branch}\`.` : ""}\n\n\`\`\`\n${tail.slice(-3000)}\n\`\`\``,
-            });
-            deps.hermes.setTaskStatus({
-              board: w.board, taskId: w.taskId,
-              status: failed ? "blocked" : "review",
-              reason: failed ? "devin worker reported an error" : "worker done; awaiting review/test gate",
-            });
-            // Hand the worktree/branch to the review/test gate.
-            if (!failed && w.branch) {
-              state.reviews = state.reviews || {};
-              state.reviews[`${w.board}:${w.taskId}`] = { worktree: w.worktree, branch: w.branch, agentId: w.agentId };
+            if (alreadyReaped) {
+              // A prior app/process may have mutated the board and then died
+              // before workers.json was saved. Reaping must be idempotent: do
+              // not post duplicate "finished" comments, but do restore the
+              // review handoff metadata and drop the stale tracker.
+              if (String(currentStatus).toLowerCase() === "review" && w.branch) {
+                state.reviews = state.reviews || {};
+                state.reviews[`${w.board}:${w.taskId}`] = { worktree: w.worktree, branch: w.branch, baseCommit: w.baseCommit || null, agentId: w.agentId };
+              }
+            } else {
+              deps.hermes.addComment({
+                board: w.board, taskId: w.taskId, author: `autonomy-runner/${w.agentId}`,
+                body: `Devin worker (${w.model}) ${timedOut ? "timed out and was terminated" : "finished"} (pid ${w.pid}).${w.branch ? ` Work is on branch \`${w.branch}\`.` : ""}${completion.ok ? "" : `\n\nAcceptance evidence gate: ${completion.reason}`}\n\n\`\`\`\n${tail.slice(-3000)}\n\`\`\``,
+              });
+              deps.hermes.setTaskStatus({
+                board: w.board, taskId: w.taskId,
+                status: failed ? "blocked" : "review",
+                reason: failed
+                  ? (timedOut ? completion.reason : (workerErrored ? "devin worker reported an error" : completion.reason))
+                  : "worker done; awaiting review/test gate",
+              });
+              // Hand the worktree/branch to the review/test gate.
+              if (!failed && w.branch) {
+                state.reviews = state.reviews || {};
+                state.reviews[`${w.board}:${w.taskId}`] = { worktree: w.worktree, branch: w.branch, baseCommit: w.baseCommit || null, agentId: w.agentId };
+              }
+              if (!completion.ok) {
+                const key = `${w.board}:${w.taskId}`;
+                state.completionRepairs = state.completionRepairs || {};
+                if (!state.completionRepairs[key] && repairCapReached(state, policy, w.taskId)) {
+                  // Repair-chain cap hit: the task is already blocked above; do
+                  // NOT spawn yet another paid repair worker on an unsatisfiable
+                  // gate. Escalate to a human/CEO decision instead.
+                  deps.hermes.addComment({
+                    board: w.board, taskId: w.taskId, author: "autonomy-runner/repair-cap",
+                    body: `Acceptance evidence gate still failing after ${repairGeneration(state, w.taskId)} automated repair attempt(s). This is almost certainly an environment/credentials blocker (no real browser/auth is available to a headless \`devin -p\` worker), not a code defect another worker can fix. Escalating to a human/CEO decision instead of dispatching more paid workers; leaving this task blocked.`,
+                  });
+                  state.completionRepairs[key] = {
+                    createdAt: new Date().toISOString(),
+                    escalated: true,
+                    generation: repairGeneration(state, w.taskId),
+                    branch: w.branch || null,
+                  };
+                } else if (!state.completionRepairs[key]) {
+                  const evidence = reviewFailureOutput([
+                    `### Acceptance evidence gate`,
+                    completion.reason,
+                    "",
+                    "### Required repair outcome",
+                    "- Run an actual Playwright or Chrome DevTools browser flow; unit, REST, code-inspection, placeholder, and auth-setup-only results do not satisfy this gate.",
+                    "- Exercise separate recruiter and recipient browser contexts for both direct-call and screening-invite paths.",
+                    "- Verify the recipient link, both participants joining, transcript completion, contact/graph association, and transcript viewer retrieval.",
+                    "- Record the exact browser command or DevTools scenario, named scenarios, pass count, and report/trace paths in the completion output.",
+                    "- If authentication, services, credentials, or environment setup prevent execution, report the concrete blocker and failing command. Do not redefine the acceptance criteria or claim structural coverage is E2E.",
+                    "",
+                    "### Worker completion output",
+                    "```",
+                    tail.slice(-3500),
+                    "```",
+                  ].join("\n"), w);
+                  const filed = safe("reap-completion-selfrepair", () => deps.selfRepair.reportSystemBug({
+                    board: w.board,
+                    source: "autonomy worker acceptance gate",
+                    title: `[Self-QA] Acceptance evidence incomplete for ${w.taskId}`,
+                    observedBehavior: `Worker ${w.agentId} completed task ${w.taskId}, but required executable browser evidence was missing.`,
+                    output: evidence.slice(0, 5000),
+                    severity: "high",
+                    createRepairTask: true,
+                    workspace: projectPath,
+                  }, { projectSlug, projectPath }));
+                  const repairTaskId = filed && filed.repairTask && filed.repairTask.task && filed.repairTask.task.taskId || null;
+                  recordRepairChild(state, repairTaskId, repairGeneration(state, w.taskId) + 1);
+                  state.completionRepairs[key] = {
+                    createdAt: new Date().toISOString(),
+                    bugTaskId: filed && filed.bug && filed.bug.task && filed.bug.task.taskId || null,
+                    repairTaskId,
+                    branch: w.branch || null,
+                  };
+                }
+              }
             }
           }
-          phases.reap.push({ board: w.board, taskId: w.taskId, agentId: w.agentId, branch: w.branch || null, outcome: failed ? "blocked" : "review" });
-          logWork(deps, projectPath, w.board, w.agentId, failed
-            ? `✗ hit an error on \`${w.board}/${w.taskId}\` — see the board log`
-            : `✓ finished \`${w.board}/${w.taskId}\`${w.branch ? ` on branch \`${w.branch}\`` : ""}; awaiting review`);
+          phases.reap.push({
+            board: w.board,
+            taskId: w.taskId,
+            agentId: w.agentId,
+            branch: w.branch || null,
+            outcome: alreadyReaped
+              ? `already-${currentStatus}`
+              : (timedOut ? "timed-out" : (!completion.ok ? "blocked-acceptance-evidence" : (failed ? "blocked" : "review"))),
+          });
+          if (!alreadyReaped) {
+            logWork(deps, projectPath, w.board, w.agentId, failed
+              ? `✗ hit an error on \`${w.board}/${w.taskId}\` — see the board log`
+              : `✓ finished \`${w.board}/${w.taskId}\`${w.branch ? ` on branch \`${w.branch}\`` : ""}; awaiting review`);
+          }
         });
       }
       workers = stillRunning;
+      // Reaping is a durable lifecycle transition, not an in-memory prelude to
+      // review. Checkpoint immediately so an Electron restart during a long
+      // test gate does not resurrect finished workers and repeat their handoff.
+      saveWorkers(projectSlug, workers);
+      saveState(projectSlug, state);
+    }
+
+    // 4. Goal review + blocked analysis (delegated). Use the first board as the
+    //    primary lens; goal layers are project-wide. An explicitly targeted
+    //    cycle is an operational agent-management pass, so it must not wait on
+    //    unrelated portfolio analysis before reviewing or repairing its tasks.
+    phases.goals = policy.dryRun
+      ? { ok: true, skipped: "dry-run" }
+      : (!policy.allowGoalReview || hasTargetTasks)
+        ? { ok: true, skipped: hasTargetTasks ? "targeted-task-cycle" : "disabled" }
+        : safe("goals", () => deps.autonomyLoop.runCycle({
+          projectSlug,
+          projectPath,
+          board: boards[0] || null,
+          domain: policy.domain,
+          force: true, // we own cooldown at the runner level
+          now,
+        }));
+
+    // 5. UNBLOCK — blocked is an active escalation queue, not a parking lot.
+    //    Hermes remains the board ledger; CEO Studio owns the richer unblock
+    //    state in its board overlay.
+    if (policy.allowUnblocker) {
+      for (const board of boards) {
+        safe("unblock", () => {
+          const r = deps.unblocker.run({
+            projectSlug,
+            projectPath,
+            board,
+            domain: policy.domain,
+            dryRun: policy.dryRun,
+            limit: policy.maxBlockedUnblocksPerCycle,
+          });
+          phases.unblock.push(r);
+        });
+      }
     }
 
     let spawnedThisCycle = 0;
@@ -454,15 +1154,117 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
     for (const board of boards) {
       const isProtected = policy.protectedBoards.includes(board);
       const boardData = safe("getBoard", () => deps.hermes.getBoard(board));
-      if (!boardData || !boardData.ok) continue;
+      if (!boardData || recordBoardReadFailure(errors, board, boardData, "plan/assign:getBoard")) continue;
+      let triagedThisBoard = 0;
 
-      // 4. PLAN — decompose planning-lane briefs (skip protected boards if configured)
+      // 4. RESEARCH/TRIAGE — raw intake should not sit forever waiting for a
+      // human operator. Ask Hermes to specify it, then promote it toward the
+      // planning/decomposition lane. This is the app doing the initial research
+      // and normalization work through the CEO control plane.
+      if (policy.allowTriage && !(isProtected && policy.protectDecomposeOnProtected)) {
+        state.triaged = state.triaged || {};
+        for (const lane of policy.triageLanes) {
+          for (const t of laneTasks(boardData, lane)) {
+            if (!inTargetSet(policy, t)) continue;
+            if (triagedThisBoard >= policy.maxTriagePerCycle) break;
+            const key = `${board}:${t.id}`;
+            if (state.triaged[key]) continue;
+            safe("research", () => {
+              let specify = null;
+              let promote = null;
+              if (!policy.dryRun) {
+                specify = deps.hermes.taskAction({
+                  board,
+                  taskId: t.id,
+                  action: "specify",
+                  reason: "autonomy runner researched raw triage intake",
+                });
+                if (specify && specify.ok) {
+                  promote = deps.hermes.taskAction({
+                    board,
+                    taskId: t.id,
+                    action: "promote",
+                    reason: "specified by autonomy runner; ready for planning/decomposition",
+                  });
+                  state.triaged[key] = startedAt;
+                }
+              }
+              phases.research.push({
+                board,
+                taskId: t.id,
+                title: t.title,
+                lane,
+                dryRun: policy.dryRun,
+                would: "specify intake with Hermes, then promote toward planning",
+                specifyOk: specify ? !!specify.ok : undefined,
+                promoteOk: promote ? !!promote.ok : undefined,
+              });
+              triagedThisBoard += 1;
+            });
+          }
+        }
+      }
+
+      // 5. CLEANUP — a card in running with no live worker is not progress. If
+      // the runner does not own a tracked worker for it, make the stale state
+      // visible and block it for repair/re-dispatch instead of pretending the
+      // swarm is active.
+      if (policy.allowStaleRunningCleanup) {
+        for (const t of laneTasks(boardData, "running")) {
+          if (!inTargetSet(policy, t)) continue;
+          if (!isStaleRunningTask(t, workers, board)) continue;
+          safe("stale-running", () => {
+            if (!policy.dryRun) {
+              deps.hermes.addComment({
+                board,
+                taskId: t.id,
+                author: "autonomy-runner/stale-worker-audit",
+                body: "This card was in `running`, but CEO Studio found no live or tracked worker for it. Moving it to `blocked` so the orchestrator can repair, re-scope, or re-dispatch from visible board state.",
+              });
+              deps.hermes.setTaskStatus({
+                board,
+                taskId: t.id,
+                status: "blocked",
+                reason: "running task has no live/tracked worker",
+              });
+            }
+            phases.staleRunning.push({
+              board,
+              taskId: t.id,
+              title: t.title,
+              dryRun: policy.dryRun,
+              outcome: policy.dryRun ? "would-block-stale-running" : "blocked-stale-running",
+            });
+          });
+        }
+      }
+
+      // 6. PLAN — decompose planning-lane briefs (skip protected boards if configured)
       if (policy.allowDecompose && !(isProtected && policy.protectDecomposeOnProtected)) {
         for (const lane of policy.decomposeLanes) {
           for (const t of laneTasks(boardData, lane)) {
+            if (!inTargetSet(policy, t)) continue;
             const key = `${board}:${t.id}`;
             if (state.decomposed[key]) continue;
             safe("plan", () => {
+              const gate = documentGate(deps, { projectSlug, board, task: t });
+              if (gate && gate.ok && gate.allowed === false) {
+                if (!policy.dryRun) blockDirtyBrief(deps, { board, task: t, gate, phase: "decomposition" });
+                phases.plan.push({
+                  board,
+                  taskId: t.id,
+                  title: t.title,
+                  dryRun: policy.dryRun,
+                  blocked: "document-validation",
+                  reason: gate.reason,
+                  missing: gate.validation && gate.validation.missing,
+                });
+                return;
+              }
+              if (gate && gate.ok === false) {
+                phases.plan.push({ board, taskId: t.id, title: t.title, dryRun: policy.dryRun, skipped: gate.reason || "document gate failed" });
+                return;
+              }
               if (!policy.dryRun) {
                 const r = deps.hermes.taskAction({ board, taskId: t.id, action: "decompose" });
                 if (r && r.ok) state.decomposed[key] = startedAt;
@@ -477,6 +1279,7 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
       if (policy.allowAssign) {
         for (const lane of policy.assignLanes) {
           for (const t of laneTasks(boardData, lane)) {
+            if (!inTargetSet(policy, t)) continue;
             if (t.assignee) continue;
             safe("assign", () => {
               const routed = deps.org.route(projectPath, { domain: policy.domain, status: lane, kind: "task" });
@@ -496,11 +1299,28 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
         if (spawnedThisCycle >= dispatchCap) break;
         if (workers.length >= concCap) break;
         const boardData = safe("getBoard", () => deps.hermes.getBoard(board));
-        if (!boardData || !boardData.ok) continue;
+        if (!boardData || recordBoardReadFailure(errors, board, boardData, "execute:getBoard")) continue;
         for (const lane of policy.executeLanes) {
           for (const t of laneTasks(boardData, lane)) {
+            if (!inTargetSet(policy, t)) continue;
             if (spawnedThisCycle >= dispatchCap) break;
             if (workers.length >= concCap) break;
+            const gate = documentGate(deps, { projectSlug, board, task: t });
+            if (gate && gate.ok && gate.allowed === false) {
+              safe("execute-document-gate", () => blockDirtyBrief(deps, { board, task: t, gate, phase: "dispatch" }));
+              phases.execute.push({
+                board,
+                taskId: t.id,
+                blocked: "document-validation",
+                reason: gate.reason,
+                missing: gate.validation && gate.validation.missing,
+              });
+              continue;
+            }
+            if (gate && gate.ok === false) {
+              phases.execute.push({ board, taskId: t.id, skipped: gate.reason || "document gate failed" });
+              continue;
+            }
             if (!t.assignee) continue;
             if (workers.some((w) => w.board === board && w.taskId === t.id)) continue;
             const agent = resolveAgent(deps, projectPath, t.assignee);
@@ -511,18 +1331,24 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
             safe("execute", () => {
               const detail = deps.hermes.getTask(board, t.id);
               const full = (detail && detail.ok && detail.task) || t;
+              const comments = (detail && detail.ok && Array.isArray(detail.comments)) ? detail.comments : [];
               // Swarm-aware: pass the live roster (incl. this new task) so the
               // worker knows who its siblings are. Append self first so the
               // roster reflects current intent.
               const swarm = [...workers, { board, taskId: t.id, agentId: agent.id, model: agent.model || policy.model, title: full.title || t.title }];
-              const prompt = buildWorkerPrompt({ task: full, agent, board, projectPath, persona: agent.persona, swarm, branch: branchNameFor(board, t.id) });
+              const prompt = buildWorkerPrompt({ task: full, agent, board, projectPath, projectSlug, persona: agent.persona, swarm, branch: branchNameFor(board, t.id), comments });
               const logPath = path.join(workerLogsDir(projectSlug), `${board}-${t.id}-${Date.now()}.log`);
               const model = agent.model || policy.model;
               const res = deps.spawnWorker({ projectPath, model, prompt, logPath, board, taskId: t.id, agent, permissionMode: policy.devinPermissionMode });
               if (!res || !res.ok) { phases.execute.push({ board, taskId: t.id, error: (res && res.reason) || "spawn failed" }); return; }
               deps.hermes.setTaskStatus({ board, taskId: t.id, status: "running", reason: `dispatched to Devin ${model} via autonomy runner` });
               deps.hermes.addComment({ board, taskId: t.id, author: `autonomy-runner/${agent.id}`, body: `Dispatched to Devin worker (model ${model}, pid ${res.pid}) on isolated branch \`${res.branch || "(main)"}\`. Coordinate via Kanban comments (A2A).` });
-              workers.push({ board, taskId: t.id, agentId: agent.id, model, pid: res.pid, logPath, startedAt, title: full.title || t.title, worktree: res.worktree, branch: res.branch });
+              workers.push({ board, taskId: t.id, agentId: agent.id, model, pid: res.pid, logPath, startedAt, title: full.title || t.title, worktree: res.worktree, branch: res.branch, baseCommit: res.baseCommit || null });
+              // Persist the tracker the instant a paid worker exists. If the
+              // cycle (or the whole app) dies before the end-of-cycle save, the
+              // worker is still durably tracked, so a later cycle can reap and
+              // time it out instead of leaking a runaway process indefinitely.
+              saveWorkers(projectSlug, workers);
               spawnedThisCycle += 1;
               phases.execute.push({ board, taskId: t.id, agentId: agent.id, model, pid: res.pid });
               logWork(deps, projectPath, board, agent.id,
@@ -540,9 +1366,26 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
     } else if (policy.execute && policy.dryRun) {
       for (const board of boards) {
         const boardData = safe("getBoard", () => deps.hermes.getBoard(board));
-        if (!boardData || !boardData.ok) continue;
+        if (!boardData || recordBoardReadFailure(errors, board, boardData, "execute-dry-run:getBoard")) continue;
         for (const lane of policy.executeLanes) {
           for (const t of laneTasks(boardData, lane)) {
+            if (!inTargetSet(policy, t)) continue;
+            const gate = documentGate(deps, { projectSlug, board, task: t });
+            if (gate && gate.ok && gate.allowed === false) {
+              phases.execute.push({
+                board,
+                taskId: t.id,
+                blocked: "document-validation",
+                dryRun: true,
+                reason: gate.reason,
+                missing: gate.validation && gate.validation.missing,
+              });
+              continue;
+            }
+            if (gate && gate.ok === false) {
+              phases.execute.push({ board, taskId: t.id, skipped: gate.reason || "document gate failed", dryRun: true });
+              continue;
+            }
             if (t.assignee) phases.execute.push({ board, taskId: t.id, assignee: t.assignee, dryRun: true, would: "spawn devin worker" });
           }
         }
@@ -557,27 +1400,145 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
       state.reviews = state.reviews || {};
       for (const b of boards) {
         const boardData = safe("getBoard", () => deps.hermes.getBoard(b));
-        if (!boardData || !boardData.ok) continue;
-        for (const t of laneTasks(boardData, "review")) {
+        if (!boardData || recordBoardReadFailure(errors, b, boardData, "review:getBoard")) continue;
+        for (const t of reviewCandidates(boardData, b, policy, state)) {
+          if (!inTargetSet(policy, t)) continue;
           const key = `${b}:${t.id}`;
           const reviewInfo = state.reviews[key] || null;
           safe("review", () => {
             const verifyCwd = (reviewInfo && reviewInfo.worktree) || projectPath;
             if (policy.dryRun) { phases.review.push({ board: b, taskId: t.id, dryRun: true, worktree: verifyCwd }); return; }
-            const verifyRes = deps.verify({ projectPath, cwd: verifyCwd, commands: policy.verifyCommands }) || { ok: false, results: [{ cmd: "verify", ok: false, tail: "verification did not run" }] };
-            const evidence = (verifyRes.results || []).map((r) => `- ${r.ok ? "PASS" : "FAIL"} \`${r.cmd}\``).join("\n");
+            const linkedRepair = (state.integrationRepairs && state.integrationRepairs[key])
+              || (state.completionRepairs && state.completionRepairs[key]);
+            if (linkedRepair && linkedRepair.repairTaskId && deps.hermes.getTask) {
+              const repairDetail = deps.hermes.getTask(b, linkedRepair.repairTaskId);
+              const repairStatus = repairDetail && repairDetail.ok && repairDetail.task
+                ? String(repairDetail.task.status || "").toLowerCase()
+                : "";
+              if (repairStatus === "done") {
+                deps.hermes.addComment({
+                  board: b,
+                  taskId: t.id,
+                  author: "autonomy-runner/review-gate",
+                  body: `Blocked acceptance or integration work was resolved by linked repair task \`${linkedRepair.repairTaskId}\`, which passed its review gate and merged into main. The obsolete pre-repair branch will not be replayed.`,
+                });
+                deps.hermes.setTaskStatus({
+                  board: b,
+                  taskId: t.id,
+                  status: "done",
+                  reason: `resolved by integrated repair ${linkedRepair.repairTaskId}`,
+                });
+                if (reviewInfo && reviewInfo.worktree) {
+                  safe("cleanup", () => deps.cleanupWorktree({ projectPath, worktree: reviewInfo.worktree }));
+                }
+                delete state.reviews[key];
+                if (state.integrationRepairs) delete state.integrationRepairs[key];
+                if (state.completionRepairs) delete state.completionRepairs[key];
+                phases.review.push({
+                  board: b,
+                  taskId: t.id,
+                  outcome: "done-via-integration-repair",
+                  repairTaskId: linkedRepair.repairTaskId,
+                });
+                return;
+              }
+            }
+            const integration = reviewInfo && deps.prepareReviewBranch
+              ? deps.prepareReviewBranch({ projectPath, worktree: reviewInfo.worktree, branch: reviewInfo.branch })
+              : { ok: true, rebased: false, baselineRef: null };
+            if (integration && integration.ok === false) {
+              const integrationEvidence = [
+                "### Failed worker branch context",
+                `- Branch: ${reviewInfo && reviewInfo.branch || "(unknown)"}`,
+                `- Worktree: ${reviewInfo && reviewInfo.worktree || "(unknown)"}`,
+                `- Agent: ${reviewInfo && reviewInfo.agentId || "(unknown)"}`,
+                "",
+                "### Rebase failure",
+                "```",
+                integration.reason || "unknown integration failure",
+                "```",
+                "",
+                "Repair instruction: preserve the worker's completed feature, resolve it against current main, run the project verification gate, and commit the reconciled result.",
+              ].join("\n");
+              deps.hermes.addComment({
+                board: b,
+                taskId: t.id,
+                author: "autonomy-runner/review-gate",
+                body: `Could not integrate branch \`${reviewInfo && reviewInfo.branch}\` onto the current main branch before verification. The rebase was aborted and the task remains blocked for a focused conflict-resolution worker.\n\n\`\`\`\n${integration.reason || "unknown integration failure"}\n\`\`\``,
+              });
+              deps.hermes.setTaskStatus({ board: b, taskId: t.id, status: "blocked", reason: "worker branch needs conflict resolution" });
+              state.integrationRepairs = state.integrationRepairs || {};
+              let repair = state.integrationRepairs[key] || null;
+              if (!repair && repairCapReached(state, policy, t.id)) {
+                // Repair-chain cap hit: stop dispatching conflict-resolution
+                // workers and escalate to a human/orchestrator merge decision.
+                deps.hermes.addComment({
+                  board: b, taskId: t.id, author: "autonomy-runner/repair-cap",
+                  body: `Worker branch \`${reviewInfo && reviewInfo.branch || "(unknown)"}\` still cannot be integrated after ${repairGeneration(state, t.id)} automated repair attempt(s); escalating to a human/orchestrator merge decision rather than dispatching another repair worker. Task left blocked.`,
+                });
+                repair = {
+                  createdAt: new Date().toISOString(),
+                  escalated: true,
+                  generation: repairGeneration(state, t.id),
+                  branch: reviewInfo && reviewInfo.branch || null,
+                };
+                state.integrationRepairs[key] = repair;
+                saveState(projectSlug, state);
+              } else if (!repair) {
+                const filed = safe("review-integration-selfrepair", () => deps.selfRepair.reportSystemBug({
+                  board: b,
+                  source: "autonomy review integration gate",
+                  title: `[Self-QA] Integration conflict while reviewing ${t.id}`,
+                  observedBehavior: `Worker branch ${reviewInfo && reviewInfo.branch || "(unknown)"} could not be rebased onto current main for task ${t.id} (${t.title}).`,
+                  output: integrationEvidence.slice(0, 5000),
+                  severity: "high",
+                  createRepairTask: true,
+                  workspace: projectPath,
+                }, { projectSlug, projectPath }));
+                const repairTaskId = filed && filed.repairTask && filed.repairTask.task && filed.repairTask.task.taskId || null;
+                recordRepairChild(state, repairTaskId, repairGeneration(state, t.id) + 1);
+                repair = {
+                  createdAt: new Date().toISOString(),
+                  bugTaskId: filed && filed.bug && filed.bug.task && filed.bug.task.taskId || null,
+                  repairTaskId,
+                  branch: reviewInfo && reviewInfo.branch || null,
+                };
+                state.integrationRepairs[key] = repair;
+                saveState(projectSlug, state);
+              }
+              phases.review.push({
+                board: b,
+                taskId: t.id,
+                outcome: "blocked-integration-conflict",
+                branch: reviewInfo && reviewInfo.branch,
+                repairTaskId: repair && repair.repairTaskId || null,
+              });
+              return;
+            }
+            const baselineRef = (integration && integration.baselineRef)
+              || (reviewInfo && (reviewInfo.baseCommit || (deps.resolveBaselineRef && deps.resolveBaselineRef({ projectPath, branch: reviewInfo.branch }))));
+            const verifyRes = deps.verify({ projectPath, cwd: verifyCwd, baselineRef, commands: policy.verifyCommands }) || { ok: false, results: [{ cmd: "verify", ok: false, tail: "verification did not run" }] };
+            const evidence = verificationEvidence(verifyRes.results || []);
             if (!verifyRes.ok) {
               const failTail = (verifyRes.results || []).filter((r) => !r.ok).map((r) => `### ${r.cmd}\n\`\`\`\n${r.tail}\n\`\`\``).join("\n\n");
+              const repairOutput = reviewFailureOutput(failTail, reviewInfo);
               deps.hermes.addComment({ board: b, taskId: t.id, author: "autonomy-runner/review-gate", body: `Test gate FAILED — not promoting to Done.${reviewInfo ? ` (verified branch \`${reviewInfo.branch}\`)` : ""}\n${evidence}\n\n${failTail}` });
               deps.hermes.setTaskStatus({ board: b, taskId: t.id, status: "blocked", reason: "autonomy review/test gate failed" });
-              logWork(deps, projectPath, b, "review-gate", `⛔ \`${b}/${t.id}\` blocked — review/test gate failed; self-repair filed`);
-              safe("review-selfrepair", () => deps.selfRepair.reportSystemBug({
-                board: b, source: "autonomy review/test gate",
-                title: `[Self-QA] Verification failed while reviewing ${t.id}`,
-                observedBehavior: `npm run check / npm test failed during the review gate for task ${t.id} (${t.title}).`,
-                output: failTail.slice(0, 1500), severity: "high", createRepairTask: true,
-              }, { projectSlug, projectPath }));
-              phases.review.push({ board: b, taskId: t.id, outcome: "blocked" });
+              if (repairCapReached(state, policy, t.id)) {
+                logWork(deps, projectPath, b, "review-gate", `⛔ \`${b}/${t.id}\` blocked — review/test gate failed; repair cap reached, escalated to a human`);
+                deps.hermes.addComment({ board: b, taskId: t.id, author: "autonomy-runner/repair-cap", body: `Review/test gate still failing after ${repairGeneration(state, t.id)} automated repair attempt(s); escalating to a human/CEO decision rather than dispatching another repair worker. Task left blocked.` });
+                phases.review.push({ board: b, taskId: t.id, outcome: "escalated-repair-cap" });
+              } else {
+                logWork(deps, projectPath, b, "review-gate", `⛔ \`${b}/${t.id}\` blocked — review/test gate failed; self-repair filed`);
+                const filed = safe("review-selfrepair", () => deps.selfRepair.reportSystemBug({
+                  board: b, source: "autonomy review/test gate",
+                  title: `[Self-QA] Verification failed while reviewing ${t.id}`,
+                  observedBehavior: `npm run check / npm test failed during the review gate for task ${t.id} (${t.title}).${reviewInfo && reviewInfo.branch ? ` Failed branch: ${reviewInfo.branch}.` : ""}${reviewInfo && reviewInfo.worktree ? ` Failed worktree: ${reviewInfo.worktree}.` : ""}`,
+                  output: repairOutput.slice(0, 5000), severity: "high", createRepairTask: true,
+                }, { projectSlug, projectPath }));
+                recordRepairChild(state, filed && filed.repairTask && filed.repairTask.task && filed.repairTask.task.taskId || null, repairGeneration(state, t.id) + 1);
+                phases.review.push({ board: b, taskId: t.id, outcome: "blocked" });
+              }
               return;
             }
             // Verified. Merge the worker's branch into main (ff-only) if present.
@@ -599,12 +1560,15 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
                 phases.review.push({ board: b, taskId: t.id, outcome: "awaiting-merge", branch: reviewInfo.branch });
                 return;
               }
-              mergeNote = ` Merged branch \`${reviewInfo.branch}\` (${merge.commits} commit(s)) into the main branch.`;
+              mergeNote = merge.integrated
+                ? ` Branch \`${reviewInfo.branch}\` was already integrated in the main branch (${merge.equivalentCommits} patch-equivalent commit(s)).`
+                : ` Merged branch \`${reviewInfo.branch}\` (${merge.commits} commit(s)) into the main branch.`;
               safe("cleanup", () => deps.cleanupWorktree({ projectPath, worktree: reviewInfo.worktree }));
               delete state.reviews[key];
             }
             deps.hermes.addComment({ board: b, taskId: t.id, author: "autonomy-runner/review-gate", body: `Test gate PASSED.${mergeNote}\n${evidence}` });
             deps.hermes.setTaskStatus({ board: b, taskId: t.id, status: "done", reason: "passed autonomy review/test gate" });
+            if (state.integrationRepairs) delete state.integrationRepairs[key];
             logWork(deps, projectPath, b, "review-gate", `✅ \`${b}/${t.id}\` passed the test gate${mergeNote ? " & merged" : ""} — Done`);
             phases.review.push({ board: b, taskId: t.id, outcome: "done" });
           });
@@ -617,7 +1581,7 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
   }
 
   // Self-repair on infrastructure errors (capped to first error to avoid storms)
-  if (errors.length) {
+  if (errors.length && !policy.dryRun) {
     safe("selfrepair", () => deps.selfRepair.reportSystemBug({
       source: "autonomy runner",
       title: `Autonomy runner cycle hit ${errors.length} error(s)`,
@@ -632,7 +1596,7 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
     startedAt,
     finishedAt: new Date().toISOString(),
     policy,
-    boards: resolveBoards(deps, policy),
+    boards: resolveBoards(deps, policy, { projectSlug, projectPath }),
     phases,
     liveWorkers: workers.length,
     spawned: phases.execute.filter((e) => e.pid).length,
@@ -640,7 +1604,16 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
   };
   const runFile = path.join(runsDir(projectSlug), `${startedAt.replace(/[:.]/g, "-")}.json`);
   writeJson(runFile, result);
-  saveState(projectSlug, { ...state, lastRunAt: result.finishedAt, lastResult: { ...result, phases: undefined, runFile } });
+  saveState(projectSlug, {
+    ...state,
+    lastRunAt: result.finishedAt,
+    lastResult: {
+      ...result,
+      phases: undefined,
+      standups: result.phases.standups,
+      runFile,
+    },
+  });
   return { ...result, runFile };
 }
 
@@ -657,6 +1630,7 @@ function status(slug) {
 module.exports = {
   DEFAULT_POLICY,
   normalizePolicy,
+  policyFromRequest,
   getPolicy,
   setPolicy,
   getState,
@@ -667,5 +1641,18 @@ module.exports = {
   runCycle,
   status,
   // exported for tests / advanced callers
-  _defaults: { spawnWorker: defaultSpawnWorker, verify: defaultVerify, readLogTail: defaultReadLogTail, isAlive: _isAlive },
+  _defaults: {
+    spawnWorker: defaultSpawnWorker,
+    terminateWorker: defaultTerminateWorker,
+    collectDescendantPids,
+    terminateProcessTree,
+    verify: defaultVerify,
+    readLogTail: defaultReadLogTail,
+    isAlive: _isAlive,
+    mergeBranch: defaultMergeBranch,
+    prepareReviewBranch: defaultPrepareReviewBranch,
+    failureFingerprints,
+    matchesBaselineFailure,
+    assessWorkerCompletion,
+  },
 };
