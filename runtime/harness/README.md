@@ -282,6 +282,35 @@ CLI agent can be wrapped and orchestrated uniformly:
 ./bin/agent room --room discovery --members "ba,architect,pm" --max-followups 1
 ```
 
+#### Studio Sessions
+
+Studio Sessions are the cockpit's saved build/deep-dive conversations. Each
+session has one lead registry agent, a durable AGUI-rendered transcript, an
+artifact/workflow panel, an optional planned team, and a room log under
+`runtime/harness/brain/rooms/sess-*/`.
+
+The session behavior is deliberate:
+
+- Creating or reopening a session does **not** start an A2A room loop.
+- The chat input talks to the selected lead through the AGUI bridge, persists
+  the turn in the session JSON, and mirrors user/lead turns into the session's
+  room `chat.log` so the team log visibly updates.
+- Provider cost is governed by the shared guardrails: max concurrent agents,
+  hourly/per-cycle spawn caps, and the kill switch. Paid labels alone do not
+  block normal agent use.
+- If a live room loop is running, the same chat input posts to the room instead
+  of also direct-calling the lead, so one user message does not double-trigger
+  agents. Agent replies appear in the room log.
+- Worker/team launch is explicit and plan-gated; launching workers does not
+  silently start paid providers or a background room loop.
+- Clicking an agent card opens a left-panel terminal inspector backed by tmux
+  `capture-pane` plus one-line `send-keys`. This is the free interim terminal;
+  the node-pty/xterm rebuild upgrades the transport later without changing the
+  session model.
+
+This keeps sessions useful as revisitable working conversations while avoiding
+surprise provider spend from hidden heartbeats or auto-spawns.
+
 #### Agent Roster Dogfood
 
 Use the roster dogfood runner whenever agent registry, provider, model, room, or
@@ -314,8 +343,8 @@ or a `<workspace>/agents.json` (env file wins). Providers can be mixed freely
 
 Notes:
 - Every A2A exchange is still mirrored into the human-visible **domain room** (the
-  `chat.log` bus) via the existing `agent_adapter`, and paid providers stay behind
-  the cost guardrail (`CEO_ALLOW_PAID=1` to allow non-interactive paid turns).
+  `chat.log` bus) via the existing `agent_adapter`; provider spend is bounded by
+  the shared caps/kill-switch rather than a paid-label block.
 - Personas resolve per-project via `agents/personas.py` (see `$CEO_PERSONAS_DIR`,
   `<workspace>/personas`, then the shipped `personas/`).
 - **Dependency:** `serve`/`meeting` need `a2a-sdk` in `runtime/harness/.venv`

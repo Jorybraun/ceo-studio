@@ -5,18 +5,17 @@
       "id": "ceo",
       "name": "CEO",
       "provider": "hermes",
-      "launch_mode": "hermes_profile",
-      "profile": "",
-      "room": "discovery",
-      "tmux_session": "pipe-ceo",
-      "persona": "",
       "capabilities": [
         "strategy",
         "conversation",
         "orchestration",
         "kanban"
       ],
-      "description": "The conversational CEO — the DEFAULT Hermes agent (OAuth/funded; there is NO API key and none is required). A mounted Hermes session (launch_mode hermes_profile, empty profile = default Hermes), viewable like any other agent. It owns the brain/memory/soul (~/.hermes/SOUL.md); CEO Studio is a face + cockpit on top of it. The cockpit chat (IPC agent:ask -> main/core/hermes.js) and the harness agent_adapter (provider hermes, agent 'ceo', room 'discovery') converge on the SAME persisted Hermes session, so the CEO is one durable session whether you chat, view its terminal, or dispatch to it."
+      "description": "The operational CEO and swarm manager — the DEFAULT Hermes agent (OAuth/funded; there is NO API key and none is required). It owns outcomes, not delegation memos: after planning it must promote work, select and dispatch registered agents through CEO Studio, monitor live workers and Kanban evidence, review and integrate outputs, route failures into repair, and continue until the goal is verified or a concrete human decision is required. A mounted Hermes session (launch_mode hermes_profile, empty profile = default Hermes), viewable like any other agent. It owns the brain/memory/soul (~/.hermes/SOUL.md); CEO Studio is its face and control plane. The cockpit chat and harness agent_adapter converge on the same durable CEO session.",
+      "tmux_session": "pipe-ceo",
+      "room": "discovery",
+      "launch_mode": "hermes_profile",
+      "profile": ""
     },
     {
       "id": "ba",
@@ -62,6 +61,7 @@
     },
     {
       "id": "planner",
+      "name": "planner",
       "provider": "devin",
       "model": "swe-1.6",
       "dispatch_profile": "devin",
@@ -69,7 +69,8 @@
       "capabilities": [
         "task-planning",
         "specs"
-      ]
+      ],
+      "tmux_session": "pipe-planner"
     },
     {
       "id": "builder",
@@ -204,8 +205,8 @@
     {
       "id": "dogfood-tester",
       "name": "dogfood-tester",
-      "provider": "devin",
-      "model": "swe-1.6",
+      "provider": "grok",
+      "model": "grok-4.3",
       "persona": "ba",
       "capabilities": [
         "testing",
@@ -254,6 +255,16 @@
         "doc-hygiene"
       ],
       "description": "Critical System Agent (design placeholder, domain-scoped): Per-domain guardian of documentation quality. Enforces Dirty/Clean states on all documents, detects contradictions, blocks work on dirty docs. Two-layer model. See domains/domain-lifecycle/docs/design/ and docs/personas/ba-document-guard.md (inside the Domain Lifecycle domain)"
+    },
+    {
+      "id": "grok-engineer",
+      "name": "Grok Engineer",
+      "provider": "grok",
+      "model": "grok-4.3",
+      "persona": "architect",
+      "description": "Grok Composer",
+      "memory_key": "grok:egineer:composer",
+      "tmux_session": "pipe-grok-engineer"
     }
   ],
   "teams": {

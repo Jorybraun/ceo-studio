@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""
+CEO Studio Terminal Control - Command-line interface for the CEO to interact with agent terminals.
+
+This command allows the CEO (Hermes agent) to:
+- View agent terminal snapshots
+- Send commands to agent terminals
+- Open interactive terminals in CEO Studio
+- Send messages to agent A2A rooms
+
+Usage:
+    ceo-studio-terminal snapshot <agent-id>
+    ceo-studio-terminal send <agent-id> <command>
+    ceo-studio-terminal open <agent-id>
+    ceo-studio-terminal message <agent-id> <message>
+"""
+
+import sys
+import os
+import json
+import subprocess
+import argparse
+import time
+
+# Add harness lib to path
+harness_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, harness_root)
+
+def tmux_capture(session, window="main", lines=240):
+    """Capture tmux session output."""
+    try:
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-S", f"-{lines}", "-t", f"{session}:{window}"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            return {"ok": True, "output": result.stdout}
+        return {"ok": False, "reason": result.stderr or "tmux capture failed"}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
+
+def tmux_send(session, window, text):
+    """Send keys to tmux session."""
+    try:
+        subprocess.run(
+            ["tmux", "send-keys", "-t", f"{session}:{window}", "-l", text],
+            capture_output=True,
+            timeout=5,
+            check=True
+        )
+        subprocess.run(
+            ["tmux", "send-keys", "-t", f"{session}:{window}", "Enter"],
+            capture_output=True,
+            timeout=5,
+            check=True
+        )
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
+
+def tmux_alive(session):
+    """Check if tmux session exists."""
+    try:
+        subprocess.run(
+            ["tmux", "has-session", "-t", f"={session}"],
+            capture_output=True,
+            timeout=2,
+            check=True
+        )
+        return True
+    except:
+        return False
+
+def get_agent_config(agent_id):
+    """Get agent configuration from registry."""
+    try:
+        registry_path = os.path.join(harness_root, "agents", "agents.json")
+        with open(registry_path, "r") as f:
+            registry = json.load(f)
+        
+        for agent in registry.get("agents", []):
+            if agent.get("id") == agent_id:
+                return agent
+        return None
+    except Exception as e:
+        print(f"Error reading registry: {e}", file=sys.stderr)
+        return None
+
+def cmd_snapshot(agent_id):
+    """Get terminal snapshot for agent."""
+    agent = get_agent_config(agent_id)
+    if not agent:
+        return {"ok": False, "reason": f"Agent not found: {agent_id}"}
+    
+    session = agent.get("tmux_session") or f"pipe-{agent_id}"
+    window = agent.get("tmux_window") or "main"
+    
+    if not tmux_alive(session):
+        return {"ok": False, "reason": f"Agent not running: session {session} not found"}
+    
+    result = tmux_capture(session, window)
+    return result
+
+def cmd_send(agent_id, command):
+    """Send command to agent terminal."""
+    agent = get_agent_config(agent_id)
+    if not agent:
+        return {"ok": False, "reason": f"Agent not found: {agent_id}"}
+    
+    session = agent.get("tmux_session") or f"pipe-{agent_id}"
+    window = agent.get("tmux_window") or "main"
+    
+    if not tmux_alive(session):
+        return {"ok": False, "reason": f"Agent not running: session {session} not found"}
+    
+    result = tmux_send(session, window, command)
+    return result
+
+def cmd_open(agent_id):
+    """Request opening interactive terminal via CEO Studio trigger system."""
+    agent = get_agent_config(agent_id)
+    if not agent:
+        return {"ok": False, "reason": f"Agent not found: {agent_id}"}
+    
+    session = agent.get("tmux_session") or f"pipe-{agent_id}"
+    window = agent.get("tmux_window") or "main"
+    
+    if not tmux_alive(session):
+        return {"ok": False, "reason": f"Agent not running: session {session} not found"}
+    
+    # Write trigger file for CEO Studio to pick up
+    import tempfile
+    import json
+    
+    trigger_dir = os.path.join(tempfile.gettempdir(), "ceo-studio-triggers")
+    trigger_file = os.path.join(trigger_dir, "terminal-open.json")
+    
+    try:
+        os.makedirs(trigger_dir, exist_ok=True)
+        trigger = {
+            "type": "terminal-open",
+            "agentId": agent_id,
+            "timestamp": int(time.time() * 1000)
+        }
+        with open(trigger_file, "w") as f:
+            json.dump(trigger, f, indent=2)
+        
+        return {
+            "ok": True,
+            "message": f"Triggered terminal open for {agent_id} (session: {session}, window: {window})",
+            "note": "CEO Studio should open the terminal window shortly"
+        }
+    except Exception as e:
+        return {"ok": False, "reason": f"Failed to write trigger: {str(e)}"}
+
+def cmd_message(agent_id, message):
+    """Send message to agent room (placeholder - needs domain-room integration)."""
+    agent = get_agent_config(agent_id)
+    if not agent:
+        return {"ok": False, "reason": f"Agent not found: {agent_id}"}
+    
+    room = agent.get("room") or "discovery"
+    
+    # Try to use domain-room post if available
+    domain_room_bin = os.path.join(harness_root, "bin", "domain-room")
+    if os.path.exists(domain_room_bin):
+        try:
+            result = subprocess.run(
+                [domain_room_bin, "post", room, "CEO", message],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                return {"ok": True, "room": room, "message": message}
+            return {"ok": False, "reason": result.stderr or "domain-room post failed"}
+        except Exception as e:
+            return {"ok": False, "reason": str(e)}
+    
+    return {
+        "ok": False,
+        "reason": "domain-room command not found - cannot send room message"
+    }
+
+def main():
+    parser = argparse.ArgumentParser(description="CEO Studio Terminal Control")
+    subparsers = parser.add_subparsers(dest="action", help="Available commands")
+    
+    # Snapshot command
+    snapshot_parser = subparsers.add_parser("snapshot", help="Get terminal snapshot")
+    snapshot_parser.add_argument("agent_id", help="Agent ID")
+    
+    # Send command
+    send_parser = subparsers.add_parser("send", help="Send command to terminal")
+    send_parser.add_argument("agent_id", help="Agent ID")
+    send_parser.add_argument("command", help="Command to send")
+    
+    # Open command
+    open_parser = subparsers.add_parser("open", help="Open interactive terminal")
+    open_parser.add_argument("agent_id", help="Agent ID")
+    
+    # Message command
+    message_parser = subparsers.add_parser("message", help="Send message to agent room")
+    message_parser.add_argument("agent_id", help="Agent ID")
+    message_parser.add_argument("message", help="Message to send")
+    
+    args = parser.parse_args()
+    
+    if not args.action:
+        parser.print_help()
+        sys.exit(1)
+    
+    result = None
+    if args.action == "snapshot":
+        result = cmd_snapshot(args.agent_id)
+    elif args.action == "send":
+        result = cmd_send(args.agent_id, args.command)
+    elif args.action == "open":
+        result = cmd_open(args.agent_id)
+    elif args.action == "message":
+        result = cmd_message(args.agent_id, args.message)
+    
+    # Output result as JSON for easy parsing
+    print(json.dumps(result, indent=2))
+    
+    # Exit with error code if not ok
+    if result and not result.get("ok"):
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

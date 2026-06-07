@@ -1,0 +1,22 @@
+{
+  "policies": [
+    {
+      "id": "standup-meetings",
+      "enabled": true,
+      "projectName": "CEO_STUDIO",
+      "domain": "meetings",
+      "agendaDomain": "meetings",
+      "board": "ceo-studio",
+      "timeLocal": "09:15",
+      "timezone": "America/Vancouver",
+      "recurrence": "daily",
+      "team": "discovery-planning",
+      "members": "",
+      "meetingId": "standup-meetings",
+      "lastAgendaDate": "2026-06-04",
+      "lastAgendaItemId": "standup-meetings-2026-06-04",
+      "createdAt": "2026-06-04T19:12:37.804Z",
+      "updatedAt": "2026-06-04T19:12:37.804Z"
+    }
+  ]
+}

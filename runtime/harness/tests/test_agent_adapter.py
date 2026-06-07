@@ -1,7 +1,7 @@
 """
 Tests for the generic provider-backed agent adapter + guardrail integration.
-No API cost: uses the `echo` provider, and verifies the paid (`devin`) provider
-is REFUSED for automated dispatch *before* any real call is made.
+No API cost: uses the `echo` provider and verifies the shared cap/kill-switch
+guardrails without invoking paid provider CLIs.
 
 Run: python3 tests/test_agent_adapter.py
 """
@@ -14,10 +14,9 @@ from pathlib import Path
 HARNESS_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HARNESS_ROOT))
 
-# Isolate guardrail ledger; ensure paid agents are NOT enabled (default-safe).
+# Isolate guardrail ledger.
 os.environ["CEO_GUARDRAIL_DIR"] = tempfile.mkdtemp(prefix="adv-guardrail-")
 os.environ["CEO_GUARDRAIL_DISABLE_TMUX"] = "1"
-os.environ.pop("CEO_ALLOW_PAID", None)
 
 from agents import agent_adapter   # noqa: E402
 from config import cost_limits     # noqa: E402
@@ -44,11 +43,9 @@ try:
     r2 = agent_adapter.tell("tester", ROOM, "remember?")
     ok("echo tell ok + continuity", r2["ok"] and "turn=2" in r2["reply"])
 
-    # 3. paid provider (devin) is REFUSED for automated (non-interactive) dispatch,
-    #    WITHOUT ever invoking devin (no cost).
-    r3 = agent_adapter.dispatch("devin", "devin-x", ROOM, "noop", interactive=False)
-    ok("paid devin refused when non-interactive + no CEO_ALLOW_PAID",
-       (not r3["ok"]) and r3.get("refused") and "paid" in r3["reason"].lower())
+    # 3. paid classification alone does not block; shared caps do the safety work.
+    allowed, reason = cost_limits.can_spawn("devin:devin-x", paid=True, running_count=0)
+    ok("paid classification alone does not block agent use", allowed and reason == "ok")
 
     # 4. per-hour spawn cap enforced through the adapter (echo)
     cost_limits.MAX_SPAWNS_PER_HOUR = 3  # already used 1 (echo dispatch above)

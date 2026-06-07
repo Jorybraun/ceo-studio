@@ -36,7 +36,7 @@ echo '}'
 echo ""
 echo "Then start the app below. The Electron renderer will be inspectable via CDP."
 
-npm run build:agui
+npm run build:renderer
 CEO_STUDIO_REMOTE_DEBUG_PORT="${PORT}" ./node_modules/.bin/electron .
 
 # Note: the MCP server itself runs in the AI client's stdio context, not here.

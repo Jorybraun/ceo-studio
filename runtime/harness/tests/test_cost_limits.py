@@ -17,7 +17,6 @@ def cl(tmp_path, monkeypatch):
     """Fresh, isolated guardrail module per test (tmp ledger dir, no tmux)."""
     monkeypatch.setenv("CEO_GUARDRAIL_DIR", str(tmp_path / "guardrail"))
     monkeypatch.setenv("CEO_GUARDRAIL_DISABLE_TMUX", "1")
-    monkeypatch.delenv("CEO_ALLOW_PAID", raising=False)
     from config import cost_limits
     importlib.reload(cost_limits)
     return cost_limits
@@ -30,19 +29,13 @@ def test_paid_agent_classification(cl):
     assert cl.is_paid_agent("deep-researcher") is False
 
 
-def test_paid_agent_denied_for_automated_spawn(cl):
+def test_paid_agent_label_does_not_block_spawn(cl):
     ok, reason = cl.can_spawn("grok-research", running_count=0)
-    assert ok is False
-    assert "paid" in reason.lower()
-
-
-def test_paid_agent_allowed_when_enabled(cl, monkeypatch):
-    monkeypatch.setattr(cl, "PAID_AGENTS_ENABLED", True)
-    ok, _ = cl.can_spawn("grok-research", running_count=0)
     assert ok is True
+    assert reason == "ok"
 
 
-def test_paid_agent_allowed_when_interactive(cl):
+def test_interactive_flag_does_not_change_paid_policy(cl):
     ok, _ = cl.can_spawn("grok-research", running_count=0, interactive=True)
     assert ok is True
 
@@ -115,19 +108,21 @@ def test_kill_switch_blocks_everything(cl):
 def test_credit_burn_scenario_is_bounded(cl, monkeypatch):
     """
     Simulate the original incident: the SAME paid delegation attempted on every
-    poll cycle. Previously this spawned unbounded paid sessions. Now every such
-    attempt must be refused under default (automated) config.
+    poll cycle. Previously this spawned unbounded paid sessions. Now the hourly
+    spawn cap bounds it without blocking paid-labeled providers outright.
     """
-    refused = 0
+    monkeypatch.setattr(cl, "MAX_SPAWNS_PER_HOUR", 12)
+    allowed = 0
     for _ in range(50):  # 50 poll cycles with the stuck action
         ok, _ = cl.can_spawn("grok-research", running_count=0)
-        if not ok:
-            refused += 1
-    assert refused == 50  # zero paid spawns allowed
+        if ok:
+            allowed += 1
+            cl.record_spawn("grok-research")
+    assert allowed == 12
 
 
 def test_cli_check_exit_codes(cl, tmp_path, monkeypatch):
-    """The shell-facing CLI must exit non-zero (deny) for paid agents."""
+    """The shell-facing CLI allows paid labels but denies real cap breaches."""
     import subprocess
     import sys
     from pathlib import Path
@@ -138,11 +133,15 @@ def test_cli_check_exit_codes(cl, tmp_path, monkeypatch):
         "CEO_GUARDRAIL_DIR": str(tmp_path / "cli-guardrail"),
         "CEO_GUARDRAIL_DISABLE_TMUX": "1",
     }
-    env.pop("CEO_ALLOW_PAID", None)
-
-    denied = subprocess.run(
+    allowed_paid = subprocess.run(
         [sys.executable, str(harness_root / "config" / "cost_limits.py"), "check", "grok-research"],
         capture_output=True, text=True, env=env,
+    )
+    assert allowed_paid.returncode == 0
+
+    denied = subprocess.run(
+        [sys.executable, str(harness_root / "config" / "cost_limits.py"), "check", "deep-researcher"],
+        capture_output=True, text=True, env={**env, "CEO_MAX_SPAWNS_PER_HOUR": "0"},
     )
     assert denied.returncode == 3
 

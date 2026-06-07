@@ -11,7 +11,7 @@
  *     requirements.md when done. The cockpit polls those.
  *
  * Free `echo` provider = zero cost. Real providers (devin/grok) require the
- * caller to opt into paid spend (allowPaid -> CEO_ALLOW_PAID=1).
+ * caller to opt into paid spend. Now always enabled (CEO_ALLOW_PAID=1 hardcoded).
  */
 const path = require("path");
 const fs = require("fs");
@@ -21,14 +21,41 @@ const { resolvePython, envWithPython } = require("./pybin");
 function harnessRoot(projectPath) {
   return path.join(projectPath || process.cwd(), "runtime", "harness");
 }
+function bundledHarnessRoot() {
+  return path.join(__dirname, "..", "..", "runtime", "harness");
+}
+function executableHarnessRoot(projectPath) {
+  const projectHarness = harnessRoot(projectPath);
+  const hasProjectHarness =
+    fs.existsSync(path.join(projectHarness, "bin", "agent")) &&
+    fs.existsSync(path.join(projectHarness, "agents", "agent_config.py"));
+  return hasProjectHarness ? projectHarness : bundledHarnessRoot();
+}
 function agentBin(projectPath) {
-  return path.join(harnessRoot(projectPath), "bin", "agent");
+  return path.join(executableHarnessRoot(projectPath), "bin", "agent");
 }
 function roomsDir(projectPath) {
-  return path.join(harnessRoot(projectPath), "brain", "rooms");
+  // Rooms are the human-visible A2A bus and MUST match where the registry/mount
+  // path writes (main/core/mount.js sets HARNESS_WORKSPACE=projectPath, so the
+  // harness resolves rooms to <project>/brain/rooms — see runtime/harness/config/paths.py).
+  // Previously this pointed at <project>/runtime/harness/brain/rooms, which split
+  // the read path (this module) from the write path (mount.js): messages sent to
+  // an agent never appeared in the feed, and the feed showed stale harness data.
+  return path.join(projectPath || process.cwd(), "brain", "rooms");
 }
 function roomDir(projectPath, room) {
   return path.join(roomsDir(projectPath), room);
+}
+// Env for spawned harness processes. Pin HARNESS_WORKSPACE to the project root so
+// rooms written by meeting/room-loop daemons land in the SAME tree this module
+// reads (and that mount.js writes). Without this, the harness defaults to its own
+// install dir and recreates the split-brain room storage.
+function harnessEnv(projectPath, extra = {}) {
+  const env = envWithPython();
+  if (projectPath) env.HARNESS_WORKSPACE = projectPath;
+  const pyPath = executableHarnessRoot(projectPath);
+  env.PYTHONPATH = env.PYTHONPATH ? `${pyPath}${path.delimiter}${env.PYTHONPATH}` : pyPath;
+  return Object.assign(env, extra);
 }
 function meetingsDir(projectPath) {
   return path.join(harnessRoot(projectPath), "brain", "meetings");
@@ -56,12 +83,13 @@ function mountedAgents() {
 /** Run a model-free harness python helper module and parse its JSON stdout. */
 function _pyJson(projectPath, moduleName) {
   try {
+    const execRoot = executableHarnessRoot(projectPath);
     const out = execFileSync(resolvePython(), ["-m", moduleName], {
-      cwd: harnessRoot(projectPath),
+      cwd: execRoot,
       encoding: "utf-8",
       timeout: 8000,
       maxBuffer: 4 * 1024 * 1024,
-      env: envWithPython(),
+      env: harnessEnv(projectPath),
     });
     return JSON.parse(out || "null");
   } catch (e) {
@@ -109,6 +137,18 @@ function _meetingId() {
   return `mtg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
+function _normalizeBriefRef(value) {
+  if (!value || typeof value !== "object") return null;
+  const board = String(value.board || "").trim();
+  const taskId = String(value.taskId || "").trim();
+  if (!board || !taskId) return null;
+  return {
+    board,
+    taskId,
+    runId: String(value.runId || `${board}:${taskId}`).trim(),
+  };
+}
+
 function _normalizeScheduled(info = {}) {
   const now = new Date().toISOString();
   const title = String(info.title || "").trim() || "Untitled meeting";
@@ -126,7 +166,11 @@ function _normalizeScheduled(info = {}) {
     members: String(info.members || ""),
     allowPaid: !!info.allowPaid,
     sourceContext: Array.isArray(info.sourceContext) ? info.sourceContext : [],
+    briefRef: _normalizeBriefRef(info.briefRef),
     room: String(info.room || ""),
+    roomPrefix: String(info.roomPrefix || ""),
+    lastOccurrenceRoom: String(info.lastOccurrenceRoom || ""),
+    lastStartedAt: String(info.lastStartedAt || ""),
     createdAt: String(info.createdAt || now),
     updatedAt: now,
   };
@@ -183,15 +227,31 @@ function _nextRecurringTime(iso, recurrence) {
   return d.toISOString();
 }
 
-function startScheduled({ projectPath, id } = {}) {
+function _occurrenceRoom(meeting) {
+  if (!meeting || meeting.recurrence === "none") {
+    return _safeRoom(meeting && meeting.room) || _safeRoom(`${meeting && meeting.title}-${Date.now()}`);
+  }
+  const prefix = _safeRoom(meeting.roomPrefix || meeting.room || meeting.title) || "meeting";
+  const occurrence = String(meeting.scheduledFor || new Date().toISOString())
+    .replace(/\.\d{3}Z$/, "Z")
+    .replace(/[^0-9a-z]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
+  return _safeRoom(`${prefix}-${occurrence}`) || `${prefix}-${Date.now()}`;
+}
+
+function startScheduled({ projectPath, id, agendaAppend } = {}) {
   const current = listScheduled(projectPath).meetings;
   const meeting = current.find((m) => m.id === id);
   if (!meeting) return { ok: false, reason: "scheduled meeting not found" };
-  const room = _safeRoom(meeting.room) || _safeRoom(`${meeting.title}-${Date.now()}`) || `meeting-${Date.now()}`;
+  if (meeting.status !== "scheduled") {
+    return { ok: false, reason: `scheduled meeting is ${meeting.status || "not ready"}` };
+  }
+  const room = _occurrenceRoom(meeting);
   const started = start({
     projectPath,
     room,
-    agenda: meeting.agenda,
+    agenda: `${meeting.agenda}${String(agendaAppend || "").trim() ? `\n${String(agendaAppend).trim()}` : ""}`,
     criteria: meeting.criteria,
     members: meeting.members,
     team: meeting.team,
@@ -199,19 +259,30 @@ function startScheduled({ projectPath, id } = {}) {
   });
   if (!started || !started.ok) return started;
   const now = new Date().toISOString();
-  const next = current.map((m) => m.id === id
-    ? { ...m, status: "started", room: started.room, startedAt: now, updatedAt: now }
-    : m);
+  const next = current.filter((m) => m.id !== id);
   const nextTime = _nextRecurringTime(meeting.scheduledFor, meeting.recurrence);
   if (nextTime) {
     next.push(_normalizeScheduled({
       ...meeting,
-      id: _meetingId(),
+      id: meeting.id,
       room: "",
+      roomPrefix: meeting.roomPrefix || meeting.room || _safeRoom(meeting.title),
+      lastOccurrenceRoom: started.room,
+      lastStartedAt: now,
       status: "scheduled",
       scheduledFor: nextTime,
-      createdAt: now,
+      createdAt: meeting.createdAt || now,
     }));
+  } else {
+    next.push({
+      ...meeting,
+      status: "started",
+      room: started.room,
+      lastOccurrenceRoom: started.room,
+      lastStartedAt: now,
+      startedAt: now,
+      updatedAt: now,
+    });
   }
   saveScheduled(projectPath, next);
   return { ...started, meeting: { ...meeting, status: "started", room: started.room, startedAt: now } };
@@ -289,14 +360,14 @@ function start({ projectPath, room, agenda, criteria, members, team, orchestrato
   else args.push("--members", String(members));
   if (orchestrator) args.push("--orchestrator", String(orchestrator));
 
-  const env = envWithPython();
-  if (allowPaid) env.CEO_ALLOW_PAID = "1";
+  const env = harnessEnv(projectPath);
+  env.CEO_ALLOW_PAID = "1"; // always enable real models (user: on all the time)
 
   // Fresh room each start: clear any stale transcript/requirements for this name.
   try { fs.rmSync(roomDir(projectPath, safeRoom), { recursive: true, force: true }); } catch { /* ignore */ }
 
   try {
-    const child = spawn(bin, args, { cwd: harnessRoot(projectPath), env, detached: true, stdio: "ignore" });
+    const child = spawn(bin, args, { cwd: executableHarnessRoot(projectPath), env, detached: true, stdio: "ignore" });
     child.unref();
     return { ok: true, room: safeRoom, members: members || null, team: team || null };
   } catch (e) {
@@ -335,11 +406,11 @@ function startRoomLoop({ projectPath, room, members, team, criteria, allowPaid, 
   // gbrain shared memory is on by default; pass --no-gbrain only when explicitly disabled.
   if (gbrain === false) args.push("--no-gbrain");
 
-  const env = envWithPython();
-  if (allowPaid) env.CEO_ALLOW_PAID = "1";
+  const env = harnessEnv(projectPath);
+  env.CEO_ALLOW_PAID = "1"; // always enable real models (user: on all the time)
 
   try {
-    const child = spawn(bin, args, { cwd: harnessRoot(projectPath), env, stdio: "ignore" });
+    const child = spawn(bin, args, { cwd: executableHarnessRoot(projectPath), env, stdio: "ignore" });
     roomLoops.set(safeRoom, child);
     child.on("exit", () => { if (roomLoops.get(safeRoom) === child) roomLoops.delete(safeRoom); });
     return { ok: true, room: safeRoom, started: true };
@@ -398,7 +469,11 @@ function _parseLog(text) {
   if (cur) out.push(cur);
   for (const e of out) e.body = e.body.trim();
   // Drop the file's leading "# <room> Team Room" header lines (no header match -> ignored).
-  return out;
+  // Also drop watcher presence heartbeats ("heartbeat at <iso>") — these are liveness
+  // pings, not conversation, and historically flooded the room (~95% of entries),
+  // burying real A2A messages. Presence/liveness is tracked separately via the
+  // room's presence/ dir (domain-room who), so the human-visible feed stays clean.
+  return out.filter((e) => !/^heartbeat at\b/i.test(e.body || ""));
 }
 
 /**

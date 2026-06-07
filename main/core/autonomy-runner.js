@@ -623,6 +623,24 @@ function defaultBaseBranch(projectPath) {
   catch { return "main"; }
 }
 
+/**
+ * Git disposition of a task's auto/* branch relative to the integration base.
+ * Returns `{ exists, ahead, merged }`. Used by report() to tell delivered work
+ * (merged) from stranded work (commits that never landed) and DIVERGED work
+ * (the board says "done" but the branch was never integrated).
+ */
+function defaultBranchState({ projectPath, branch } = {}) {
+  if (!projectPath || !branch) return { exists: false, ahead: 0, merged: false };
+  try { _git(projectPath, ["rev-parse", "--verify", "--quiet", branch]); }
+  catch { return { exists: false, ahead: 0, merged: false }; }
+  const base = defaultBaseBranch(projectPath);
+  let ahead = 0;
+  let merged = false;
+  try { ahead = Number(String(_git(projectPath, ["rev-list", "--count", `${base}..${branch}`])).trim() || "0"); } catch { ahead = 0; }
+  try { _git(projectPath, ["merge-base", "--is-ancestor", branch, base]); merged = true; } catch { merged = false; }
+  return { exists: true, ahead, merged };
+}
+
 /** Push a verified worker branch to origin. force-with-lease is used only as a
  *  rebase fallback and only ever on the throwaway auto/* branch, never main. */
 function defaultPushReviewBranch({ projectPath, worktree, branch } = {}) {
@@ -715,6 +733,7 @@ const REAL_DEPS = {
   prepareReviewBranch: defaultPrepareReviewBranch,
   mergeBranch: defaultMergeBranch,
   branchAhead: defaultBranchAhead,
+  branchState: defaultBranchState,
   pushReviewBranch: defaultPushReviewBranch,
   openPullRequest: defaultOpenPullRequest,
   pullRequestStatus: defaultPullRequestStatus,
@@ -1840,6 +1859,119 @@ function status(slug) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Oversight report — the "what is the swarm actually doing, and what got
+// stranded?" surface. For every task on every board it cross-references the
+// live worker roster, the runner state (open PRs, in-flight reviews, repair-cap
+// escalations, human-required gates) and git, to assign each task one honest
+// disposition. The absence of exactly this surface is what let ~17 lanes get
+// silently abandoned: the runner only had "auto-merge on green" or "block on
+// red", with nothing reporting completed-but-unlanded work. The standout signal
+// is `diverged` — the board says "done" but the branch never reached the base.
+// ---------------------------------------------------------------------------
+const REPORT_DISPOSITIONS = ["live", "diverged", "open-pr", "delivered", "in-review", "needs-human", "stranded", "blocked"];
+
+function dispositionFor({ status: taskStatus, live, hasPR, inReview, escalated, humanRequired, branch }) {
+  const s = String(taskStatus || "").toLowerCase();
+  const stranded = !!(branch && branch.exists && !branch.merged && branch.ahead > 0);
+  if (live) return "live";
+  if (s === "done" && stranded) return "diverged"; // ⚠ board says done; code is NOT in the base branch
+  if (hasPR) return "open-pr";
+  if (s === "done") return "delivered";
+  if (humanRequired || escalated) return "needs-human";
+  if (inReview || s === "review") return "in-review";
+  if (stranded) return "stranded";
+  return s || "unknown";
+}
+
+function classifyTask(task, { board, projectPath, state, workers, branchState }) {
+  const id = String((task && task.id) || "");
+  const taskStatus = String((task && task.status) || "").toLowerCase();
+  const key = `${board}:${id}`;
+  const branchName = branchNameFor(board, id);
+  const bs = (branchState && branchState({ projectPath, branch: branchName })) || { exists: false, ahead: 0, merged: false };
+  const live = workers.some((w) => w.board === board && w.taskId === id);
+  const hasPR = !!(state.pullRequests && state.pullRequests[key]);
+  const inReview = !!(state.reviews && state.reviews[key]);
+  const compRepair = state.completionRepairs && state.completionRepairs[key];
+  const intRepair = state.integrationRepairs && state.integrationRepairs[key];
+  const escalated = !!((compRepair && compRepair.escalated) || (intRepair && intRepair.escalated));
+  const humanRequired = !!(state.humanRequired && state.humanRequired[key]);
+  const repairGeneration = (state.repairChains && state.repairChains[id]) || 0;
+  const disposition = dispositionFor({ status: taskStatus, live, hasPR, inReview, escalated, humanRequired, branch: bs });
+  return {
+    board,
+    id,
+    title: String((task && task.title) || ""),
+    status: taskStatus,
+    assignee: (task && task.assignee) || null,
+    branch: bs.exists ? branchName : null,
+    ahead: bs.ahead || 0,
+    merged: !!bs.merged,
+    disposition,
+    diverged: disposition === "diverged",
+    escalated,
+    humanRequired,
+    repairGeneration,
+    pr: hasPR ? (state.pullRequests[key].url || null) : null,
+  };
+}
+
+/**
+ * Build the oversight inventory for a project's boards. Pure aside from the
+ * injected `deps.hermes.getBoard` + `deps.branchState`, so it is fully testable.
+ */
+function report({ projectSlug, projectPath, deps: depsIn, boards: boardsOverride, state: stateOverride, workers: workersOverride } = {}) {
+  if (!projectSlug) return { ok: false, reason: "project slug required" };
+  const deps = { ...REAL_DEPS, ...(depsIn || {}) };
+  const policy = getPolicy(projectSlug);
+  const state = stateOverride || getState(projectSlug);
+  const isAlive = deps.isAlive || _isAlive;
+  const workersRaw = Array.isArray(workersOverride) ? workersOverride : getWorkers(projectSlug);
+  const workers = workersRaw.map((w) => ({ ...w, alive: isAlive(w.pid) }));
+  const boards = Array.isArray(boardsOverride) && boardsOverride.length
+    ? boardsOverride
+    : resolveBoards(deps, policy, { projectSlug, projectPath });
+  const branchState = deps.branchState || defaultBranchState;
+  const summary = { tasks: 0, byDisposition: {} };
+  for (const d of REPORT_DISPOSITIONS) summary.byDisposition[d] = 0;
+
+  const boardReports = [];
+  for (const board of boards) {
+    let boardData = null;
+    try { boardData = deps.hermes.getBoard(board); } catch { boardData = null; }
+    if (!boardData || boardData.ok === false || !boardData.columns) {
+      boardReports.push({ board, ok: false, reason: (boardData && boardData.reason) || "board read failed", tasks: [] });
+      continue;
+    }
+    const seen = new Set();
+    const tasks = [];
+    for (const lane of Object.keys(boardData.columns)) {
+      for (const t of laneTasks(boardData, lane)) {
+        const id = String((t && t.id) || "");
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        const row = classifyTask(t, { board, projectPath, state, workers, branchState });
+        row.lane = lane;
+        tasks.push(row);
+        summary.tasks += 1;
+        summary.byDisposition[row.disposition] = (summary.byDisposition[row.disposition] || 0) + 1;
+      }
+    }
+    boardReports.push({ board, ok: true, tasks });
+  }
+  return {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    projectSlug,
+    running: !!policy.enabled,
+    integrationMode: policy.integrationMode,
+    summary,
+    workers: workers.map((w) => ({ board: w.board, taskId: w.taskId, agentId: w.agentId, model: w.model, pid: w.pid, alive: w.alive, title: w.title || null })),
+    boards: boardReports,
+  };
+}
+
 module.exports = {
   DEFAULT_POLICY,
   normalizePolicy,
@@ -1853,6 +1985,7 @@ module.exports = {
   releaseLock,
   runCycle,
   status,
+  report,
   // exported for tests / advanced callers
   _defaults: {
     spawnWorker: defaultSpawnWorker,
@@ -1863,9 +1996,12 @@ module.exports = {
     readLogTail: defaultReadLogTail,
     isAlive: _isAlive,
     mergeBranch: defaultMergeBranch,
+    branchState: defaultBranchState,
     prepareReviewBranch: defaultPrepareReviewBranch,
     failureFingerprints,
     matchesBaselineFailure,
     assessWorkerCompletion,
+    classifyTask,
+    dispositionFor,
   },
 };

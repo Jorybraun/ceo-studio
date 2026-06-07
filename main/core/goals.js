@@ -114,6 +114,12 @@ function linkWork(slugName, { goalId, workKind = "task", workId, board, title, r
   const data = _readFile(slugName);
   const idx = data.goals.findIndex((g) => g.id === goalId);
   if (idx < 0) return { ok: false, reason: `goal not found: ${goalId}` };
+  const existing = (data.goals[idx].links || []).find((item) =>
+    item.workKind === (text(workKind) || "task")
+    && item.workId === text(workId)
+    && item.board === text(board)
+    && item.relationship === (text(relationship) || "supports"));
+  if (existing) return { ok: true, goal: data.goals[idx], link: existing, changed: false };
   const now = new Date().toISOString();
   const link = {
     id: `goal_link_${crypto.randomBytes(5).toString("hex")}`,
@@ -137,7 +143,7 @@ function linkWork(slugName, { goalId, workKind = "task", workId, board, title, r
     child: provenance.ref(link.workKind, link.workId, { board: link.board, title: link.title }),
     metadata: { relationship: link.relationship },
   });
-  return { ok: true, goal: data.goals[idx], link, provenanceEventId: event && event.id };
+  return { ok: true, goal: data.goals[idx], link, changed: true, provenanceEventId: event && event.id };
 }
 
 function summary(slugName, filters = {}) {

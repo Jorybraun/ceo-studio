@@ -48,7 +48,7 @@ def _int_env(name: str, default: int) -> int:
 
 
 # Max agents allowed to be running concurrently (tmux sessions).
-MAX_CONCURRENT_AGENTS = _int_env("CEO_MAX_CONCURRENT_AGENTS", 5)
+MAX_CONCURRENT_AGENTS = _int_env("CEO_MAX_CONCURRENT_AGENTS", 10)
 
 # Max NEW agents a single orchestrator cycle may spawn.
 MAX_SPAWNS_PER_CYCLE = _int_env("CEO_MAX_SPAWNS_PER_CYCLE", 2)
@@ -56,9 +56,10 @@ MAX_SPAWNS_PER_CYCLE = _int_env("CEO_MAX_SPAWNS_PER_CYCLE", 2)
 # Max NEW agents spawned within a rolling 1-hour window (across all callers).
 MAX_SPAWNS_PER_HOUR = _int_env("CEO_MAX_SPAWNS_PER_HOUR", 12)
 
-# Paid agents (separate API-consuming sessions) are DISABLED by default for
-# automated/non-interactive spawning. Set CEO_ALLOW_PAID=1 to permit them.
-PAID_AGENTS_ENABLED = os.environ.get("CEO_ALLOW_PAID", "0") == "1"
+# Paid agents are normal in this workspace. Cost safety is enforced by the
+# concurrency/hourly/per-cycle caps and kill switch below, not by blocking a
+# provider just because it consumes credits.
+PAID_AGENTS_ENABLED = os.environ.get("CEO_ALLOW_PAID", "1") == "1"
 
 # Agent tmux sessions follow the registry naming convention `pipe-<id>` (see
 # agents/registry.py and main/core/mount.js). ONLY these count toward the
@@ -208,22 +209,15 @@ def can_spawn(
     that callers should log. This is the single enforcement point — every
     spawn path must call it.
 
-    - interactive=True means a human is at a TTY and may be prompted to
-      override the paid-agent gate; non-interactive callers must rely on
-      CEO_ALLOW_PAID.
+    - interactive is retained for old callers but no longer changes paid-provider
+      behavior; paid providers are governed by the shared caps below.
     - paid: explicit paid classification (e.g. from a provider that knows it
       consumes credits). If None, falls back to name-prefix detection.
     """
     if stop_requested():
         return False, "STOP sentinel present (global kill switch active)"
 
-    is_paid = is_paid_agent(agent_name) if paid is None else bool(paid)
-    if is_paid and not PAID_AGENTS_ENABLED and not interactive:
-        return False, (
-            f"'{agent_name}' is a paid/separate API session and is disabled for "
-            f"automated spawning (set CEO_ALLOW_PAID=1 to permit). This is the #1 "
-            f"credit-burn vector."
-        )
+    _ = is_paid_agent(agent_name) if paid is None else bool(paid)
 
     if spawns_this_cycle >= MAX_SPAWNS_PER_CYCLE:
         return False, f"per-cycle spawn cap reached ({MAX_SPAWNS_PER_CYCLE})"

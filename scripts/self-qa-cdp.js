@@ -20,6 +20,7 @@ const PORT = Number(process.env.CEO_STUDIO_REMOTE_DEBUG_PORT || process.env.ELEC
 const OUTPUT_DIR = path.resolve(process.env.CEO_STUDIO_QA_OUTPUT || path.join(ROOT, "dogfood-output", "self-qa"));
 const SELF_PROJECT_SUFFIX = process.env.CEO_STUDIO_QA_PROJECT_SUFFIX || "CEO_STUDIO";
 const BOARD = process.env.CEO_STUDIO_QA_BOARD || "ceo-studio";
+const TARGET_BOARD = process.env.CEO_STUDIO_QA_TARGET_BOARD || "pipe-os";
 const CONTINUOUS = process.argv.includes("--continuous");
 const MAX_PASSES = Number(process.env.CEO_STUDIO_QA_MAX_PASSES || (CONTINUOUS ? 10 : 1));
 const LOG_KANBAN = !process.argv.includes("--no-kanban");
@@ -243,6 +244,85 @@ async function runScenarios({ ev, Page, passNo }) {
       actual: JSON.stringify({ ok: board && board.ok, columns, missing }),
       steps: [`Call window.ceo.ceoBoard('${BOARD}').`, "Inspect returned columns."],
       evidence: [JSON.stringify(board)],
+    }));
+  }
+
+  const targetBoard = await ev(`window.ceo.ceoBoard(${JSON.stringify(TARGET_BOARD)})`);
+  if (!targetBoard || !targetBoard.ok || Number(targetBoard.total || 0) <= 0) {
+    findings.push(finding({
+      scenario: "target-board",
+      title: "Autonomy target board is not readable through CEO Studio",
+      severity: "critical",
+      category: "Functional",
+      expected: `CEO Studio reads the real Hermes ${TARGET_BOARD} board with non-empty work so the runner can manage the requested product goal.`,
+      actual: JSON.stringify({ ok: targetBoard && targetBoard.ok, reason: targetBoard && targetBoard.reason, total: targetBoard && targetBoard.total }),
+      steps: [`Call window.ceo.ceoBoard('${TARGET_BOARD}') through the Electron preload bridge.`, "Confirm the result is ok and contains live tasks."],
+      evidence: [JSON.stringify(targetBoard)],
+    }));
+  }
+
+  const runnerStatus = await ev("window.ceo.runnerStatus()");
+  const verifyCommands = (runnerStatus && runnerStatus.policy && runnerStatus.policy.verifyCommands) || [];
+  const hasVerifyCommand = (cmd, args) => verifyCommands.some((entry) =>
+    Array.isArray(entry) && entry[0] === cmd && Array.isArray(entry[1]) && entry[1].join(" ") === args);
+  if (!runnerStatus || !runnerStatus.ok || runnerStatus.policy.execute !== true || !hasVerifyCommand("npm", "run check") || !hasVerifyCommand("npm", "test")) {
+    findings.push(finding({
+      scenario: "runner-control",
+      title: "Autonomy runner policy is not configured for real gated execution",
+      severity: "critical",
+      category: "Functional",
+      expected: "runnerStatus exposes an enabled execution contract with npm run check and npm test as the review gate.",
+      actual: JSON.stringify(runnerStatus),
+      steps: ["Open CEO Studio self project.", "Call window.ceo.runnerStatus().", "Inspect execute and verifyCommands."],
+      evidence: [JSON.stringify(runnerStatus)],
+    }));
+  }
+
+  const runnerDryRun = await ev(`window.ceo.runnerRunOnce(${JSON.stringify({
+    policy: {
+      boards: [TARGET_BOARD],
+      dryRun: true,
+      allowUnblocker: false,
+      allowDecompose: true,
+      allowAssign: true,
+      execute: true,
+      allowReviewGate: true,
+      maxDispatchPerCycle: 1,
+      maxConcurrentWorkers: 1,
+    },
+  })})`);
+  if (!runnerDryRun || !runnerDryRun.ok || !runnerDryRun.policy || runnerDryRun.policy.dryRun !== true || runnerDryRun.spawned !== 0 || !((runnerDryRun.boards || []).includes(TARGET_BOARD))) {
+    findings.push(finding({
+      scenario: "runner-control",
+      title: "Autonomy runner dry-run cannot inspect the target board",
+      severity: "critical",
+      category: "Functional",
+      expected: `runnerRunOnce dry-run inspects ${TARGET_BOARD}, records phases, and spawns no workers or board mutations.`,
+      actual: JSON.stringify({
+        ok: runnerDryRun && runnerDryRun.ok,
+        boards: runnerDryRun && runnerDryRun.boards,
+        spawned: runnerDryRun && runnerDryRun.spawned,
+        errors: runnerDryRun && runnerDryRun.errors,
+        policy: runnerDryRun && runnerDryRun.policy,
+      }),
+      steps: ["Open CEO Studio self project.", `Call window.ceo.runnerRunOnce({policy:{boards:['${TARGET_BOARD}'], dryRun:true}}).`, "Confirm ok, target board included, and spawned=0."],
+      evidence: [JSON.stringify(runnerDryRun)],
+    }));
+  }
+  const targetTriageCount = Object.values((targetBoard && targetBoard.columns) || {})
+    .flat()
+    .filter((t) => t && t.status === "triage").length;
+  const researchActions = (runnerDryRun && runnerDryRun.phases && runnerDryRun.phases.research) || [];
+  if (targetTriageCount > 0 && !researchActions.length) {
+    findings.push(finding({
+      scenario: "runner-research",
+      title: "Autonomy runner does not research triage intake",
+      severity: "critical",
+      category: "Functional",
+      expected: `When ${TARGET_BOARD} has triage work, runnerRunOnce dry-run shows Hermes specify/promote research actions before dispatch.`,
+      actual: JSON.stringify({ targetTriageCount, researchActions, phases: runnerDryRun && runnerDryRun.phases }),
+      steps: [`Ensure ${TARGET_BOARD} has at least one triage task.`, "Run window.ceo.runnerRunOnce with dryRun=true.", "Inspect phases.research."],
+      evidence: [JSON.stringify(runnerDryRun)],
     }));
   }
 

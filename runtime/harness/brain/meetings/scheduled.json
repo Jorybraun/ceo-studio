@@ -1,0 +1,19 @@
+[
+  {
+    "id": "standup-meetings",
+    "title": "Daily standup - meetings",
+    "domain": "meetings",
+    "scheduledFor": "2026-06-05T16:15:00.000Z",
+    "recurrence": "daily",
+    "status": "scheduled",
+    "agenda": "Run the morning standup for meetings.\n\nAgenda:\n1. Review active goals, board state, and work completed since the last standup.\n2. Identify blocked or stale work and decide whether it needs planner, specialist, CEO, or human escalation.\n3. Propose today's concrete next actions as Agenda Items with owner, priority, and verification expectations.\n4. Call out any decision that needs the human; do not bury it in transcript text.\n\nBoard of record: ceo-studio.\nPolicy: proposal-only. Do not dispatch paid workers or promote work to Kanban unless explicitly approved by the human/autonomy policy.",
+    "criteria": "A concise standup summary, blocker list, human-decision requests, and proposal-only Agenda Items for today's work.",
+    "team": "discovery-planning",
+    "members": "",
+    "allowPaid": false,
+    "sourceContext": [],
+    "room": "standup-ceo-studio",
+    "createdAt": "2026-06-04T19:12:37.806Z",
+    "updatedAt": "2026-06-04T19:12:37.806Z"
+  }
+]

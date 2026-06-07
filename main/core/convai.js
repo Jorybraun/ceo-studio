@@ -503,6 +503,47 @@ const COCKPIT_TOOLS = [
   },
   {
     type: "client",
+    name: "get_active_studio_session",
+    description: "Get the active Studio build session: phase, plan, decomposition summary, team, and workers. Use when discussing session progress.",
+    expects_response: true,
+    parameters: { type: "object", required: [], properties: {} },
+  },
+  {
+    type: "client",
+    name: "set_session_decomposition",
+    description: "Persist decomposition items on the active Studio session (agenda-style breakdown after plan approval). Updates the left-panel session detail.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["items"],
+      properties: {
+        title: { type: "string", description: "Decomposition document title." },
+        overview: { type: "string", description: "Short summary." },
+        body: { type: "string", description: "Optional markdown body." },
+        items: {
+          type: "array",
+          description: "Agenda-style items: { title, type?, status?, actionItems? }.",
+        },
+      },
+    },
+  },
+  {
+    type: "client",
+    name: "set_session_plan",
+    description: "Capture or replace the plan document on the active Studio session (explore/plan phases). Requires markdown body.",
+    expects_response: true,
+    parameters: {
+      type: "object",
+      required: ["body"],
+      properties: {
+        title: { type: "string", description: "Plan title." },
+        overview: { type: "string", description: "Short overview." },
+        body: { type: "string", description: "Plan markdown body." },
+      },
+    },
+  },
+  {
+    type: "client",
     name: "list_tickets",
     description: "List Kanban tickets from the active Hermes board, grouped by status.",
     expects_response: true,
@@ -1061,11 +1102,11 @@ const RENDER_TOOLS = [
   {
     type: "client",
     name: "open_view",
-    description: "Open a Studio left-panel view: 'domain', 'board', 'tasks', 'teams', 'channels', or 'meetings'. Use to navigate the cockpit for the user.",
+    description: "Open a Studio left-panel view: 'domain', 'board', 'tasks', 'teams', 'channels', 'meetings', or 'sessions'. Use to navigate the cockpit for the user.",
     expects_response: true,
     parameters: {
       type: "object", required: ["view"],
-      properties: { view: { type: "string", description: "One of: domain, board, tasks, teams, channels, meetings." } },
+      properties: { view: { type: "string", description: "One of: domain, board, tasks, teams, channels, meetings, sessions." } },
     },
   },
   {

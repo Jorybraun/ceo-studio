@@ -26,6 +26,10 @@ const user = require("./core/user");
 const soul = require("./core/soul");
 const hermes = require("./core/hermes");
 const domainBoard = require("./core/domain-board");
+const briefRuns = require("./core/brief-runs");
+const briefIntake = require("./core/brief-intake");
+const meetingSynthesis = require("./core/meeting-synthesis");
+const boardOverlay = require("./core/board-overlay");
 const autonomy = require("./core/autonomy");
 const autonomyLoop = require("./core/autonomy-loop");
 const autonomyRunner = require("./core/autonomy-runner");
@@ -33,20 +37,27 @@ const provenance = require("./core/provenance");
 const goals = require("./core/goals");
 const goalReview = require("./core/goal-review");
 const selfRepair = require("./core/self-repair");
+const notifications = require("./core/notifications");
 const orchestrationOrg = require("./core/orchestration-org");
 const meetings = require("./core/meetings");
+const standups = require("./core/standups");
 const registry = require("./core/registry");
 const models = require("./core/models");
 const personas = require("./core/personas");
+const skillCatalog = require("./core/skills");
 const mount = require("./core/mount");
 const aguiServer = require("./core/agui-server");
+const sessions = require("./core/sessions");
 const jobs = require("./core/jobs");
+const ceoTriggers = require("./core/ceo-triggers");
 const ticketPlanner = require("./core/ticket-planner");
+const ptyTerminal = require("./core/pty-terminal");
 const { CostMeter } = require("./core/cost");
 const { createProvider, createUtilityProvider } = require("./core/llm");
 const { DocumentAgent } = require("./core/agent");
 const voice = require("./core/voice");
 const convai = require("./core/convai");
+const voiceChat = require("./core/voice-chat");
 
 const remoteDebugPort = String(process.env.CEO_STUDIO_REMOTE_DEBUG_PORT || process.env.ELECTRON_REMOTE_DEBUG_PORT || "").trim();
 if (remoteDebugPort) {
@@ -67,6 +78,7 @@ const session = {
 
 let autonomyTimer = null;
 let runnerTimer = null;
+let runnerKickoff = null;
 
 function stopAutonomyTimer() {
   if (autonomyTimer) clearInterval(autonomyTimer);
@@ -75,7 +87,33 @@ function stopAutonomyTimer() {
 
 function stopRunnerTimer() {
   if (runnerTimer) clearInterval(runnerTimer);
+  if (runnerKickoff) clearTimeout(runnerKickoff);
   runnerTimer = null;
+  runnerKickoff = null;
+}
+
+function startRunnerTimer(project, policy, { kick = false } = {}) {
+  stopRunnerTimer();
+  if (!project || !policy || !policy.enabled) return null;
+  const cycle = () => {
+    try {
+      autonomyRunner.runCycle({
+        projectSlug: project.slug,
+        projectPath: project.path,
+      });
+    } catch (_) { /* persisted by the runner when the cycle starts */ }
+  };
+  const ms = Math.max(1, policy.intervalMinutes) * 60 * 1000;
+  runnerTimer = setInterval(cycle, ms);
+  if (runnerTimer.unref) runnerTimer.unref();
+  if (kick) {
+    runnerKickoff = setTimeout(() => {
+      runnerKickoff = null;
+      cycle();
+    }, 0);
+    if (runnerKickoff.unref) runnerKickoff.unref();
+  }
+  return runnerTimer;
 }
 
 function runRunnerCycle(extraPolicy = {}, { force = false } = {}) {
@@ -268,6 +306,7 @@ async function processTicketPackJob(jobId, project = session.project) {
 function openProjectSession(projectId) {
   const project = projects.getProject(projectId);
   if (!project) throw new Error(`Unknown project id: ${projectId}`);
+  stopRunnerTimer();
   brain.initBrain(project.slug);
   brain.indexProjectDocs(project.slug, project.path);
   
@@ -303,11 +342,14 @@ function openProjectSession(projectId) {
   const cost = new CostMeter(project.slug);
   const { provider, note } = createProvider();
   session.project = project;
+  sessions.bindProject(project.slug, project.path);
   session.domain = "All";
   session.cost = cost;
   session.provider = provider;
   session.providerNote = note;
   session.agent = new DocumentAgent({ slug: project.slug, project, provider, cost });
+  const runnerPolicy = autonomyRunner.getPolicy(project.slug);
+  if (runnerPolicy.enabled) startRunnerTimer(project, runnerPolicy, { kick: true });
   return {
     project,
     providerNote: note,
@@ -460,11 +502,11 @@ ipcMain.handle("domain:get_path", (_e, domainName) => {
   try {
     const domain = domains.getDomain(session.project.slug, domainName, { projectPath: session.project.path });
     if (!domain) return { ok: false, reason: "Domain not found" };
-    
+
     // sourcePath is already the full path from detection
     const fullPath = domain.sourcePath || null;
     const relativePath = domain.relativePath || null;
-    
+
     return { 
       ok: true, 
       domain: domainName,
@@ -719,7 +761,17 @@ ipcMain.handle("hermes:ensure_up", async () => {
 ipcMain.handle("hermes:boards", () => ({ ok: true, boards: hermes.listBoards(), current: hermes.currentBoard() }));
 ipcMain.handle("hermes:boards_for_domain", (_e, domainName) => {
   const allBoards = hermes.listBoards();
+  const projectBoard = session.project
+    ? allBoards.find(b => b.slug === session.project.slug) ||
+      (session.project.slug === "ceo-studio" ? allBoards.find(b => b.slug === "ceo-studio") : null)
+    : null;
   let filteredBoards = allBoards;
+
+  if (!domainName || domainName === "All") {
+    filteredBoards = projectBoard
+      ? [projectBoard, ...allBoards.filter(b => b.slug !== projectBoard.slug)]
+      : allBoards;
+  }
   
   // If a specific domain is selected (not "All"), filter boards
   if (domainName && domainName !== "All" && session.project) {
@@ -729,21 +781,17 @@ ipcMain.handle("hermes:boards_for_domain", (_e, domainName) => {
     if (selectedDomain && selectedDomain.kanbanBoard) {
       // Domain has a specific board - show that + main project board
       const domainBoard = allBoards.find(b => b.slug === selectedDomain.kanbanBoard);
-      const mainBoard = allBoards.find(b => b.slug === session.project.slug) ||
-        (session.project.slug === "ceo-studio" ? allBoards.find(b => b.slug === "ceo-studio") : null);
       
       filteredBoards = [];
       if (domainBoard) filteredBoards.push(domainBoard);
-      if (mainBoard && (!domainBoard || mainBoard.slug !== domainBoard.slug)) {
-        filteredBoards.push(mainBoard);
+      if (projectBoard && (!domainBoard || projectBoard.slug !== domainBoard.slug)) {
+        filteredBoards.push(projectBoard);
       }
     } else {
       // A selected domain without an explicit board should not accidentally
       // bind to the first unrelated board. Fall back to the project/global
       // board only; the user can map a domain board later.
-      const mainBoard = allBoards.find(b => b.slug === session.project.slug) ||
-        (session.project.slug === "ceo-studio" ? allBoards.find(b => b.slug === "ceo-studio") : null);
-      filteredBoards = mainBoard ? [mainBoard] : [];
+      filteredBoards = projectBoard ? [projectBoard] : [];
     }
   }
   
@@ -1112,84 +1160,8 @@ ipcMain.handle("personas:list", () => {
   return { ok: true, personas: [...merged.values()] };
 });
 
-ipcMain.handle("skills:list", () => {
-  const skills = [
-    {
-      id: "herder-swarm-control",
-      name: "Herder Swarm Control",
-      description: "Control and coordinate agent swarms via herder",
-      category: "coordination",
-    },
-    {
-      id: "herder-messaging",
-      name: "Herder Messaging",
-      description: "Structured messaging between agents",
-      category: "communication",
-    },
-    {
-      id: "herder-session-management",
-      name: "Herder Session Management",
-      description: "Manage agent sessions and lifecycle",
-      category: "coordination",
-    },
-    {
-      id: "kanban-management",
-      name: "Kanban Management",
-      description: "Manage kanban boards and tasks",
-      category: "coordination",
-    },
-    {
-      id: "codebase-navigation",
-      name: "Codebase Navigation",
-      description: "Navigate and understand codebase structure",
-      category: "analysis",
-    },
-    {
-      id: "architecture-analysis",
-      name: "Architecture Analysis",
-      description: "Analyze system architecture and patterns",
-      category: "analysis",
-    },
-    {
-      id: "implementation",
-      name: "Implementation",
-      description: "Write and implement code",
-      category: "development",
-    },
-    {
-      id: "planning",
-      name: "Planning",
-      description: "Create detailed plans and specifications",
-      category: "planning",
-    },
-    {
-      id: "code_review",
-      name: "Code Review",
-      description: "Review and analyze code quality",
-      category: "development",
-    },
-    {
-      id: "file-operations",
-      name: "File Operations",
-      description: "Read, write, and edit files",
-      category: "development",
-    },
-    {
-      id: "command-execution",
-      name: "Command Execution",
-      description: "Execute shell commands",
-      category: "development",
-    },
-    {
-      id: "git-operations",
-      name: "Git Operations",
-      description: "Git version control operations",
-      category: "development",
-    },
-  ];
-  
-  return { ok: true, skills };
-});
+ipcMain.handle("skills:list", () => ({ ok: true, skills: skillCatalog.list((session.project && session.project.path) || null) }));
+ipcMain.handle("skills:route", (_e, info = {}) => skillCatalog.route((session.project && session.project.path) || null, info || {}));
 ipcMain.handle("hermes:board", (_e, slug) => hermes.getBoard(slug));
 ipcMain.handle("hermes:task_detail", (_e, slug, id) => hermes.getTask(slug, id));
 ipcMain.handle("hermes:stats", (_e, slug) => hermes.getStats(slug));
@@ -1271,6 +1243,16 @@ ipcMain.handle("domain_board:record_asset", (_e, asset = {}) =>
 ipcMain.handle("domain_board:decompose_brief", (_e, info = {}) =>
   domainBoard.decomposeBrief(info, { projectSlug: session.project && session.project.slug }));
 
+// Conversational brief intake: distill a free-form description into a canonical
+// brief draft (Hermes-backed) + report missing required fields. Creation stays
+// gated behind domain_board:create_brief; this only drafts for human review.
+ipcMain.handle("brief_intake:draft", (_e, info = {}) =>
+  briefIntake.draftBrief({
+    description: info.description,
+    known: info.known || {},
+    domainHint: info.domainHint || session.domain || "All",
+  }));
+
 // New sectional decomposer (proposal + apply) – see brief-sectional-decomposer.md in Domain Lifecycle
 ipcMain.handle("domain_board:propose_brief_decomposition", (_e, info = {}) =>
   domainBoard.proposeSectionalBreakdown({
@@ -1281,6 +1263,478 @@ ipcMain.handle("domain_board:propose_brief_decomposition", (_e, info = {}) =>
 
 ipcMain.handle("domain_board:apply_brief_decomposition", (_e, proposal = {}) =>
   domainBoard.applySectionalDecomposition(proposal, { projectSlug: session.project && session.project.slug }));
+
+function briefRunWorkspace(board, taskId) {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  const boardSlug = String(board || "").trim();
+  const id = String(taskId || "").trim();
+  if (!boardSlug || !id) return { ok: false, reason: "board and taskId required" };
+  const detail = hermes.getTask(boardSlug, id);
+  const task = detail && detail.ok ? detail.task : null;
+  let run = briefRuns.read(session.project.slug, boardSlug, id)
+    || (task ? briefRuns.ensureFromTask(session.project.slug, boardSlug, task) : null);
+  if (!run) {
+    return {
+      ok: true,
+      applicable: false,
+      reason: task ? "task is not a brief" : ((detail && detail.reason) || "task not found"),
+      task: task || null,
+    };
+  }
+  const linkedSessions = sessions.forBrief(session.project.slug, boardSlug, id);
+  const registryAgents = registry.read(session.project.path).agents || [];
+  const registryById = new Map(registryAgents.map((agent) => [agent.id, agent]));
+  const activeAgentMap = new Map();
+  const addActiveAgent = ({ agentId, role, status, sessionId, tmuxSession } = {}) => {
+    const aid = String(agentId || "").trim();
+    if (!aid) return;
+    const registered = registryById.get(aid) || {};
+    const terminalSession = tmuxSession || registered.tmux_session || "";
+    const terminalWindow = registered.tmux_window || "main";
+    const existing = activeAgentMap.get(aid) || {};
+    activeAgentMap.set(aid, {
+      ...existing,
+      agentId: aid,
+      name: registered.name || registered.display_name || aid,
+      role: role || existing.role || "agent",
+      status: status || existing.status || "unknown",
+      sessionId: sessionId || existing.sessionId || null,
+      provider: registered.provider || existing.provider || "",
+      model: registered.model || existing.model || "",
+      terminal: {
+        available: !!terminalSession,
+        alive: !!terminalSession && mount.alive(terminalSession),
+        session: terminalSession,
+        window: terminalWindow,
+      },
+    });
+  };
+  for (const studioSession of linkedSessions) {
+    if (studioSession.leadAgentId) {
+      addActiveAgent({
+        agentId: studioSession.leadAgentId,
+        role: "lead",
+        status: studioSession.phase === "done" ? "done" : "active",
+        sessionId: studioSession.id,
+      });
+    }
+    for (const worker of studioSession.workers || []) {
+      addActiveAgent({
+        agentId: worker.agentId,
+        role: worker.role || "worker",
+        status: worker.status || "unknown",
+        tmuxSession: worker.tmuxSession || null,
+        sessionId: studioSession.id,
+      });
+    }
+  }
+  const activeAgents = [...activeAgentMap.values()];
+  const meetingMatchesRun = (meeting) => meeting && meeting.briefRef
+    && meeting.briefRef.board === boardSlug
+    && meeting.briefRef.taskId === id;
+  const meetingMap = new Map();
+  for (const meeting of run.meetings || []) {
+    if (meeting && meeting.id) meetingMap.set(meeting.id, meeting);
+  }
+  for (const scheduled of meetings.listScheduled(session.project.path).meetings || []) {
+    if (meetingMatchesRun(scheduled)) {
+      meetingMap.set(scheduled.id, { ...(meetingMap.get(scheduled.id) || {}), ...scheduled });
+    }
+  }
+  let linkedMeetings = [...meetingMap.values()].map((meeting) => {
+    const roomState = meeting.room
+      ? meetings.room({ projectPath: session.project.path, room: meeting.room })
+      : null;
+    const status = roomState && roomState.started
+      ? (roomState.running ? "running" : "done")
+      : (meeting.status || "scheduled");
+    return {
+      ...meeting,
+      status,
+      transcript: roomState && roomState.ok ? (roomState.feed || []).slice(-8) : [],
+      requirements: roomState && roomState.ok ? roomState.requirements : null,
+      requirementsPath: meeting.room && roomState && roomState.requirements
+        ? path.relative(session.project.path, path.join(meetings.roomDir(session.project.path, meeting.room), "requirements.md")).replace(/\\/g, "/")
+        : "",
+      running: !!(roomState && roomState.running),
+    };
+  }).sort((a, b) => String(b.startedAt || b.scheduledFor || b.createdAt || "").localeCompare(String(a.startedAt || a.scheduledFor || a.createdAt || "")));
+
+  for (const meeting of linkedMeetings) {
+    if (!meeting.requirements) continue;
+    const built = meetingSynthesis.build({ meeting, requirements: meeting.requirements });
+    if (built.ok) briefRuns.upsertMeetingSynthesis(session.project.slug, boardSlug, id, built.synthesis);
+  }
+  run = briefRuns.read(session.project.slug, boardSlug, id) || run;
+  const meetingSyntheses = run.meetingSyntheses || [];
+  const synthesisByMeeting = new Map(meetingSyntheses.map((item) => [item.meetingId, item]));
+  linkedMeetings = linkedMeetings.map((meeting) => {
+    const synthesis = synthesisByMeeting.get(meeting.id);
+    return {
+      ...meeting,
+      synthesisId: synthesis?.id || null,
+      synthesisStatus: synthesis?.status || null,
+      pendingProposalCount: (synthesis?.proposals || []).filter((item) => item.status === "pending").length,
+    };
+  });
+
+  const completedWork = [...(run.completionSummaries || [])];
+  for (const studioSession of linkedSessions.filter((item) => item.phase === "done")) {
+    const lastAssistant = [...(studioSession.transcript || [])].reverse()
+      .find((entry) => entry && entry.role === "assistant" && String(entry.content || entry.body || "").trim());
+    completedWork.push({
+      id: `session:${studioSession.id}`,
+      title: studioSession.title,
+      body: studioSession.planDoc?.overview
+        || String(lastAssistant?.content || lastAssistant?.body || "").trim().slice(0, 600)
+        || "Studio session completed.",
+      source: "studio-session",
+      sessionId: studioSession.id,
+      createdAt: studioSession.updatedAt || studioSession.createdAt,
+    });
+  }
+  for (const child of (run.childTasks || []).slice(-30)) {
+    const childBoard = child.board || boardSlug;
+    const detailResult = child.id ? hermes.getTask(childBoard, child.id) : null;
+    const childTask = detailResult && detailResult.ok ? detailResult.task : child;
+    if (childTask && ["done", "completed"].includes(String(childTask.status || "").toLowerCase())) {
+      completedWork.push({
+        id: `task:${child.id}`,
+        title: childTask.title || child.title || child.id,
+        body: childTask.body || "Hermes child task completed.",
+        source: "hermes-task",
+        taskId: child.id,
+        board: childBoard,
+        createdAt: childTask.completed_at || childTask.updatedAt || child.createdAt,
+      });
+    }
+  }
+  const completedById = new Map();
+  for (const item of completedWork) {
+    if (item && item.id) completedById.set(item.id, item);
+  }
+  return {
+    ok: true,
+    applicable: true,
+    run,
+    sessions: linkedSessions,
+    activeAgents,
+    meetings: linkedMeetings,
+    meetingSyntheses,
+    agendaItems: run.agendaItems || [],
+    assets: run.assets || [],
+    completedWork: [...completedById.values()],
+    task: task || null,
+  };
+}
+
+ipcMain.handle("brief_runs:get", (_e, { board, taskId } = {}) =>
+  briefRunWorkspace(board, taskId));
+ipcMain.handle("brief_runs:update", (_e, { board, taskId, patch } = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  const result = briefRuns.update(session.project.slug, board, taskId, patch || {});
+  return result.ok ? briefRunWorkspace(board, taskId) : result;
+});
+
+function synthesizeBriefRunMeeting(board, taskId, meetingId) {
+  const workspace = briefRunWorkspace(board, taskId);
+  if (!workspace.ok || !workspace.applicable) return workspace;
+  const meeting = (workspace.meetings || []).find((item) => item.id === meetingId);
+  if (!meeting) return { ok: false, reason: "linked meeting not found" };
+  if (!meeting.requirements) return { ok: false, reason: "meeting has not produced requirements yet" };
+  const built = meetingSynthesis.build({ meeting, requirements: meeting.requirements });
+  if (!built.ok) return built;
+  const saved = briefRuns.upsertMeetingSynthesis(session.project.slug, board, taskId, built.synthesis);
+  return saved.ok
+    ? { ok: true, changed: saved.changed, synthesis: saved.synthesis, workspace: briefRunWorkspace(board, taskId) }
+    : saved;
+}
+
+ipcMain.handle("brief_runs:meeting_synthesize", (_e, { board, taskId, meetingId } = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return synthesizeBriefRunMeeting(board, taskId, meetingId);
+});
+
+function proposalSourcePath(proposal) {
+  return String(proposal?.source?.requirementsPath || "").trim();
+}
+
+function materializeMeetingProposal({ board, taskId, synthesis, proposal, reviewedBy }) {
+  const run = briefRuns.read(session.project.slug, board, taskId);
+  if (!run) return { ok: false, reason: "brief run not found" };
+  const sourcePath = proposalSourcePath(proposal);
+  const common = {
+    id: proposal.id,
+    title: proposal.title,
+    body: proposal.body,
+    source: "meeting-synthesis",
+    meetingId: synthesis.meetingId,
+    room: synthesis.room,
+    sourcePath,
+  };
+  let result;
+  if (proposal.type === "decision") {
+    result = briefRuns.update(session.project.slug, board, taskId, {
+      decision: common,
+      eventType: "meeting_decision_approved",
+      actor: reviewedBy,
+      summary: proposal.title,
+    });
+  } else if (proposal.type === "evidence") {
+    result = briefRuns.update(session.project.slug, board, taskId, {
+      evidenceItem: common,
+      eventType: "meeting_evidence_approved",
+      actor: reviewedBy,
+      summary: proposal.title,
+    });
+    if (result.ok && sourcePath) {
+      provenance.recordAsset(session.project.slug, {
+        parentKind: "brief",
+        parentId: taskId,
+        assetKind: "meeting_requirements",
+        assetId: `${synthesis.id}:requirements`,
+        title: synthesis.title,
+        path: sourcePath,
+        summary: proposal.body,
+        source: { system: "meeting-synthesis", actor: reviewedBy },
+      });
+    }
+  } else if (proposal.type === "completion") {
+    result = briefRuns.update(session.project.slug, board, taskId, {
+      completionSummary: common,
+      eventType: "meeting_completion_approved",
+      actor: reviewedBy,
+      summary: proposal.title,
+    });
+  } else if (proposal.type === "agenda") {
+    const domainResult = domains.createAgendaItem({
+      projectSlug: session.project.slug,
+      projectPath: session.project.path,
+      domain: run.domain,
+      item: {
+        id: proposal.id,
+        title: proposal.title,
+        type: "meeting",
+        status: "approved",
+        source: synthesis.id,
+        parentRef: taskId,
+        humanAttention: false,
+        expectedOutcome: proposal.body,
+        outputArtifact: sourcePath,
+        body: proposal.body,
+        provenance: [`kanban:${board}/${taskId}`, sourcePath].filter(Boolean),
+      },
+    });
+    if (!domainResult.ok) return domainResult;
+    result = briefRuns.update(session.project.slug, board, taskId, {
+      agendaItem: { ...domainResult.agendaItem, body: proposal.body },
+      eventType: "meeting_agenda_approved",
+      actor: reviewedBy,
+      summary: proposal.title,
+    });
+  } else if (proposal.type === "blocker") {
+    const comment = hermes.addComment({
+      board,
+      taskId,
+      author: "CEO Studio Meeting Review",
+      body: [
+        "## Approved Meeting Blocker",
+        "",
+        proposal.body,
+        "",
+        `Source meeting: ${synthesis.room || synthesis.meetingId}`,
+        sourcePath ? `Evidence: ${sourcePath}` : "",
+        `Approved by: ${reviewedBy}`,
+      ].filter(Boolean).join("\n"),
+    });
+    if (!comment.ok) return comment;
+    const blocked = hermes.taskAction({
+      board,
+      taskId,
+      action: "block",
+      reason: `Approved meeting blocker: ${proposal.title}`,
+    });
+    boardOverlay.writeTask(session.project.slug, board, taskId, {
+      blocker: {
+        type: "meeting_synthesis",
+        reason: proposal.body,
+        sourceMeetingId: synthesis.meetingId,
+        sourceRoom: synthesis.room,
+        evidencePath: sourcePath,
+        approvedBy: reviewedBy,
+        approvedAt: new Date().toISOString(),
+      },
+    });
+    result = briefRuns.update(session.project.slug, board, taskId, {
+      status: "blocked",
+      eventType: "meeting_blocker_approved",
+      actor: reviewedBy,
+      summary: proposal.title,
+    });
+  } else {
+    return { ok: false, reason: `unsupported meeting proposal type: ${proposal.type}` };
+  }
+  if (!result || !result.ok) return result || { ok: false, reason: "proposal materialization failed" };
+  provenance.append(session.project.slug, {
+    type: "meeting_proposal_materialized",
+    source: { system: "meeting-synthesis", actor: reviewedBy },
+    parent: provenance.ref("brief", taskId, { board }),
+    child: provenance.ref(proposal.type, proposal.id, { title: proposal.title }),
+    metadata: {
+      synthesisId: synthesis.id,
+      meetingId: synthesis.meetingId,
+      room: synthesis.room,
+      requirementsPath: sourcePath,
+    },
+  });
+  return { ok: true, kind: proposal.type, result };
+}
+
+ipcMain.handle("brief_runs:meeting_proposal_action", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  const board = String(info.board || "").trim();
+  const taskId = String(info.taskId || "").trim();
+  const synthesisId = String(info.synthesisId || "").trim();
+  const proposalId = String(info.proposalId || "").trim();
+  const action = String(info.action || "").trim();
+  const reviewedBy = String(info.approvedBy || "human").trim();
+  const run = briefRuns.read(session.project.slug, board, taskId);
+  const synthesis = (run?.meetingSyntheses || []).find((item) => item.id === synthesisId);
+  const proposal = (synthesis?.proposals || []).find((item) => item.id === proposalId);
+  if (!synthesis || !proposal) return { ok: false, reason: "meeting proposal not found" };
+  if (proposal.status !== "pending") {
+    return { ok: true, unchanged: true, proposal, workspace: briefRunWorkspace(board, taskId) };
+  }
+  if (action === "reject") {
+    const rejected = briefRuns.updateMeetingProposal(
+      session.project.slug,
+      board,
+      taskId,
+      synthesisId,
+      proposalId,
+      { status: "rejected", reviewedBy, result: { ok: true, action: "rejected" } },
+    );
+    return rejected.ok ? { ok: true, proposal: rejected.proposal, workspace: briefRunWorkspace(board, taskId) } : rejected;
+  }
+  if (action !== "approve") return { ok: false, reason: "action must be approve or reject" };
+  if (info.humanApproved !== true) return { ok: false, reason: "explicit human approval required" };
+  const materialized = materializeMeetingProposal({ board, taskId, synthesis, proposal, reviewedBy });
+  if (!materialized.ok) return materialized;
+  const approved = briefRuns.updateMeetingProposal(
+    session.project.slug,
+    board,
+    taskId,
+    synthesisId,
+    proposalId,
+    {
+      status: "materialized",
+      reviewedBy,
+      result: { ok: true, kind: materialized.kind },
+    },
+  );
+  return approved.ok
+    ? { ok: true, proposal: approved.proposal, materialized, workspace: briefRunWorkspace(board, taskId) }
+    : approved;
+});
+
+function briefRunMeetingPayload(board, taskId, info = {}) {
+  const workspace = briefRunWorkspace(board, taskId);
+  if (!workspace.ok || !workspace.applicable) return { workspace, payload: null };
+  const run = workspace.run;
+  const title = String(info.title || `${run.title} working room`).trim();
+  const agenda = String(info.agenda || `Review progress, risks, decisions, and next actions for Brief Run ${run.id}.`).trim();
+  const assetLines = (workspace.assets || []).slice(-12)
+    .map((asset) => `- ${asset.title || asset.path || asset.id}${asset.path ? ` (${asset.path})` : ""}`);
+  const context = [
+    "## Brief Run Context",
+    `- Run: ${run.id}`,
+    `- Goal: ${run.brief?.goal || ""}`,
+    `- Current state: ${run.brief?.currentRenderedState || ""}`,
+    `- Next action: ${run.brief?.nextAction || ""}`,
+    assetLines.length ? "### Context Assets" : "",
+    ...assetLines,
+  ].filter(Boolean).join("\n");
+  const members = String(info.members || workspace.activeAgents.map((agent) => agent.agentId).filter(Boolean).join(",") || "ceo").trim();
+  return {
+    workspace,
+    payload: {
+      title,
+      domain: run.domain || "All",
+      agenda: `${agenda}\n\n${context}`,
+      criteria: String(info.criteria || "A decision record, proposed Agenda Items, blockers, and named next actions.").trim(),
+      team: String(info.team || "").trim(),
+      members,
+      allowPaid: info.allowPaid === true,
+      sourceContext: workspace.assets || [],
+      briefRef: { board, taskId, runId: run.id },
+    },
+  };
+}
+
+ipcMain.handle("brief_runs:meeting_start", (_e, { board, taskId, info } = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  const prepared = briefRunMeetingPayload(board, taskId, info || {});
+  if (!prepared.payload) return prepared.workspace;
+  const room = String(info?.room || `brief-${taskId}-${Date.now()}`).trim();
+  const started = meetings.start({ ...prepared.payload, room, projectPath: session.project.path });
+  if (!started || !started.ok) return started;
+  const meeting = {
+    ...prepared.payload,
+    id: `room:${started.room}`,
+    room: started.room,
+    status: "running",
+    startedAt: new Date().toISOString(),
+  };
+  briefRuns.update(session.project.slug, board, taskId, {
+    meeting,
+    eventType: "brief_meeting_started",
+    actor: "CEO Studio",
+    summary: meeting.title,
+  });
+  return { ...started, meeting, workspace: briefRunWorkspace(board, taskId) };
+});
+
+ipcMain.handle("brief_runs:meeting_schedule", (_e, { board, taskId, info } = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  const prepared = briefRunMeetingPayload(board, taskId, info || {});
+  if (!prepared.payload) return prepared.workspace;
+  const scheduled = meetings.scheduleMeeting({
+    projectPath: session.project.path,
+    meeting: {
+      ...prepared.payload,
+      scheduledFor: info?.scheduledFor,
+      recurrence: info?.recurrence || "none",
+    },
+  });
+  if (!scheduled || !scheduled.ok) return scheduled;
+  briefRuns.update(session.project.slug, board, taskId, {
+    meeting: scheduled.meeting,
+    eventType: "brief_meeting_scheduled",
+    actor: "CEO Studio",
+    summary: scheduled.meeting.title,
+  });
+  return { ...scheduled, workspace: briefRunWorkspace(board, taskId) };
+});
+
+ipcMain.handle("brief_runs:meeting_start_scheduled", (_e, { board, taskId, meetingId } = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  const started = meetings.startScheduled({ projectPath: session.project.path, id: meetingId });
+  if (!started || !started.ok) return started;
+  const meeting = {
+    ...(started.meeting || {}),
+    id: `${meetingId}:${started.room}`,
+    scheduleId: meetingId,
+    room: started.room,
+    status: "running",
+  };
+  briefRuns.update(session.project.slug, board, taskId, {
+    meeting,
+    eventType: "brief_scheduled_meeting_started",
+    actor: "CEO Studio",
+    summary: meeting.title || meetingId,
+  });
+  return { ...started, meeting, workspace: briefRunWorkspace(board, taskId) };
+});
 ipcMain.handle("provenance:graph", (_e, parentId) => {
   if (!session.project) return { ok: false, reason: "open a project first" };
   return provenance.graph(session.project.slug, parentId);
@@ -1391,29 +1845,47 @@ ipcMain.handle("runner:status", () => {
   if (!session.project) return { ok: false, reason: "open a project first", running: false };
   return { ...autonomyRunner.status(session.project.slug), running: !!runnerTimer };
 });
+// Oversight inventory: every task's true disposition (delivered / open-pr /
+// in-review / needs-human / stranded / DIVERGED / live). Read-only; spawns
+// nothing. This is the visibility surface that stops work from being silently
+// abandoned.
+ipcMain.handle("runner:report", () => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return autonomyRunner.report({ projectSlug: session.project.slug, projectPath: session.project.path });
+});
 ipcMain.handle("runner:configure", (_e, patch = {}) => {
   if (!session.project) return { ok: false, reason: "open a project first" };
-  return autonomyRunner.setPolicy(session.project.slug, patch || {});
+  const configured = autonomyRunner.setPolicy(session.project.slug, patch || {});
+  if (runnerTimer) {
+    if (configured.policy.enabled) startRunnerTimer(session.project, configured.policy);
+    else stopRunnerTimer();
+  }
+  return { ...configured, running: !!runnerTimer };
 });
 ipcMain.handle("runner:run_once", (_e, info = {}) => {
   if (!session.project) return { ok: false, reason: "open a project first" };
-  return runRunnerCycle(info.policy || {}, { force: true });
+  return runRunnerCycle(autonomyRunner.policyFromRequest(info), { force: true });
 });
 ipcMain.handle("runner:start", (_e, info = {}) => {
   if (!session.project) return { ok: false, reason: "open a project first" };
   const configured = autonomyRunner.setPolicy(session.project.slug, { ...(info.policy || {}), enabled: true });
-  stopRunnerTimer();
   // Kick a first cycle immediately so the swarm starts without waiting an interval.
   const first = runRunnerCycle({}, { force: true });
-  const ms = Math.max(1, configured.policy.intervalMinutes) * 60 * 1000;
-  runnerTimer = setInterval(() => { try { runRunnerCycle({}); } catch (_) { /* logged in run record */ } }, ms);
-  if (runnerTimer.unref) runnerTimer.unref();
+  startRunnerTimer(session.project, configured.policy);
   return { ok: true, running: true, policy: configured.policy, firstCycle: first };
 });
 ipcMain.handle("runner:stop", () => {
   stopRunnerTimer();
   if (session.project) autonomyRunner.setPolicy(session.project.slug, { enabled: false });
   return { ok: true, running: false };
+});
+ipcMain.handle("notifications:list", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first", notifications: [], unread: 0 };
+  return notifications.list(session.project.slug, info || {});
+});
+ipcMain.handle("notifications:ack", (_e, id) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return notifications.acknowledge(session.project.slug, id);
 });
 ipcMain.handle("self_repair:report_bug", (_e, bug = {}) => {
   if (!session.project) return { ok: false, reason: "open a project first" };
@@ -1467,6 +1939,176 @@ ipcMain.handle("self_repair:consult", (_e, info = {}) => {
 // AGUI: the local AG-UI server URL the renderer's HttpAgent connects to.
 ipcMain.handle("agui:url", () => aguiServer.url());
 
+// --- Studio sessions (build / deep-dive containers) ---
+function _studioSlug() {
+  return session.project && session.project.slug;
+}
+function _studioPath() {
+  return session.project && session.project.path;
+}
+ipcMain.handle("sessions:list", () => {
+  const slug = _studioSlug();
+  if (!slug) return { ok: false, reason: "open a project first" };
+  return sessions.list(slug);
+});
+ipcMain.handle("sessions:get", (_e, id) => {
+  const slug = _studioSlug();
+  if (!slug) return { ok: false, reason: "open a project first" };
+  return sessions.get(slug, id);
+});
+ipcMain.handle("sessions:create", (_e, info = {}) => {
+  const slug = _studioSlug();
+  const projectPath = _studioPath();
+  if (!slug) return { ok: false, reason: "open a project first" };
+  const requestedLead = String(info.leadAgentId || "").trim();
+  const registeredAgents = registry.read(projectPath).agents || [];
+  const leadAgentId = registeredAgents.some((agent) => agent.id === requestedLead) ? requestedLead : "ceo";
+  const r = sessions.create(slug, { ...info, leadAgentId });
+  if (r.ok && projectPath) {
+    if (r.session.briefRef) {
+      briefRuns.update(slug, r.session.briefRef.board, r.session.briefRef.taskId, {
+        sessionId: r.session.id,
+        eventType: "studio_session_created",
+        actor: "CEO Studio",
+        summary: r.session.title,
+      });
+    }
+    meetings.post({
+      projectPath,
+      room: r.session.room,
+      speaker: "Facilitator",
+      body: `Studio session "${r.session.title}" created${r.session.briefRef ? ` for Brief Run ${r.session.briefRef.runId}` : ""}. Lead: ${r.session.leadAgentId}. Phase: explore. Live room loop is manual.`,
+    });
+  }
+  return r;
+});
+ipcMain.handle("sessions:update", (_e, { id, patch } = {}) => {
+  const slug = _studioSlug();
+  if (!slug) return { ok: false, reason: "open a project first" };
+  const before = sessions.get(slug, id);
+  const result = sessions.update(slug, id, patch || {});
+  if (result.ok && result.session.briefRef && result.session.phase === "done" && before.session?.phase !== "done") {
+    const lastAssistant = [...(result.session.transcript || [])].reverse()
+      .find((entry) => entry && entry.role === "assistant" && String(entry.content || entry.body || "").trim());
+    briefRuns.update(slug, result.session.briefRef.board, result.session.briefRef.taskId, {
+      completionSummary: {
+        id: `session:${result.session.id}`,
+        title: result.session.title,
+        body: result.session.planDoc?.overview
+          || String(lastAssistant?.content || lastAssistant?.body || "").trim().slice(0, 600)
+          || "Studio session completed.",
+        source: "studio-session",
+        sessionId: result.session.id,
+      },
+      eventType: "studio_session_completed",
+      actor: result.session.leadAgentId || "CEO Studio",
+      summary: result.session.title,
+    });
+  }
+  return result;
+});
+ipcMain.handle("sessions:set_active", (_e, id) => {
+  const slug = _studioSlug();
+  if (!slug) return { ok: false, reason: "open a project first" };
+  if (id) {
+    const g = sessions.get(slug, id);
+    if (!g.ok) return g;
+    sessions.setActive(id);
+    return { ok: true, session: g.session, activeId: id };
+  }
+  sessions.setActive(null);
+  return { ok: true, activeId: null };
+});
+ipcMain.handle("sessions:active", () => {
+  const slug = _studioSlug();
+  if (!slug) return { ok: true, activeId: null, session: null };
+  const id = sessions.getActiveId();
+  if (!id) return { ok: true, activeId: null, session: null };
+  const g = sessions.get(slug, id);
+  return g.ok ? { ok: true, activeId: id, session: g.session } : { ok: true, activeId: null, session: null };
+});
+ipcMain.handle("sessions:spawn_worker", (_e, { sessionId, agentId, role } = {}) => {
+  const slug = _studioSlug();
+  const projectPath = _studioPath();
+  if (!slug || !projectPath) return { ok: false, reason: "open a project first" };
+  const sid = sessionId || sessions.getActiveId();
+  if (!sid) return { ok: false, reason: "no active session" };
+  return sessions.spawnWorker(slug, projectPath, sid, { agentId, role });
+});
+ipcMain.handle("sessions:room", (_e, room) =>
+  meetings.room({ room, projectPath: _studioPath() }));
+ipcMain.handle("sessions:post", (_e, { room, speaker, body } = {}) =>
+  meetings.post({ room, speaker, body, projectPath: _studioPath() }));
+ipcMain.handle("sessions:start_room", (_e, { sessionId, allowPaid } = {}) => {
+  const slug = _studioSlug();
+  const projectPath = _studioPath();
+  if (!slug || !projectPath) return { ok: false, reason: "open a project first" };
+  const sid = sessionId || sessions.getActiveId();
+  if (!sid) return { ok: false, reason: "no active session" };
+  return sessions.startRoomLoop(slug, projectPath, sid, { allowPaid: allowPaid === true });
+});
+ipcMain.handle("sessions:stop_room", (_e, { sessionId } = {}) => {
+  const slug = _studioSlug();
+  const projectPath = _studioPath();
+  if (!slug) return { ok: false, reason: "open a project first" };
+  const sid = sessionId || sessions.getActiveId();
+  if (!sid) return { ok: false, reason: "no active session" };
+  return sessions.stopRoomLoop(slug, projectPath, sid);
+});
+ipcMain.handle("sessions:room_status", (_e, { sessionId } = {}) => {
+  const slug = _studioSlug();
+  if (!slug) return { ok: false, reason: "open a project first" };
+  const sid = sessionId || sessions.getActiveId();
+  if (!sid) return { ok: false, reason: "no active session" };
+  return sessions.roomLoopStatus(slug, sid);
+});
+ipcMain.handle("sessions:set_plan", (_e, { id, planDoc } = {}) => {
+  const slug = _studioSlug();
+  if (!slug) return { ok: false, reason: "open a project first" };
+  return sessions.setPlan(slug, id || sessions.getActiveId(), planDoc);
+});
+ipcMain.handle("sessions:approve_plan", (_e, id) => {
+  const slug = _studioSlug();
+  if (!slug) return { ok: false, reason: "open a project first" };
+  return sessions.approvePlan(slug, id || sessions.getActiveId());
+});
+ipcMain.handle("sessions:reject_plan", (_e, { id, reason } = {}) => {
+  const slug = _studioSlug();
+  if (!slug) return { ok: false, reason: "open a project first" };
+  return sessions.rejectPlan(slug, id || sessions.getActiveId(), { reason });
+});
+ipcMain.handle("sessions:set_planned_team", (_e, { id, team } = {}) => {
+  const slug = _studioSlug();
+  if (!slug) return { ok: false, reason: "open a project first" };
+  return sessions.setPlannedTeam(slug, id || sessions.getActiveId(), team);
+});
+ipcMain.handle("sessions:set_task_tree", (_e, { id, taskTree } = {}) => {
+  const slug = _studioSlug();
+  if (!slug) return { ok: false, reason: "open a project first" };
+  return sessions.setTaskTree(slug, id || sessions.getActiveId(), taskTree);
+});
+ipcMain.handle("sessions:set_decomposition", (_e, { id, decompositionDoc } = {}) => {
+  const slug = _studioSlug();
+  if (!slug) return { ok: false, reason: "open a project first" };
+  return sessions.setDecomposition(slug, id || sessions.getActiveId(), decompositionDoc);
+});
+ipcMain.handle("sessions:decomposition", (_e, id) => {
+  const slug = _studioSlug();
+  if (!slug) return { ok: false, reason: "open a project first" };
+  const sid = id || sessions.getActiveId();
+  if (!sid) return { ok: false, reason: "no session" };
+  const g = sessions.get(slug, sid);
+  return g.ok ? { ok: true, decomposition: g.decomposition } : g;
+});
+ipcMain.handle("sessions:launch_team", (_e, { sessionId } = {}) => {
+  const slug = _studioSlug();
+  const projectPath = _studioPath();
+  if (!slug || !projectPath) return { ok: false, reason: "open a project first" };
+  const sid = sessionId || sessions.getActiveId();
+  if (!sid) return { ok: false, reason: "no active session" };
+  return sessions.launchTeam(slug, projectPath, sid);
+});
+
 // --- Agent registry (single source of truth: agents.json, read/written in Node) ---
 const _projPath = () => (session.project && session.project.path) || null;
 ipcMain.handle("registry:list", () => registry.read(_projPath()));
@@ -1480,8 +2122,9 @@ ipcMain.handle("registry:save_team", (_e, { name, members } = {}) => registry.sa
 ipcMain.handle("registry:delete_team", (_e, name) => registry.deleteTeam(_projPath(), name));
 
 // Mount/unmount an agent into a live tmux session (provider CLI + A2A watcher).
-ipcMain.handle("registry:mount", (_e, id) => {
-  const r = mount.mount(_projPath(), id);
+ipcMain.handle("registry:mount", (_e, info = {}) => {
+  const id = typeof info === "string" ? info : info.id;
+  const r = mount.mount(_projPath(), id, { allowPaid: !!(info && info.allowPaid) });
   if (r && r.ok) registry.updateAgent(_projPath(), id, { tmux_session: r.session, tmux_window: r.window });
   return r;
 });
@@ -1505,6 +2148,26 @@ ipcMain.handle("registry:terminal_send", (_e, { id, text, window } = {}) => {
   const session = (a && a.tmux_session) || `pipe-${id}`;
   return mount.send(session, window || (a && a.tmux_window) || "main", text);
 });
+ipcMain.handle("terminal:open", (event, { agentId, cols, rows } = {}) => {
+  const id = String(agentId || "").trim();
+  if (!id) return { ok: false, reason: "agentId required" };
+  const a = registry.read(_projPath()).agents.find((x) => x.id === id);
+  const sessionName = (a && a.tmux_session) || `pipe-${id}`;
+  const snap = mount.snapshot(sessionName, (a && a.tmux_window) || "main", 1);
+  if (!snap || !snap.ok) return { ok: false, reason: snap ? snap.reason : "terminal unavailable" };
+  return ptyTerminal.open({
+    webContents: event.sender,
+    agentId: id,
+    session: sessionName,
+    window: snap.window || (a && a.tmux_window) || "main",
+    cwd: _projPath(),
+    cols,
+    rows,
+  });
+});
+ipcMain.handle("terminal:input", (_event, { terminalId, data } = {}) => ptyTerminal.input(terminalId, data));
+ipcMain.handle("terminal:resize", (_event, { terminalId, cols, rows } = {}) => ptyTerminal.resize(terminalId, cols, rows));
+ipcMain.handle("terminal:close", (_event, terminalId) => ptyTerminal.close(terminalId));
 // Talk to an agent the RIGHT way: post into its A2A room as a speaker. Its
 // watcher sees it; a brained agent (or a meeting) produces the reply. Reaches
 // the agent regardless of which tmux window it runs in.
@@ -1530,6 +2193,44 @@ ipcMain.handle("meetings:schedule_delete", (_e, id) =>
   meetings.deleteScheduled({ id, projectPath: session.project && session.project.path }));
 ipcMain.handle("meetings:schedule_start", (_e, id) =>
   meetings.startScheduled({ id, projectPath: session.project && session.project.path }));
+ipcMain.handle("standups:status", () => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return standups.status({ projectPath: session.project.path });
+});
+ipcMain.handle("standups:configure", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return standups.configure({
+    ...info,
+    projectSlug: session.project.slug,
+    projectPath: session.project.path,
+    projectName: session.project.name || path.basename(session.project.path),
+    currentDomain: session.domain || "All",
+  });
+});
+ipcMain.handle("standups:run_due", () => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  const reconciled = standups.reconcile({
+    projectSlug: session.project.slug,
+    projectPath: session.project.path,
+  });
+  const due = standups.runDue({
+    projectSlug: session.project.slug,
+    projectPath: session.project.path,
+  });
+  return { ...due, reconciled };
+});
+ipcMain.handle("standups:proposal_action", (_e, info = {}) => {
+  if (!session.project) return { ok: false, reason: "open a project first" };
+  return standups.reviewProposal({
+    projectSlug: session.project.slug,
+    projectPath: session.project.path,
+    executionId: String(info.executionId || "").trim(),
+    proposalId: String(info.proposalId || "").trim(),
+    action: String(info.action || "").trim(),
+    humanApproved: info.humanApproved === true,
+    reviewedBy: String(info.reviewedBy || "human").trim(),
+  });
+});
 // Live room loop: a persistent A2A conversation in a room (agents reply to posts).
 ipcMain.handle("meetings:room_loop_start", (_e, info = {}) =>
   meetings.startRoomLoop({ ...info, projectPath: session.project && session.project.path }));
@@ -1705,18 +2406,25 @@ ${prompt}` : prompt;
 // Cost-gated like the model: every TTS/STT call checks the CostMeter first and
 // records usage after, so voice spend is visible and the hard caps + kill
 // switch halt a runaway voice loop. Degrades gracefully when no key is set.
-ipcMain.handle("voice:available", () => voice.status());
+ipcMain.handle("voice:available", () => voice.statusAsync());
 
 ipcMain.handle("voice:speak", async (_e, text) => {
-  if (!voice.available()) return { ok: false, reason: "voice disabled (no ELEVENLABS_API_KEY)" };
+  const isLocal = await voice.localAvailable();
+  const isCloud = voice.available();
+  if (!isCloud && !isLocal) return { ok: false, reason: "voice disabled — start Ollama or set ELEVENLABS_API_KEY" };
   if (!session.cost) return { ok: false, reason: "open a project first" };
   const gate = session.cost.canProceed();
   if (!gate.ok) return { ok: false, halted: true, reason: gate.reason, cost: session.cost.status() };
   try {
     const r = await voice.tts(text);
     session.cost.recordVoiceUsage({ kind: "tts", chars: r.chars, durationMs: r.durationMs });
+    // Local mode: say plays directly — no audio buffer to return to renderer
+    if (r.mode === "local") {
+      return { ok: true, mode: "local", chars: r.chars, cost: session.cost.status() };
+    }
     return {
       ok: true,
+      mode: "cloud",
       audioBase64: r.audio.toString("base64"),
       mime: r.mime,
       chars: r.chars,
@@ -1727,10 +2435,26 @@ ipcMain.handle("voice:speak", async (_e, text) => {
   }
 });
 
+// voice:ask — local Ollama LLM ask (used by the renderer voice loop)
+ipcMain.handle("voice:ask", async (_e, { prompt, messages } = {}) => {
+  const isLocal = await voice.localAvailable();
+  if (!isLocal) return { ok: false, reason: "local voice not available — is Ollama running with gemma3:4b?" };
+  if (session.cost) {
+    const gate = session.cost.canProceed();
+    if (!gate.ok) return { ok: false, halted: true, reason: gate.reason, cost: session.cost.status() };
+  }
+  try {
+    const r = await voice.localAsk(prompt || "", { messages });
+    return { ok: true, text: r.text, durationMs: r.durationMs, model: r.model };
+  } catch (e) {
+    return { ok: false, reason: e.message };
+  }
+});
+
 ipcMain.handle("voice:listen", async (_e, { audioBase64, mime } = {}) => {
-  if (!voice.available()) return { ok: false, reason: "voice disabled (no ELEVENLABS_API_KEY)" };
-  // Dictation (speech → text into the chat box) must work even before a project
-  // is opened. Only cost-gate + meter the STT when a project/cost meter exists.
+  // Local mode: STT is handled in the renderer via Web Speech API.
+  // This handler is only used in cloud mode (ElevenLabs STT).
+  if (!voice.available()) return { ok: false, reason: "cloud STT disabled (no ELEVENLABS_API_KEY) — use local Web Speech mode" };
   if (session.cost) {
     const gate = session.cost.canProceed();
     if (!gate.ok) return { ok: false, halted: true, reason: gate.reason, cost: session.cost.status() };
@@ -1744,6 +2468,36 @@ ipcMain.handle("voice:listen", async (_e, { audioBase64, mime } = {}) => {
     return { ok: false, reason: e.message, cost: session.cost ? session.cost.status() : null };
   }
 });
+
+// --- IPC: Pilot Seat Voice Chat (multi-agent, Piper TTS) ---
+// Voice conversation with whichever agent is in the pilot seat.
+// STT: Web Speech API (renderer) -> chat: agent provider -> TTS: Piper/say
+
+ipcMain.handle("voicechat:pilot", () => voiceChat.getPilot());
+ipcMain.handle("voicechat:setPilot", (_e, agentId) => voiceChat.setPilot(agentId));
+ipcMain.handle("voicechat:status", () => voiceChat.status());
+
+ipcMain.handle("voicechat:chat", async (_e, { text, mute = false } = {}) => {
+  if (!text || !text.trim()) return { ok: false, reason: "no input" };
+  try {
+    const r = await voiceChat.chat(text, { mute });
+    return r;
+  } catch (e) {
+    return { ok: false, reason: e.message };
+  }
+});
+
+ipcMain.handle("voicechat:speak", async (_e, text) => {
+  if (!text || !text.trim()) return { ok: false, reason: "no text" };
+  try {
+    const r = await voiceChat.speak(text);
+    return r;
+  } catch (e) {
+    return { ok: false, reason: e.message };
+  }
+});
+
+ipcMain.handle("voicechat:interrupt", () => voiceChat.interrupt());
 
 // --- IPC: conversational AI (ElevenLabs live voice agent) ---
 // The renderer opens the real-time session itself with a short-lived signed
@@ -2053,6 +2807,23 @@ if (!gotLock) {
     // Start the AGUI server (wraps Hermes → AG-UI event stream) before the
     // window loads so the renderer can connect on init.
     try { await aguiServer.start(); } catch (e) { console.warn("[agui] start failed:", e && e.message); }
+
+    // Start watching for CEO trigger requests (file-based IPC)
+    try {
+      ceoTriggers.startWatching((trigger) => {
+        if (trigger.type === "terminal-open" && trigger.agentId) {
+          console.log("[ceo-triggers] Opening terminal for agent:", trigger.agentId);
+          // Open terminal via existing IPC mechanism
+          if (mainWin && mainWin.webContents) {
+            mainWin.webContents.send("terminal:open-request", { agentId: trigger.agentId });
+          }
+        }
+      });
+      console.log("[ceo-triggers] Watching for CEO trigger requests");
+    } catch (e) {
+      console.warn("[ceo-triggers] Failed to start watching:", e && e.message);
+    }
+
     mainWin = createWindow();
     // The cockpit is up, so the CEO should be too: ensure the Hermes gateway
     // (which also runs the Kanban dispatcher → the swarm) is running.
@@ -2073,6 +2844,8 @@ if (!gotLock) {
   app.on("before-quit", () => {
     // Clean up GBrain server when quitting
     stopGBrainServer();
+    // Detach any temporary UI terminal clients. This does not kill agent tmux sessions.
+    try { ptyTerminal.closeAll(); } catch { /* ignore */ }
     // Stop any live A2A room-loop daemons.
     try { meetings.stopAllRoomLoops(); } catch { /* ignore */ }
   });

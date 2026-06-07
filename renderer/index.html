@@ -12,30 +12,32 @@
   <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/highlight.js/lib/highlight.min.js"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="puti.bundle.css" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body class="h-screen flex flex-col bg-neutral-950 text-neutral-200 antialiased">
   <!-- Top bar: project + domain switchers, cost meter, kill switch -->
-  <header class="flex items-center gap-3 px-4 py-2.5 border-b border-neutral-800 bg-neutral-900/60 backdrop-blur">
+  <header class="flex items-center gap-2 px-3 py-1.5 border-b border-neutral-800 bg-neutral-900/60 backdrop-blur">
     <div class="flex items-center gap-2 text-sm font-semibold tracking-tight text-neutral-100">
       CEO&nbsp;Studio
     </div>
-    <div class="w-px h-5 bg-neutral-800 mx-1"></div>
+    <div class="w-px h-4 bg-neutral-800 mx-0.5"></div>
     <select id="project-switcher"
-            class="bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1 text-sm text-neutral-200 focus:outline-none focus:ring-1 focus:ring-red-500/50">
+            class="bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-0.5 text-xs text-neutral-200 focus:outline-none focus:ring-1 focus:ring-red-500/50">
       <option value="">Select project…</option>
     </select>
     <select id="domain-switcher"
-            class="bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1 text-sm text-neutral-200 focus:outline-none focus:ring-1 focus:ring-red-500/50">
+            class="bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-0.5 text-xs text-neutral-200 focus:outline-none focus:ring-1 focus:ring-red-500/50">
       <option value="All">All domains</option>
     </select>
     <div class="relative">
       <button id="create-menu-toggle"
-              class="text-lg leading-none bg-neutral-100 text-neutral-900 hover:bg-white rounded-md px-3 py-1 font-semibold transition"
+              class="text-base leading-none bg-neutral-100 text-neutral-900 hover:bg-white rounded-md px-2 py-0.5 font-semibold transition"
               title="Create project, domain, or task">+</button>
-      <div id="create-menu" class="hidden absolute left-0 top-10 z-50 w-48 overflow-hidden rounded-xl border border-neutral-700 bg-neutral-900 shadow-2xl">
+      <div id="create-menu" class="hidden absolute left-0 top-9 z-50 w-48 overflow-hidden rounded-xl border border-neutral-700 bg-neutral-900 shadow-2xl">
         <button id="create-project" class="block w-full px-3 py-2 text-left text-sm text-neutral-200 hover:bg-neutral-800">New project</button>
         <button id="create-domain" class="block w-full px-3 py-2 text-left text-sm text-neutral-200 hover:bg-neutral-800">New domain</button>
+        <button id="create-brief" class="block w-full px-3 py-2 text-left text-sm text-neutral-200 hover:bg-neutral-800">New brief <span class="text-[10px] text-neutral-500">(chat)</span></button>
         <button id="create-task" class="block w-full px-3 py-2 text-left text-sm text-neutral-200 hover:bg-neutral-800">New task</button>
       </div>
     </div>
@@ -43,74 +45,83 @@
     <div class="flex-1"></div>
 
     <!-- Live cost meter -->
-    <div id="meter" class="text-xs font-mono px-3 py-1 rounded-md border border-neutral-700 bg-neutral-800/50 text-neutral-300">
-      session $0.0000 / $5 · day $0.0000 / $20
+    <div id="meter" class="text-[11px] font-mono px-2 py-0.5 rounded-md border border-neutral-700 bg-neutral-800/50 text-neutral-400">
+      $0 / $5 · $0 / $20
     </div>
     <button id="kill" title="Emergency stop: halt CEO/voice spending and agent activity until resumed"
-            class="text-xs bg-neutral-900 hover:bg-red-950 border border-red-900/50 text-red-300 rounded-md px-2.5 py-1 font-medium transition">Emergency stop</button>
+            class="text-[11px] bg-neutral-900 hover:bg-red-950 border border-red-900/50 text-red-400 rounded-md px-2 py-0.5 font-medium transition">Stop</button>
 
     <!-- CEO (Hermes) status pill -->
     <div id="ceo-status" title="Hermes CEO daemon"
-         class="flex items-center gap-1.5 text-xs font-mono px-2.5 py-1 rounded-md border border-neutral-700 bg-neutral-800/50 text-neutral-400">
-      <span id="ceo-dot" class="w-2 h-2 rounded-full bg-neutral-600"></span>
-      <span id="ceo-label">CEO …</span>
+         class="flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-md border border-neutral-700 bg-neutral-800/50 text-neutral-500">
+      <span id="ceo-dot" class="w-1.5 h-1.5 rounded-full bg-neutral-600"></span>
+      <span id="ceo-label">CEO</span>
     </div>
     <!-- Header live-voice trigger (talk to the CEO) -->
     <button id="header-voice" title="Talk to the CEO (live voice)"
-            class="flex items-center gap-1.5 text-sm bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 rounded-md px-3 py-1 font-medium transition disabled:opacity-40 disabled:cursor-not-allowed">
+            class="flex items-center gap-1 text-xs bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 rounded-md px-2 py-0.5 font-medium transition disabled:opacity-40 disabled:cursor-not-allowed">
       <span id="header-voice-icon">🎙️</span><span id="header-voice-label">Voice</span>
     </button>
     <button id="toggle-dashboard"
-            class="text-sm bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 rounded-md px-3 py-1 font-medium transition">Dashboard</button>
+            class="text-xs bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 rounded-md px-2 py-0.5 font-medium transition">Dashboard</button>
+    <div class="relative">
+      <button id="human-escalations" title="Human escalation inbox"
+              class="text-xs bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 rounded-md px-2 py-0.5 font-medium transition">
+        Escalations <span id="human-escalation-count" class="ml-1 hidden rounded bg-red-600 px-1 text-[10px] text-white">0</span>
+      </button>
+      <div id="human-escalation-panel" class="hidden absolute right-0 top-7 z-50 w-[360px] max-h-[70vh] overflow-auto rounded-lg border border-neutral-700 bg-neutral-950 shadow-2xl"></div>
+    </div>
   </header>
 
-  <!-- Studio context: the dashboard can focus this workspace on a domain/task. -->
-  <div class="px-3 py-3">
-    <div class="rounded-2xl border border-neutral-800 bg-[radial-gradient(circle_at_12%_0%,rgba(6,182,212,0.12),transparent_32%),linear-gradient(135deg,rgba(23,23,23,0.92),rgba(10,10,10,0.86))] px-4 py-3 shadow-[0_18px_80px_rgba(0,0,0,0.28)]">
-      <div class="flex flex-wrap items-center gap-3">
-        <div class="flex items-center gap-2">
-          <span id="agent-circle" class="w-2.5 h-2.5 rounded-full bg-neutral-600"></span>
-          <span id="studio-mode-pill" class="text-[10px] uppercase tracking-[0.28em] text-cyan-300/80">Studio</span>
-        </div>
-        <div class="min-w-0 flex-1">
-          <div id="studio-focus-title" class="truncate text-sm font-medium text-neutral-100">Project cockpit</div>
-          <div id="studio-focus-subtitle" class="truncate text-xs text-neutral-500">Open a project, pick a domain, or click a kanban task to start a planning session.</div>
-        </div>
-        <div id="provider-note" class="text-[11px] font-mono text-neutral-600"></div>
-      </div>
-      <div id="voice-status" class="mt-2 min-h-4 text-xs text-neutral-500"></div>
-    </div>
-  </div>
+  <!-- Voice status line (compact, collapses when empty) -->
+  <div id="voice-status" class="px-3 pt-1.5 text-xs text-neutral-500 min-h-0 empty:hidden"></div>
 
   <!-- Two agent-controlled panels -->
-  <main class="flex-1 flex min-h-0 px-3 pb-3 gap-3">
+  <main class="flex-1 flex min-h-0 px-2.5 pb-2.5 gap-2">
     <!-- Studio nav rail: opens the workspace panels (Domain, Board, Tasks, Agents, Teams, Channels, Meetings) -->
-    <nav id="studio-nav" class="w-[176px] shrink-0 overflow-auto rounded-xl border border-neutral-800 bg-neutral-900/40 p-2 flex flex-col gap-1">
-      <div class="px-2 pt-1 pb-1 text-[11px] uppercase tracking-wider text-neutral-500">Workspace</div>
-      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="domain">
+    <nav id="studio-nav" class="w-[168px] shrink-0 overflow-auto rounded-xl border border-neutral-800 bg-neutral-900/40 p-1.5 flex flex-col gap-0.5">
+      <div class="px-2 pt-1 pb-0.5 text-[10px] uppercase tracking-wider text-neutral-600">Build</div>
+      <button class="nav-item w-full text-left rounded-md px-2.5 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="sessions">
+        <span class="text-neutral-500">◎</span><span>Sessions</span>
+      </button>
+      <div class="px-2 pt-1 pb-0.5 text-[10px] uppercase tracking-wider text-neutral-600">Workspace</div>
+      <button class="nav-item w-full text-left rounded-md px-2.5 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="domain">
         <span class="text-neutral-500">◆</span><span>Domain</span>
       </button>
-      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="board">
+      <button class="nav-item w-full text-left rounded-md px-2.5 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="board">
         <span class="text-neutral-500">▤</span><span>Board</span>
       </button>
-      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="tasks">
+      <button class="nav-item w-full text-left rounded-md px-2.5 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="tasks">
         <span class="text-neutral-500">☑</span><span>Tasks</span>
       </button>
-      <div class="mt-2 px-2 pt-1 pb-1 text-[11px] uppercase tracking-wider text-neutral-500">Team</div>
-      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="agents">
-        <span class="text-neutral-500">⦿</span><span>Agents</span>
-      </button>
-      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="teams">
-        <span class="text-neutral-500">▦</span><span>Teams</span>
-      </button>
-      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="personas">
+      <div class="mt-1.5 px-2 pt-1 pb-0.5 text-[10px] uppercase tracking-wider text-neutral-600">Team</div>
+	      <button class="nav-item w-full text-left rounded-md px-2.5 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="agents">
+	        <span class="text-neutral-500">⦿</span><span>Agents</span>
+	      </button>
+	      <button class="nav-item w-full text-left rounded-md px-2.5 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="skills">
+	        <span class="text-neutral-500">▧</span><span>Skills</span>
+	      </button>
+	      <button class="nav-item w-full text-left rounded-md px-2.5 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="teams">
+	        <span class="text-neutral-500">▦</span><span>Teams</span>
+	      </button>
+      <button class="nav-item w-full text-left rounded-md px-2.5 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="personas">
         <span class="text-neutral-500">✦</span><span>Personas</span>
       </button>
-      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="channels">
+      <button class="nav-item w-full text-left rounded-md px-2.5 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="channels">
         <span class="text-neutral-500">#</span><span>Channels</span>
       </button>
-      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="meetings">
+      <button class="nav-item w-full text-left rounded-md px-2.5 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="meetings">
         <span class="text-neutral-500">⧉</span><span>Meetings</span>
+      </button>
+      <button class="nav-item w-full text-left rounded-md px-2.5 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="goals">
+        <span class="text-neutral-500">🎯</span><span>Goals</span>
+      </button>
+      <div class="mt-1.5 px-2 pt-1 pb-0.5 text-[10px] uppercase tracking-wider text-neutral-600">Tools</div>
+      <button class="nav-item w-full text-left rounded-md px-2.5 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="voice">
+        <span class="text-neutral-500">🎤</span><span>Voice Pilot</span>
+      </button>
+      <button class="nav-item w-full text-left rounded-md px-2.5 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="terminal">
+        <span class="text-neutral-500">&gt;_</span><span>Terminal</span>
       </button>
     </nav>
     <section id="panel1"
@@ -138,24 +149,75 @@
         <div id="panel-content-body" class="flex-1 min-h-0 overflow-auto p-4">
           <div class="text-neutral-600 text-sm">Open a project to begin.</div>
         </div>
+        <div id="panel-inspect" class="hidden flex-1 min-h-[200px] max-h-[45%] flex flex-col border-t border-neutral-800">
+          <div class="flex items-center gap-2 px-3 py-2 border-b border-neutral-800 bg-neutral-950/30">
+            <span id="panel-inspect-title" class="text-[11px] uppercase tracking-wider text-neutral-500">Agent terminal</span>
+            <button id="panel-inspect-close" type="button" title="Close inspect"
+                    class="ml-auto text-xs bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 rounded px-2 py-0.5">×</button>
+          </div>
+          <pre id="panel-inspect-output" class="flex-1 overflow-auto p-3 m-0 font-mono text-[11px] leading-relaxed text-emerald-100/85 whitespace-pre-wrap"></pre>
+          <div class="flex items-center gap-2 border-t border-neutral-800 p-2 bg-neutral-950/35">
+            <input id="panel-inspect-input"
+                   class="min-w-0 flex-1 bg-neutral-900 border border-neutral-700 rounded px-2 py-1.5 text-xs text-neutral-100 placeholder-neutral-500 focus:outline-none"
+                   placeholder="Send one line to this terminal..." />
+            <button id="panel-inspect-send" type="button"
+                    class="bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 rounded px-2 py-1.5 text-xs">Send</button>
+          </div>
+        </div>
       </div>
     </section>
     <section id="panel2"
-             class="relative flex-1 overflow-auto p-4 rounded-xl border border-neutral-800 bg-neutral-900/40 flex flex-col">
-      <div id="panel2-stream" class="flex-1 overflow-auto text-sm whitespace-pre-wrap leading-relaxed"></div>
-      <div class="mt-3 flex gap-2 items-center">
-        <input id="chat-input"
-               class="flex-1 bg-neutral-800/70 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-500 focus:outline-none focus:ring-1 focus:ring-red-500/50"
-               placeholder="Type to the Project CEO… or 🎤 to dictate" />
-        <button id="dictate" title="Dictate (speech → text into the box)"
-                class="bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 rounded-lg px-3 py-2 text-sm transition disabled:opacity-40 disabled:cursor-not-allowed">🎤</button>
-        <button id="send"
-                class="bg-red-600 hover:bg-red-500 text-white rounded-lg px-4 py-2 text-sm font-medium transition">Send</button>
+             class="relative flex-1 min-w-0 overflow-hidden p-3 rounded-xl border border-neutral-800 bg-neutral-900/40 flex flex-col">
+      <div id="session-bar" class="hidden mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950/50 px-3 py-2">
+        <span id="session-bar-title" class="text-sm font-medium text-neutral-100 truncate">Session</span>
+        <span id="session-live-status" class="text-[10px] uppercase tracking-wider text-neutral-500">saved session</span>
+        <button id="session-close" type="button" class="ml-auto text-xs text-neutral-400 hover:text-neutral-200">← All sessions</button>
+      </div>
+      <div id="session-workflow" class="hidden mb-2 rounded-lg border border-neutral-800 bg-neutral-950/60 text-xs"></div>
+      <div id="session-agents-strip" class="hidden mb-2 flex gap-2 overflow-x-auto pb-1"></div>
+      
+      <!-- Main content area -->
+      <div id="panel2-stream" class="flex-1 min-h-0 overflow-auto text-sm whitespace-pre-wrap leading-relaxed agui-chat-stream"></div>
+      <div id="session-room-feed" class="hidden max-h-24 overflow-auto text-[10px] text-neutral-500 border-t border-neutral-800/60 pt-2 mt-1 font-mono whitespace-pre-wrap"></div>
+      <!-- Rich chat input (Devin-style) -->
+      <div class="mt-3 rounded-xl border border-neutral-700/60 bg-neutral-800/40 backdrop-blur-sm flex flex-col overflow-hidden">
+        <textarea id="chat-input"
+                  class="w-full bg-transparent px-3.5 py-3 text-sm text-neutral-100 placeholder-neutral-500 focus:outline-none focus:ring-1 focus:ring-inset focus:ring-cyan-500/30 resize-none"
+                  placeholder="Ask the CEO anything…"
+                  rows="1"></textarea>
+
+        <!-- Attached context pills -->
+        <div id="chat-context-pills" class="hidden flex flex-wrap gap-1.5 px-3.5 pb-1.5"></div>
+
+        <!-- Toolbar -->
+        <div class="flex items-center gap-1 px-2 py-1.5 border-t border-neutral-700/40">
+          <button id="chat-agent" title="Choose agent"
+                  class="flex items-center gap-1.5 px-2 h-7 rounded-md hover:bg-neutral-700/50 text-cyan-200 hover:text-cyan-100 text-[11px] transition">
+            <span class="inline-flex h-4 w-4 items-center justify-center rounded-full border border-cyan-800 bg-cyan-950/60 text-[9px]">A</span>
+            <span id="chat-agent-label">ceo</span>
+          </button>
+          <button id="chat-attach" title="Attach file context"
+                  class="flex items-center justify-center w-7 h-7 rounded-md hover:bg-neutral-700/50 text-neutral-400 hover:text-neutral-200 text-sm font-medium transition">
+            +
+          </button>
+          <button id="chat-code" title="Insert code block"
+                  class="flex items-center gap-1 px-2 h-7 rounded-md hover:bg-neutral-700/50 text-neutral-400 hover:text-neutral-200 text-[11px] transition">
+            <span>&lt;/&gt;</span> Code
+          </button>
+
+          <div class="flex-1"></div>
+
+          <button id="dictate" title="Dictate"
+                  class="flex items-center justify-center w-7 h-7 rounded-md hover:bg-neutral-700/50 text-neutral-400 hover:text-neutral-200 text-xs transition disabled:opacity-40 disabled:cursor-not-allowed">🎤</button>
+          <button id="send" title="Send"
+                  class="flex items-center justify-center w-7 h-7 rounded-md bg-red-600 hover:bg-red-500 text-white transition">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+          </button>
+        </div>
       </div>
 
-      <!-- Agent live surface: shown when an agent is selected from the Agents panel.
-           Terminal tab = live tmux capture-pane; Logs tab = the agent's room transcript. -->
-      <div id="agent-surface" class="hidden absolute inset-0 z-20 rounded-xl bg-neutral-950/97 backdrop-blur flex flex-col">
+      <!-- Legacy agent overlay (Agents nav). Session inspect uses #panel-inspect instead. -->
+      <div id="agent-surface" class="hidden absolute inset-0 z-20 rounded-xl bg-neutral-950/97 backdrop-blur flex flex-col" style="display:none">
         <div class="flex items-center gap-2 px-3 py-2 border-b border-neutral-800">
           <span id="as-dot" class="w-2 h-2 rounded-full bg-neutral-600"></span>
           <span id="as-name" class="text-sm font-medium text-neutral-100 truncate">Agent</span>
@@ -193,6 +255,7 @@
                   class="text-xs bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 rounded px-2 py-1 transition">✕</button>
         </div>
         <div id="chan-members" class="flex flex-wrap items-center gap-1.5 px-3 py-2 border-b border-neutral-800/70 bg-neutral-950/40"></div>
+        <div id="chan-swarm" class="hidden border-b border-neutral-800/70 bg-neutral-950/35 px-3 py-2"></div>
         <div id="chan-feed" class="flex-1 overflow-auto p-3 space-y-3 text-sm"></div>
 
         <!-- Brief working session: kick off an A2A discussion about a brief -->
@@ -399,9 +462,13 @@
     // disable auto-start and pick the dark theme to match the cockpit.
     try { window.mermaid && window.mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "strict" }); } catch (e) {}
   </script>
-  <script src="app.js"></script>
-  <script src="dashboard.js"></script>
   <script src="agui/client.bundle.js"></script>
+  <script src="puti.bundle.js"></script>
+  <script src="studio-sessions.js"></script>
+  <script src="voice-panel.js"></script>
+  <script src="app.js"></script>
+  <script src="brief-builder.js"></script>
+  <script src="dashboard.js"></script>
   <script type="module" src="convai.js"></script>
 </body>
 </html>

@@ -86,6 +86,10 @@ function parseSSE(raw) {
   assert.strictEqual(snap.snapshot.ui.components[0].type, "heading");
   assert.strictEqual(snap.snapshot.ui.components[0].props.level, 2);
 
+  const inline = agui._extractUi('Text before.\n```agui {"components":[{"type":"text","content":"Rendered"}]}\n```\nText after.');
+  assert.ok(!/```agui/.test(inline.prose), "inline agui fence is stripped from prose");
+  assert.ok(inline.ui && inline.ui.components.length === 1, "inline agui fence parses ui");
+
   agui.stop();
   console.log(`AGUI test passed — ${events.length} events:`, types.join(" → "));
 })().catch((e) => { console.error("AGUI test FAILED:", e.message); agui.stop(); process.exit(1); });

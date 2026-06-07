@@ -18,6 +18,10 @@ The Meetings view is the operator workspace for convening domain-owned agent ses
 - Saved meeting artifacts preserve selected source context under `## Source Context`.
 - Completed synthesis is saved under `domains/<domain>/agendas/`.
 - Saving a synthesis also appends a meeting Agenda Item that points to the output artifact.
+- Meetings linked to a Brief Run automatically produce a durable review set from `requirements.md`.
+- Review sets can contain decision, Agenda Item, blocker, evidence, and completion proposals.
+- Proposals are idempotent across polling and remain pending until explicitly approved or rejected.
+- Approval requires the main-process `humanApproved: true` gate. Blocker approval also records a Hermes comment, moves the parent task to `blocked`, and writes the board-overlay blocker.
 
 ## Domain Contract
 Every meeting artifact must include:
@@ -44,3 +48,6 @@ Every meeting artifact must include:
 - Pick a team card and confirm matching member checkboxes update.
 - Start a meeting and confirm the live room transcript is shown.
 - Confirm completed output is saved under `agendas/` with `## Source Context`.
+- Open a completed linked meeting from a Brief Run and confirm typed proposals appear in Meeting Follow-up Review.
+- Confirm approval without `humanApproved: true` is rejected.
+- Approve a decision and confirm it appears in the Brief Run decision record; reject a blocker and confirm the parent task remains unblocked.

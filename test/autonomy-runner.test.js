@@ -1061,4 +1061,82 @@ ok("two-context browser contract requires context execution evidence",
   ok("human escalation can be acknowledged", ack.ok && notifications.list(slug, { type: "human_escalation" }).unread === 0);
 })();
 
+// 11. Unblocker recursion guard — a blocked task that is ITSELF an unblocker
+//     meta-task must NOT spawn another clarify/unblock layer (that nesting is
+//     the "Clarify blocker for [Clarify blocker for ...]" churn). It escalates
+//     to a human decision instead.
+ok("isUnblockMetaTask detects a clarify meta-task", unblocker.isUnblockMetaTask({ title: "Clarify blocker for [Task] Repair X" }) === true);
+ok("isUnblockMetaTask detects a CEO-decision meta-task", unblocker.isUnblockMetaTask({ title: "CEO decision for foo" }) === true);
+ok("isUnblockMetaTask detects an [Unblock] meta-task", unblocker.isUnblockMetaTask({ title: "[Unblock] do the thing" }) === true);
+ok("isUnblockMetaTask ignores a normal task", unblocker.isUnblockMetaTask({ title: "Implement phone call data model" }) === false);
+(() => {
+  const slug = SLUG + "-unblock-meta-recursion";
+  const calls = { selfRepair: [], comment: [], domainTask: [] };
+  const deps = {
+    hermes: {
+      currentBoard: () => "ceo-studio",
+      getBoard: () => ({ ok: true, columns: { blocked: [{ id: "meta-1", title: "Clarify blocker for [Task] Repair [Self-QA] failed", status: "blocked" }] } }),
+      getTask: () => ({ ok: true, task: { id: "meta-1", title: "Clarify blocker for [Task] Repair [Self-QA] failed", body: "meta" }, comments: [] }),
+      addComment: (a) => { calls.comment.push(a); return { ok: true }; },
+      taskAction: () => ({ ok: true }),
+    },
+    overlay: boardOverlay,
+    notifications,
+    org: { route: () => ({ team: "review-guild", assignee: "planner" }) },
+    selfRepair: { reportSystemBug: (i) => { calls.selfRepair.push(i); return { ok: true, bug: { task: { taskId: "bug-x" } }, repairTask: { task: { taskId: "repair-x" } } }; } },
+    domainBoard: { createChildTask: (i) => { calls.domainTask.push(i); return { ok: true, task: { taskId: "child-x" } }; } },
+  };
+  const r = unblocker.run({ projectSlug: slug, projectPath: PROJECT_PATH, board: "ceo-studio", deps });
+  ok("meta-task does NOT spawn another clarify/unblock child", calls.domainTask.length === 0 && calls.selfRepair.length === 0);
+  ok("meta-task is escalated to a human decision (no recursion)", r.results[0].blockerType === "human_decision" && r.results[0].metaRecursionGuard === true);
+  ok("meta-task escalation raises a human notification", notifications.list(slug, { type: "human_escalation" }).unread === 1);
+})();
+
+// 12. Oversight report — classify each task's true disposition, and surface the
+//     DIVERGED alarm (board says "done" but the branch never reached the base).
+(() => {
+  const base = { board: "b", projectPath: PROJECT_PATH, state: {}, workers: [], branchState: () => ({ exists: false, ahead: 0, merged: false }) };
+  const merged = (task, over = {}) => runner._defaults.classifyTask(task, { ...base, ...over });
+  ok("done + merged branch => delivered",
+    merged({ id: "t1", status: "done" }, { branchState: () => ({ exists: true, ahead: 0, merged: true }) }).disposition === "delivered");
+  const div = merged({ id: "t2", status: "done" }, { branchState: () => ({ exists: true, ahead: 2, merged: false }) });
+  ok("done + unmerged ahead branch => DIVERGED", div.disposition === "diverged" && div.diverged === true && div.ahead === 2);
+  ok("archived + unmerged ahead branch => stranded",
+    merged({ id: "t3", status: "archived" }, { branchState: () => ({ exists: true, ahead: 1, merged: false }) }).disposition === "stranded");
+  ok("a live tracked worker => live",
+    merged({ id: "t4", status: "running" }, { workers: [{ board: "b", taskId: "t4" }], branchState: () => ({ exists: true, ahead: 1, merged: false }) }).disposition === "live");
+  ok("escalated repair-cap => needs-human",
+    merged({ id: "t5", status: "blocked" }, { state: { completionRepairs: { "b:t5": { escalated: true } } } }).disposition === "needs-human");
+  ok("open PR => open-pr",
+    merged({ id: "t6", status: "review" }, { state: { pullRequests: { "b:t6": { url: "http://pr/6" } } } }).disposition === "open-pr");
+})();
+(() => {
+  const slug = SLUG + "-report-e2e";
+  const board = {
+    ok: true,
+    columns: {
+      done: [{ id: "d1", title: "Delivered", status: "done" }, { id: "dv1", title: "Diverged feature", status: "done" }],
+      ready: [{ id: "r1", title: "Ready", status: "ready" }],
+      blocked: [{ id: "esc1", title: "Escalated", status: "blocked" }],
+    },
+  };
+  const branchState = ({ branch }) => {
+    if (/dv1/.test(branch)) return { exists: true, ahead: 3, merged: false }; // diverged
+    if (/d1/.test(branch)) return { exists: true, ahead: 0, merged: true };   // delivered
+    return { exists: false, ahead: 0, merged: false };
+  };
+  const rep = runner.report({
+    projectSlug: slug,
+    projectPath: PROJECT_PATH,
+    boards: ["b"],
+    state: { completionRepairs: { "b:esc1": { escalated: true } } },
+    workers: [],
+    deps: { hermes: { getBoard: () => board }, branchState, isAlive: () => false },
+  });
+  ok("report aggregates one board with all tasks", rep.ok && rep.boards.length === 1 && rep.summary.tasks === 4);
+  ok("report counts the DIVERGED alarm", rep.summary.byDisposition.diverged === 1 && rep.summary.byDisposition.delivered === 1);
+  ok("report flags the escalated task as needs-human", rep.summary.byDisposition["needs-human"] === 1);
+  ok("report row carries branch divergence detail", rep.boards[0].tasks.some((t) => t.id === "dv1" && t.diverged && t.ahead === 3));
+})();
+
 console.log(`\n${passed} autonomy-runner checks passed.`);

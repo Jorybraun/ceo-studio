@@ -1,0 +1,13 @@
+{
+  "enabled": false,
+  "execute": false,
+  "dryRun": true,
+  "allowDecompose": false,
+  "allowAssign": false,
+  "allowUnblocker": false,
+  "allowTriage": false,
+  "allowStandups": false,
+  "maxConcurrentWorkers": 2,
+  "maxDispatchPerCycle": 2,
+  "note": "Safety brake 2026-06-07: stops runaway self-repair worker spend. Any live timer cycle now runs propose-only (dryRun) with execute disabled, so no new Devin workers spawn. Re-enable deliberately from the cockpit; keep concurrency capped."
+}

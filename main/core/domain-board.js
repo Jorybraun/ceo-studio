@@ -11,6 +11,7 @@ const hermes = require("./hermes");
 const provenance = require("./provenance");
 const goals = require("./goals");
 const org = require("./orchestration-org");
+const briefRuns = require("./brief-runs");
 
 // Sectional decomposer (new capability for breaking briefs into well-scoped plans)
 const briefDecomposer = require("./brief-decomposer");
@@ -211,6 +212,13 @@ function createBrief(input = {}, { projectSlug } = {}) {
   });
   if (!result.ok) return result;
   const artifact = recordBrainArtifact(projectSlug, { kind: "brief", input: { ...input, board }, taskResult: result });
+  const briefRun = projectSlug
+    ? briefRuns.upsertFromBrief(projectSlug, { ...input, board }, {
+      taskId: result.taskId || text(input.title),
+      title: `[Brief] ${text(input.title)}`,
+      board,
+    })
+    : null;
   if (projectSlug) {
     provenance.recordWorkItem(projectSlug, {
       kind: "brief",
@@ -242,7 +250,15 @@ function createBrief(input = {}, { projectSlug } = {}) {
       });
     }
   }
-  return { ok: true, kind: "brief", board, body, task: result, brainArtifactId: artifact && artifact.id };
+  return {
+    ok: true,
+    kind: "brief",
+    board,
+    body,
+    task: result,
+    brainArtifactId: artifact && artifact.id,
+    briefRunId: briefRun && briefRun.id,
+  };
 }
 
 function createBug(input = {}, { projectSlug } = {}) {
@@ -305,7 +321,8 @@ function createBug(input = {}, { projectSlug } = {}) {
 function childTaskBody(input = {}) {
   const parentId = fallback(input.parentId, "Unlinked");
   const routing = input.routing || org.route(null, { domain: input.domain, status: input.status || org.defaultLaneForKind("child_task"), kind: "child_task" });
-  return [
+  const evidence = list(input.evidence);
+  const body = [
     "# Child Task",
     "",
     "## Parent",
@@ -318,6 +335,15 @@ function childTaskBody(input = {}) {
     `- Outcome: ${fallback(input.outcome || input.title)}`,
     `- Workspace: ${fallback(input.workspace, "Not assigned.")}`,
     `- Owner / Persona: ${fallback(input.persona || input.owner, "Unassigned")}`,
+  ];
+  if (evidence.length) {
+    body.push(
+      "",
+      "## Evidence",
+      bullets(evidence, "No evidence attached yet."),
+    );
+  }
+  body.push(
     "",
     "## Acceptance Criteria",
     checklist(input.acceptanceCriteria),
@@ -326,7 +352,8 @@ function childTaskBody(input = {}) {
     bullets(input.verification, "Verification evidence must be added before Done."),
     "",
     org.routingMarkdown(routing),
-  ].join("\n");
+  );
+  return body.join("\n");
 }
 
 function createChildTask(input = {}, { projectSlug } = {}) {
@@ -372,6 +399,18 @@ function createChildTask(input = {}, { projectSlug } = {}) {
         source: { system: "domain-board", actor: input.requestedBy || "planner" },
       });
     }
+    briefRuns.update(projectSlug, board, text(input.parentId), {
+      childTask: {
+        id: result.taskId || text(input.title),
+        title: text(input.title),
+        board,
+        status: input.status || routing.lane || "todo",
+        assignee: text(input.assignee || input.owner || routing.assignee),
+      },
+      eventType: "child_task_created",
+      actor: input.requestedBy || "planner",
+      summary: text(input.title),
+    });
   }
   return { ok: true, kind: "child_task", board, body, task: result, provenanceEventId: relationship && relationship.id };
 }
@@ -391,6 +430,19 @@ function recordAsset(input = {}, { projectSlug } = {}) {
     source: { system: "domain-board", actor: input.requestedBy || "planner" },
     metadata: input.metadata || {},
   });
+  const board = normalizeBoard(input.board);
+  briefRuns.update(projectSlug, board, text(input.parentId), {
+    asset: {
+      id: text(input.assetId || input.path || input.title),
+      title: text(input.title),
+      path: text(input.path),
+      summary: text(input.summary),
+      kind: input.assetKind || "artifact",
+    },
+    eventType: "asset_recorded",
+    actor: input.requestedBy || "planner",
+    summary: text(input.title || input.path || input.assetId),
+  });
   return { ok: true, event };
 }
 
@@ -409,6 +461,16 @@ function decomposeBrief({ board, taskId } = {}, { projectSlug } = {}) {
       parent: provenance.ref("brief", text(taskId), { board: normalizeBoard(board) }),
       metadata: { action: "hermes kanban decompose" },
     });
+    const run = briefRuns.read(projectSlug, normalizeBoard(board), text(taskId));
+    if (run) {
+      briefRuns.update(projectSlug, normalizeBoard(board), text(taskId), {
+        progressChecklist: (run.progressChecklist || []).map((item) =>
+          item.id === "decomposition-ready" ? { ...item, done: true } : item),
+        eventType: "decomposition_requested",
+        actor: "planner",
+        summary: "Hermes decomposition requested",
+      });
+    }
   }
   return result;
 }

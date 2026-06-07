@@ -53,10 +53,12 @@ function installed() {
   try { return fs.existsSync(bin()); } catch { return false; }
 }
 
-/** Run a read-only query against a board DB; returns parsed rows or []. */
-function _query(slug, sql) {
+/** Run a read-only query against a board DB; returns parsed rows or a clear failure. */
+function _queryResult(slug, sql) {
   const db = boardDb(slug);
-  if (!fs.existsSync(db)) return [];
+  if (!fs.existsSync(db)) {
+    return { ok: false, rows: [], reason: `Hermes board database not found: ${db}`, db };
+  }
   try {
     // NOTE: no -readonly — with WAL journaling the read-only opener can't
     // attach the -shm/-wal sidecars (SQLITE_CANTOPEN/14). A plain open for a
@@ -67,10 +69,21 @@ function _query(slug, sql) {
       maxBuffer: 8 * 1024 * 1024,
     });
     const trimmed = (out || "").trim();
-    return trimmed ? JSON.parse(trimmed) : [];
-  } catch {
-    return [];
+    return { ok: true, rows: trimmed ? JSON.parse(trimmed) : [], db };
+  } catch (e) {
+    const raw = String((e && (e.stderr || e.stdout || e.message)) || e || "").trim();
+    return {
+      ok: false,
+      rows: [],
+      reason: `Hermes board read failed for ${slug}: ${raw || "sqlite3 query failed"}`,
+      db,
+    };
   }
+}
+
+/** Run a read-only query and preserve the historical array-only helper shape. */
+function _query(slug, sql) {
+  return _queryResult(slug, sql).rows;
 }
 
 /** Is a pid alive? */
@@ -85,8 +98,8 @@ function _sleep(ms) {
   } catch { /* ignore */ }
 }
 
-function _gatewayServiceStatus() {
-  const r = _run(["gateway", "status"], 8000);
+function _gatewayServiceStatus(timeoutMs = 1500) {
+  const r = _run(["gateway", "status"], timeoutMs);
   if (!r.ok) return { ok: false, up: false, reason: r.reason };
   const out = String(r.out || "");
   const loaded = /Gateway service is loaded/i.test(out);
@@ -99,7 +112,7 @@ function _gatewayServiceStatus() {
 // ---------------------------------------------------------------------------
 
 /** Non-secret CEO status for the UI: is the daemon up, which platforms, etc. */
-function ceoStatus() {
+function ceoStatus({ probeService = true, serviceTimeoutMs = 1500 } = {}) {
   if (!installed()) {
     return { ok: false, up: false, installed: false, reason: "Hermes not installed" };
   }
@@ -109,7 +122,9 @@ function ceoStatus() {
   } catch { /* no state file yet */ }
 
   const pid = state && state.pid;
-  let up = _alive(pid) && (!state.gateway_state || state.gateway_state === "running");
+  const pidAlive = _alive(pid);
+  let up = pidAlive && (!state.gateway_state || state.gateway_state === "running");
+  const starting = pidAlive && state.gateway_state === "starting";
   const platforms = {};
   if (state && state.platforms) {
     for (const [k, v] of Object.entries(state.platforms)) {
@@ -117,14 +132,15 @@ function ceoStatus() {
     }
   }
   let service = null;
-  if (!up) {
-    service = _gatewayServiceStatus();
+  if (!up && !starting && probeService) {
+    service = _gatewayServiceStatus(serviceTimeoutMs);
     up = !!(service && service.up);
   }
   return {
     ok: true,
     installed: true,
     up: !!up,
+    starting,
     pid: (up && service && service.pid) || pid || null,
     platforms,
     profile: profile(),
@@ -138,18 +154,30 @@ function ceoStatus() {
  * Ensure the CEO (gateway) is running. If it's down, start the background
  * service. Best-effort and non-blocking; returns the status afterward.
  */
-function ensureUp() {
-  const status = ceoStatus();
+function ensureUp({
+  status: statusFn = ceoStatus,
+  start: startFn = gatewayStart,
+  sleep: sleepFn = _sleep,
+  attempts = 8,
+  pollMs = 125,
+} = {}) {
+  const status = statusFn();
   if (!status.installed) return status;
-  if (status.up) return status;
-  const started = gatewayStart();
-  if (!started.ok) return { ...ceoStatus(), ok: false, reason: started.reason };
-  for (let i = 0; i < 20; i++) {
-    const next = ceoStatus();
+  if (status.up || status.starting) return status;
+  const started = startFn();
+  if (!started.ok) return { ...statusFn({ probeService: false }), ok: false, reason: started.reason };
+  for (let i = 0; i < attempts; i++) {
+    const next = statusFn({ probeService: false });
     if (next.up) return { ...next, started: true };
-    _sleep(250);
+    if (next.starting) return { ...next, started: true };
+    sleepFn(pollMs);
   }
-  return { ...ceoStatus(), starting: true, reason: "Hermes gateway start returned, but CEO status has not reported online yet." };
+  return {
+    ...statusFn({ probeService: false }),
+    starting: true,
+    startPid: started.pid || null,
+    reason: "Hermes gateway start was launched; CEO status has not reported online yet.",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +232,7 @@ function filterBoardsForDomain(domainName, allBoards) {
 function getBoard(slug) {
   if (!slug) slug = currentBoard();
   if (!slug) return { ok: false, reason: "No board" };
-  const rows = _query(
+  const result = _queryResult(
     slug,
     `SELECT id,title,status,assignee,priority,worker_pid,current_run_id,
             last_failure_error,created_at,started_at,completed_at
@@ -212,49 +240,62 @@ function getBoard(slug) {
      WHERE status != 'archived'
      ORDER BY priority DESC, created_at DESC;`
   );
+  if (!result.ok) return { ok: false, slug, reason: result.reason, db: result.db };
   const columns = {};
   for (const lane of Object.keys(org.DEFAULT_LANE_POLICIES || {})) columns[lane] = [];
-  for (const t of rows) {
+  for (const t of result.rows) {
     t.workerAlive = _alive(t.worker_pid);
     (columns[t.status] = columns[t.status] || []).push(t);
   }
-  return { ok: true, slug, columns, total: rows.length };
+  return { ok: true, slug, columns, total: result.rows.length };
 }
 
 /** Full detail for a single task: body + recent comments. For the planner. */
 function getTask(slug, id) {
   if (!slug) slug = currentBoard();
   if (!slug || !id) return { ok: false, reason: "board + task id required" };
-  const rows = _query(slug,
+  const taskResult = _queryResult(slug,
     `SELECT id,title,body,status,assignee,priority,created_at,last_failure_error
      FROM tasks WHERE id='${String(id).replace(/'/g, "''")}' LIMIT 1;`);
+  if (!taskResult.ok) return { ok: false, slug, reason: taskResult.reason, db: taskResult.db };
+  const rows = taskResult.rows;
   if (!rows.length) return { ok: false, reason: "task not found" };
-  const comments = _query(slug,
+  const commentsResult = _queryResult(slug,
     `SELECT author,body,created_at FROM task_comments
      WHERE task_id='${String(id).replace(/'/g, "''")}' ORDER BY created_at DESC LIMIT 10;`);
-  return { ok: true, slug, task: rows[0], comments };
+  return {
+    ok: true,
+    slug,
+    task: rows[0],
+    comments: commentsResult.ok ? commentsResult.rows : [],
+    commentsReadOk: commentsResult.ok,
+    commentsReadReason: commentsResult.ok ? undefined : commentsResult.reason,
+  };
 }
 
 /** Per-status + per-assignee counts. */
 function getStats(slug) {
   if (!slug) slug = currentBoard();
   if (!slug) return { ok: false, reason: "No board" };
-  const byStatus = _query(slug, `SELECT status, COUNT(*) AS n FROM tasks WHERE status!='archived' GROUP BY status;`);
-  const byAssignee = _query(slug, `SELECT COALESCE(assignee,'(unassigned)') AS assignee, COUNT(*) AS n
-                                   FROM tasks WHERE status!='archived' GROUP BY assignee;`);
-  return { ok: true, slug, byStatus, byAssignee };
+  const byStatus = _queryResult(slug, `SELECT status, COUNT(*) AS n FROM tasks WHERE status!='archived' GROUP BY status;`);
+  if (!byStatus.ok) return { ok: false, slug, reason: byStatus.reason, db: byStatus.db };
+  const byAssignee = _queryResult(slug, `SELECT COALESCE(assignee,'(unassigned)') AS assignee, COUNT(*) AS n
+                                         FROM tasks WHERE status!='archived' GROUP BY assignee;`);
+  if (!byAssignee.ok) return { ok: false, slug, reason: byAssignee.reason, db: byAssignee.db };
+  return { ok: true, slug, byStatus: byStatus.rows, byAssignee: byAssignee.rows };
 }
 
 /** Active swarm: running tasks with a live worker pid. */
 function getSwarm(slug) {
   if (!slug) slug = currentBoard();
   if (!slug) return { ok: false, reason: "No board" };
-  const running = _query(
+  const result = _queryResult(
     slug,
     `SELECT id,title,assignee,worker_pid,current_run_id,started_at,last_heartbeat_at
      FROM tasks WHERE status='running' ORDER BY started_at DESC;`
   );
-  const workers = running.map((t) => ({ ...t, alive: _alive(t.worker_pid) }));
+  if (!result.ok) return { ok: false, slug, reason: result.reason, db: result.db };
+  const workers = result.rows.map((t) => ({ ...t, alive: _alive(t.worker_pid) }));
   return { ok: true, slug, workers, active: workers.filter((w) => w.alive).length };
 }
 
@@ -330,6 +371,165 @@ function _setStatusDirect(slug, taskId, status, reason = "CEO Studio custom lane
     return { ok: true, status: next };
   } catch (e) {
     return { ok: false, reason: String((e.stderr || e.message || "status update failed")).slice(0, 300) };
+  }
+}
+
+function _addCommentDirect(slug, taskId, body, author = "CEO Studio") {
+  const db = boardDb(slug);
+  const id = String(taskId || "").trim();
+  const text = String(body || "").trim();
+  const by = String(author || "CEO Studio").trim() || "CEO Studio";
+  if (!fs.existsSync(db)) return { ok: false, reason: "board database not found" };
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) return { ok: false, reason: "invalid task id" };
+  if (!text) return { ok: false, reason: "comment body required" };
+  const payload = JSON.stringify({ author: by, len: text.length });
+  const sql = [
+    "BEGIN;",
+    `INSERT INTO task_comments (task_id, author, body, created_at) VALUES (${_sqlString(id)}, ${_sqlString(by)}, ${_sqlString(text)}, strftime('%s','now'));`,
+    `INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (${_sqlString(id)}, NULL, 'commented', ${_sqlString(payload)}, strftime('%s','now'));`,
+    "COMMIT;",
+  ].join("\n");
+  try {
+    execFileSync("sqlite3", [db, sql], { encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024 });
+    return { ok: true, taskId: id, author: by };
+  } catch (e) {
+    return { ok: false, reason: String((e.stderr || e.message || "comment insert failed")).slice(0, 300) };
+  }
+}
+
+function _workerDescendants(pid) {
+  const found = [];
+  const queue = [Number(pid)];
+  const seen = new Set(queue);
+  while (queue.length) {
+    const parent = queue.shift();
+    let children = [];
+    try {
+      children = String(execFileSync("pgrep", ["-P", String(parent)], {
+        encoding: "utf8",
+        timeout: 2000,
+        stdio: ["ignore", "pipe", "ignore"],
+      }))
+        .split(/\s+/)
+        .map(Number)
+        .filter((value) => Number.isInteger(value) && value > 0);
+    } catch { /* no children */ }
+    for (const child of children) {
+      if (seen.has(child)) continue;
+      seen.add(child);
+      found.push(child);
+      queue.push(child);
+    }
+  }
+  return found;
+}
+
+function _terminateClaimedWorker(pid, claimLock) {
+  const workerPid = Number(pid);
+  const localClaim = String(claimLock || "").startsWith(`${os.hostname()}:`);
+  const result = {
+    prev_pid: Number.isInteger(workerPid) && workerPid > 0 ? workerPid : null,
+    host_local: localClaim,
+    termination_attempted: false,
+    terminated: false,
+    sigkill: false,
+  };
+  if (!result.prev_pid || !localClaim) return result;
+  result.termination_attempted = true;
+  const targets = [..._workerDescendants(workerPid).reverse(), workerPid];
+  let signaled = false;
+  for (const target of targets) {
+    try {
+      process.kill(-target, "SIGTERM");
+      signaled = true;
+    } catch {
+      try {
+        process.kill(target, "SIGTERM");
+        signaled = true;
+      } catch { /* process already gone */ }
+    }
+  }
+  result.terminated = signaled;
+  return result;
+}
+
+function _assignTaskDirect(slug, taskId, assignee, { reclaim = false, reason = "reassigned from CEO Studio" } = {}) {
+  if (!slug) return { ok: false, reason: "No board specified" };
+  const db = boardDb(slug);
+  const id = String(taskId || "").trim();
+  const rawProfile = String(assignee == null ? "" : assignee).trim();
+  const profile = !rawProfile || ["none", "-", "null"].includes(rawProfile.toLowerCase())
+    ? null
+    : rawProfile.toLowerCase();
+  if (!fs.existsSync(db)) return { ok: false, reason: "board database not found" };
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) return { ok: false, reason: "invalid task id" };
+  const taskResult = _queryResult(slug, [
+    "SELECT id,status,assignee,claim_lock,worker_pid,current_run_id",
+    `FROM tasks WHERE id=${_sqlString(id)} LIMIT 1;`,
+  ].join(" "));
+  if (!taskResult.ok) return { ok: false, reason: taskResult.reason };
+  if (!taskResult.rows.length) return { ok: false, reason: `no such task: ${id}` };
+  const task = taskResult.rows[0];
+  const activelyClaimed = task.status === "running" && task.claim_lock != null;
+  if (activelyClaimed && !reclaim) {
+    return {
+      ok: false,
+      reason: `cannot reassign ${id}: currently running (claimed); retry with reclaim`,
+    };
+  }
+
+  const shouldReclaim = reclaim && (task.status === "running" || task.claim_lock != null);
+  const termination = shouldReclaim
+    ? _terminateClaimedWorker(task.worker_pid, task.claim_lock)
+    : null;
+  const now = "strftime('%s','now')";
+  const statements = ["BEGIN IMMEDIATE;"];
+  if (shouldReclaim) {
+    const reclaimPayload = JSON.stringify({
+      manual: true,
+      reason,
+      prev_lock: task.claim_lock,
+      ...termination,
+    });
+    statements.push(
+      `UPDATE tasks SET status='ready', claim_lock=NULL, claim_expires=NULL, worker_pid=NULL, current_run_id=NULL, consecutive_failures=0, last_failure_error=NULL WHERE id=${_sqlString(id)};`,
+    );
+    if (task.current_run_id != null) {
+      statements.push(
+        `UPDATE task_runs SET status='reclaimed', outcome='reclaimed', error=${_sqlString(`manual_reclaim: ${reason}`)}, metadata=${_sqlString(JSON.stringify(termination))}, ended_at=${now}, claim_lock=NULL, claim_expires=NULL, worker_pid=NULL WHERE id=${Number(task.current_run_id)} AND ended_at IS NULL;`,
+      );
+    }
+    statements.push(
+      `INSERT INTO task_events (task_id,run_id,kind,payload,created_at) VALUES (${_sqlString(id)},${task.current_run_id == null ? "NULL" : Number(task.current_run_id)},'reclaimed',${_sqlString(reclaimPayload)},${now});`,
+    );
+  }
+  const assigneeSql = profile == null ? "NULL" : _sqlString(profile);
+  if ((task.assignee || null) !== profile) {
+    statements.push(
+      `UPDATE tasks SET assignee=${assigneeSql}, consecutive_failures=0, last_failure_error=NULL WHERE id=${_sqlString(id)};`,
+    );
+  } else {
+    statements.push(`UPDATE tasks SET assignee=${assigneeSql} WHERE id=${_sqlString(id)};`);
+  }
+  statements.push(
+    `INSERT INTO task_events (task_id,run_id,kind,payload,created_at) VALUES (${_sqlString(id)},NULL,'assigned',${_sqlString(JSON.stringify({ assignee: profile }))},${now});`,
+    "COMMIT;",
+  );
+  try {
+    execFileSync("sqlite3", [db, statements.join("\n")], {
+      encoding: "utf8",
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+    });
+    return {
+      ok: true,
+      taskId: id,
+      assignee: profile,
+      reclaimed: shouldReclaim,
+      out: `${reclaim ? "Reassigned" : "Assigned"} ${id} to ${profile || "(unassigned)"}${shouldReclaim ? " (claim reclaimed)" : ""}\n`,
+    };
+  } catch (e) {
+    return { ok: false, reason: String((e.stderr || e.message || "assignment failed")).slice(0, 300) };
   }
 }
 
@@ -470,12 +670,20 @@ function setPersonality({ personality, profileId = profile() } = {}) {
   return { ok: true, personality: currentPersonality(profileId), personalities: availablePersonalities(profileId), profileId };
 }
 
-/** Start the CEO gateway (detached so it outlives this call). */
+/** Start the CEO gateway asynchronously so app startup and runner cycles stay responsive. */
 function gatewayStart() {
   if (!installed()) return { ok: false, reason: "Hermes not installed" };
-  const r = _run(["gateway", "start", "--accept-hooks"], 30000);
-  if (!r.ok) return r;
-  return { ok: true, out: r.out || "", status: ceoStatus() };
+  try {
+    const child = spawn(bin(), [..._profileArgs(), "gateway", "start", "--accept-hooks"], {
+      detached: true,
+      stdio: "ignore",
+      env: process.env,
+    });
+    child.unref();
+    return { ok: true, starting: true, pid: child.pid || null };
+  } catch (e) {
+    return { ok: false, reason: String(e && e.message || e).slice(0, 300) };
+  }
 }
 
 /** Stop the CEO gateway. */
@@ -560,11 +768,7 @@ function assignees({ board } = {}) {
 
 function assignTask({ board, taskId, assignee, reclaim = false, reason = "reassigned from CEO Studio" } = {}) {
   if (!taskId) return { ok: false, reason: "task id required" };
-  const profile = assignee || "none";
-  const args = reclaim
-    ? ["reassign", "--reclaim", "--reason", reason, taskId, profile]
-    : ["assign", taskId, profile];
-  return _kanban(board || currentBoard(), args, 30000);
+  return _assignTaskDirect(board || currentBoard(), taskId, assignee, { reclaim, reason });
 }
 
 function taskAction({ board, taskId, action, reason } = {}) {
@@ -608,15 +812,11 @@ function taskLog({ board, taskId } = {}) {
 
 /** Append a durable Kanban comment to a task. */
 function addComment({ board, taskId, body, author = "CEO Studio" }) {
-  if (!installed()) return { ok: false, reason: "Hermes CLI not found" };
   if (!board) board = currentBoard();
   if (!board) return { ok: false, reason: "No board specified" };
   if (!taskId) return { ok: false, reason: "Task id is required" };
   if (!body) return { ok: false, reason: "Comment body is required" };
-  // --board is a parent option of `kanban` and must come BEFORE the action,
-  // so route through _kanban (which prepends it) rather than placing it after
-  // `comment` (Hermes rejects that with "unrecognized arguments: --board").
-  return _kanban(board, ["comment", "--author", author, taskId, body], 30000);
+  return _addCommentDirect(board, taskId, body, author);
 }
 
 /** One `hermes chat -q` invocation. Resolves with {ok, reply, sessionId, raw, sessionMiss, reason}.

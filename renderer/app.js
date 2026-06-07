@@ -35,11 +35,13 @@ function renderMeter(s) {
 }
 
 function appendStream(kind, text) {
+  const stream = $("#panel2-stream");
+  if (!stream) return;
   const div = document.createElement("div");
   div.className = kind;
   div.textContent = (kind === "user" ? "You: " : kind === "agent" ? "CEO: " : "") + text;
-  $("#panel2-stream").appendChild(div);
-  $("#panel2-stream").scrollTop = $("#panel2-stream").scrollHeight;
+  stream.appendChild(div);
+  stream.scrollTop = stream.scrollHeight;
 }
 
 function renderPanel1Context(ctx, project) {
@@ -78,12 +80,72 @@ let selectedFile = null;
 let filePaneOpen = false;
 let panelFullscreen = false;
 let focusedTask = null;
+let briefRunOpsTimer = null;
 let ceoContextTray = [];
+let chatInputContexts = [];   // { path, title } file references attached to the chat composer
 let domainArchitectSession = null;
+let escalationPanelOpen = false;
+let escalationNotifications = [];
 
 function setPanelTitle(text) {
   const title = $("#panel-title");
   if (title) title.textContent = text || "Panel";
+}
+
+function notificationBody(n) {
+  const reason = n.reason ? `<div class="mt-1 text-xs text-neutral-400">${esc(n.reason)}</div>` : "";
+  return `
+    <div class="border-b border-neutral-800 p-3" data-notification-id="${esc(n.id)}">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <div class="truncate text-sm font-semibold text-neutral-100">${esc(n.title || "Human attention needed")}</div>
+          <div class="mt-0.5 text-[11px] font-mono text-neutral-500">${esc(n.board || "board")} / ${esc(n.taskId || "task")}</div>
+        </div>
+        <span class="rounded border border-red-800/60 bg-red-950/40 px-1.5 py-0.5 text-[10px] uppercase text-red-300">${esc(n.severity || "high")}</span>
+      </div>
+      <div class="mt-2 text-xs leading-5 text-neutral-300">${esc(n.body || "Decision required.")}</div>
+      ${reason}
+      <div class="mt-3 flex gap-2">
+        <button class="notif-open rounded-md bg-cyan-700 px-2 py-1 text-xs font-medium text-white hover:bg-cyan-600">${esc(n.actionLabel || "Open task")}</button>
+        <button class="notif-ack rounded-md border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800">Acknowledge</button>
+      </div>
+    </div>`;
+}
+
+function renderEscalationPanel() {
+  const panel = $("#human-escalation-panel");
+  if (!panel) return;
+  if (!escalationPanelOpen) { panel.classList.add("hidden"); return; }
+  panel.classList.remove("hidden");
+  panel.innerHTML = `
+    <div class="sticky top-0 border-b border-neutral-800 bg-neutral-950 p-3">
+      <div class="text-sm font-semibold text-neutral-100">Human escalations</div>
+      <div class="mt-0.5 text-xs text-neutral-500">Blocked work that needs your decision or access.</div>
+    </div>
+    ${escalationNotifications.length
+      ? escalationNotifications.map(notificationBody).join("")
+      : '<div class="p-4 text-sm text-neutral-500">No human escalations.</div>'}`;
+}
+
+async function refreshEscalations() {
+  if (!currentProject || !window.ceo.notificationsList) {
+    escalationNotifications = [];
+  } else {
+    const r = await window.ceo.notificationsList({ type: "human_escalation", includeRead: false, limit: 20 }).catch(() => null);
+    escalationNotifications = (r && r.ok && r.notifications) || [];
+  }
+  const badge = $("#human-escalation-count");
+  const button = $("#human-escalations");
+  const count = escalationNotifications.length;
+  if (badge) {
+    badge.textContent = String(count);
+    badge.classList.toggle("hidden", count === 0);
+  }
+  if (button) {
+    button.classList.toggle("border-red-700", count > 0);
+    button.classList.toggle("text-red-200", count > 0);
+  }
+  renderEscalationPanel();
 }
 
 function renderArchitectureOverview() {
@@ -393,7 +455,355 @@ function renderTaskContextPanel({ task, provenance, goalsRes, autonomyRes }) {
   </div>`;
 }
 
-function renderTaskHtml({ board, task, comments = [], assignees = [], log = "", provenance = null, goalsRes = null, autonomyRes = null }) {
+function briefRunRows(items, emptyText, formatter) {
+  const rows = Array.isArray(items) ? items : [];
+  if (!rows.length) return `<div class="text-xs text-neutral-600">${esc(emptyText)}</div>`;
+  return rows.slice(-8).reverse().map(formatter).join("");
+}
+
+function meetingProposalActionLabel(type) {
+  return {
+    decision: "Record decision",
+    agenda: "Approve agenda",
+    blocker: "Approve & block",
+    evidence: "Attach evidence",
+    completion: "Record completion",
+  }[type] || "Approve";
+}
+
+function meetingProposalCard(proposal, synthesis) {
+  const pending = proposal.status === "pending";
+  const tone = {
+    decision: "border-cyan-900/60 text-cyan-200",
+    agenda: "border-amber-900/60 text-amber-200",
+    blocker: "border-red-900/60 text-red-200",
+    evidence: "border-emerald-900/60 text-emerald-200",
+    completion: "border-violet-900/60 text-violet-200",
+  }[proposal.type] || "border-neutral-800 text-neutral-300";
+  return `<article class="rounded-lg border ${tone} bg-neutral-950/55 p-3">
+    <div class="flex items-start gap-2">
+      <div class="min-w-0 flex-1">
+        <div class="text-[10px] uppercase text-neutral-600">${esc(proposal.type || "proposal")}</div>
+        <div class="mt-1 text-xs font-medium text-neutral-200">${esc(proposal.title || proposal.body || "Meeting proposal")}</div>
+      </div>
+      <span class="rounded border border-neutral-800 px-1.5 py-0.5 text-[10px] ${pending ? "text-amber-300" : proposal.status === "materialized" ? "text-emerald-300" : "text-neutral-500"}">${esc(proposal.status || "pending")}</span>
+    </div>
+    <div class="mt-2 whitespace-pre-wrap text-[11px] leading-5 text-neutral-400">${esc(proposal.body || "")}</div>
+    ${pending ? `<div class="mt-3 flex flex-wrap gap-1.5">
+      <button type="button" class="brief-run-proposal-action rounded-md ${proposal.type === "blocker" ? "bg-red-700 hover:bg-red-600" : "bg-cyan-700 hover:bg-cyan-600"} px-2 py-1 text-[10px] text-white" data-action="approve" data-synthesis-id="${esc(synthesis.id)}" data-proposal-id="${esc(proposal.id)}" data-proposal-type="${esc(proposal.type)}">${esc(meetingProposalActionLabel(proposal.type))}</button>
+      <button type="button" class="brief-run-proposal-action rounded-md border border-neutral-700 px-2 py-1 text-[10px] text-neutral-300 hover:bg-neutral-800" data-action="reject" data-synthesis-id="${esc(synthesis.id)}" data-proposal-id="${esc(proposal.id)}" data-proposal-type="${esc(proposal.type)}">Reject</button>
+    </div>` : ""}
+  </article>`;
+}
+
+function meetingSynthesisCard(synthesis) {
+  const proposals = synthesis.proposals || [];
+  const pending = proposals.filter((item) => item.status === "pending").length;
+  return `<article id="brief-run-synthesis-${esc(synthesis.id)}" class="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
+    <div class="flex items-start gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="text-xs font-medium text-neutral-200">${esc(synthesis.title || synthesis.room || "Meeting synthesis")}</div>
+        <div class="mt-1 truncate font-mono text-[10px] text-neutral-600">${esc(synthesis.room || synthesis.meetingId || "")}</div>
+      </div>
+      <span class="rounded border border-neutral-800 px-1.5 py-0.5 text-[10px] ${pending ? "text-amber-300" : "text-emerald-300"}">${pending ? `${pending} pending` : "reviewed"}</span>
+    </div>
+    ${synthesis.requirementsPath ? `<button type="button" class="brief-run-open-asset mt-2 max-w-full truncate font-mono text-[10px] text-cyan-400 hover:text-cyan-300" data-path="${esc(synthesis.requirementsPath)}">${esc(synthesis.requirementsPath)}</button>` : ""}
+    <div class="mt-3 grid grid-cols-1 gap-2 lg:grid-cols-2">${proposals.map((proposal) => meetingProposalCard(proposal, synthesis)).join("")}</div>
+  </article>`;
+}
+
+function briefRunMeetingCard(meeting) {
+  const transcript = (meeting.transcript || []).slice(-4);
+  const scheduled = meeting.scheduledFor ? new Date(meeting.scheduledFor).toLocaleString() : "";
+  const room = meeting.room || "";
+  const statusColor = meeting.status === "done"
+    ? "text-emerald-300"
+    : meeting.status === "running"
+      ? "text-cyan-300"
+      : "text-amber-300";
+  return `<article class="brief-run-meeting rounded-lg border border-neutral-800 bg-neutral-950/55 p-3" data-meeting-id="${esc(meeting.id || "")}" data-room="${esc(room)}" data-synthesis-id="${esc(meeting.synthesisId || "")}">
+    <div class="flex items-start gap-2">
+      <div class="min-w-0 flex-1">
+        <div class="truncate text-xs font-medium text-neutral-200">${esc(meeting.title || meeting.agenda || meeting.id || "Meeting")}</div>
+        <div class="mt-1 truncate text-[10px] text-neutral-600">${esc(room || scheduled || "not started")}</div>
+      </div>
+      <span class="brief-run-meeting-status rounded border border-neutral-800 px-1.5 py-0.5 text-[10px] ${statusColor}">${esc(meeting.status || "scheduled")}</span>
+    </div>
+    <div class="mt-2 text-[11px] leading-5 text-neutral-500">${esc(meeting.criteria || meeting.agenda || "")}</div>
+    <pre class="brief-run-meeting-feed mt-2 max-h-32 overflow-auto rounded-md border border-neutral-800 bg-black/65 p-2 font-mono text-[10px] leading-relaxed text-neutral-400 whitespace-pre-wrap">${esc(transcript.length ? transcript.map((entry) => `[${entry.speaker || "agent"}] ${entry.body || ""}`).join("\n\n") : (room ? "Waiting for room activity..." : scheduled ? `Scheduled ${scheduled}` : "No room activity."))}</pre>
+    <div class="brief-run-meeting-requirements ${meeting.requirements ? "" : "hidden"} mt-2 max-h-28 overflow-auto rounded-md border border-emerald-900/50 bg-emerald-950/10 p-2 text-[10px] leading-5 text-emerald-100/75 whitespace-pre-wrap">${esc(meeting.requirements || "")}</div>
+    <div class="mt-2 flex flex-wrap gap-1.5">
+      ${room ? `<button type="button" class="brief-run-meeting-refresh rounded-md border border-neutral-800 px-2 py-1 text-[10px] text-neutral-300 hover:bg-neutral-800" data-room="${esc(room)}">Refresh</button>
+        <button type="button" class="brief-run-meeting-open rounded-md border border-neutral-800 px-2 py-1 text-[10px] text-neutral-300 hover:bg-neutral-800" data-room="${esc(room)}">Open room</button>` : ""}
+      ${meeting.requirements && meeting.synthesisId ? `<button type="button" class="brief-run-jump-synthesis rounded-md border border-amber-800/70 px-2 py-1 text-[10px] text-amber-200 hover:bg-amber-950/30" data-synthesis-id="${esc(meeting.synthesisId)}">${meeting.pendingProposalCount ? `Review ${meeting.pendingProposalCount}` : "Reviewed"}</button>` : ""}
+      ${meeting.requirements && !meeting.synthesisId ? `<button type="button" class="brief-run-meeting-synthesize rounded-md border border-amber-800/70 px-2 py-1 text-[10px] text-amber-200 hover:bg-amber-950/30" data-meeting-id="${esc(meeting.id)}">Synthesize</button>` : ""}
+      ${!room && meeting.status === "scheduled" ? `<button type="button" class="brief-run-meeting-start-scheduled rounded-md bg-cyan-700 px-2 py-1 text-[10px] text-white hover:bg-cyan-600" data-meeting-id="${esc(meeting.id)}">Start now</button>` : ""}
+    </div>
+  </article>`;
+}
+
+function renderBriefRunWorkspace(workspace, task) {
+  if (!workspace || !workspace.ok || !workspace.applicable || !workspace.run) return "";
+  const run = workspace.run;
+  const brief = run.brief || {};
+  const validation = run.validation || {};
+  const clean = validation.ok === true;
+  const missing = validation.missing || [];
+  const warnings = validation.warnings || [];
+  const checklist = run.progressChecklist || [];
+  const linkedSessions = workspace.sessions || [];
+  const activeAgents = workspace.activeAgents || [];
+  const linkedMeetings = workspace.meetings || [];
+  const meetingSyntheses = workspace.meetingSyntheses || run.meetingSyntheses || [];
+  const agendaItems = workspace.agendaItems || [];
+  const assets = workspace.assets || [];
+  const completedWork = workspace.completedWork || [];
+  const meetingMembers = [...new Set(activeAgents.map((agent) => agent.agentId).filter(Boolean))].join(",") || "ceo";
+  const sessionRows = briefRunRows(linkedSessions, "No linked sessions.", (session) => `
+    <button type="button" class="brief-run-open-session flex w-full items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950/55 px-3 py-2 text-left hover:border-cyan-600/40" data-session-id="${esc(session.id)}">
+      <span class="h-2 w-2 rounded-full ${session.phase === "done" ? "bg-neutral-600" : "bg-emerald-500"}"></span>
+      <span class="min-w-0 flex-1 truncate text-xs text-neutral-200">${esc(session.title)}</span>
+      <span class="text-[10px] uppercase text-neutral-500">${esc(session.phase || "explore")}</span>
+    </button>`);
+  const agentRows = briefRunRows(activeAgents, "No linked agents.", (agent) => `
+    <div class="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950/55 px-3 py-2">
+      <span class="h-2 w-2 rounded-full ${agent.status === "running" || agent.status === "active" ? "bg-emerald-500" : agent.status === "error" ? "bg-red-500" : "bg-neutral-600"}"></span>
+      <span class="min-w-0 flex-1 truncate text-xs text-neutral-200">${esc(agent.agentId)}</span>
+      <span class="text-[10px] text-neutral-500">${esc(agent.role || agent.status || "")}</span>
+    </div>`);
+  const meetingRows = briefRunRows(linkedMeetings, "No linked meetings.", briefRunMeetingCard);
+  const synthesisRows = meetingSyntheses.length
+    ? meetingSyntheses.slice().reverse().map(meetingSynthesisCard).join("")
+    : `<div class="text-xs text-neutral-600">No completed meeting synthesis to review.</div>`;
+  const pendingMeetingProposals = meetingSyntheses.reduce(
+    (total, item) => total + (item.proposals || []).filter((proposal) => proposal.status === "pending").length,
+    0,
+  );
+  const agendaRows = briefRunRows(agendaItems, "No Agenda Items recorded.", (item) => `
+    <div class="rounded-lg border border-neutral-800 bg-neutral-950/55 px-3 py-2">
+      <div class="text-xs text-neutral-200">${esc(item.title || item.body || "")}</div>
+      <div class="mt-1 text-[10px] text-neutral-600">${esc(item.status || item.type || "proposed")}</div>
+    </div>`);
+  const assetRows = briefRunRows(assets, "No context assets linked.", (item) => `
+    <button type="button" class="brief-run-open-asset block w-full rounded-lg border border-neutral-800 bg-neutral-950/55 px-3 py-2 text-left hover:border-cyan-700/50" data-path="${esc(item.path || "")}" ${item.path ? "" : "disabled"}>
+      <div class="truncate text-xs text-neutral-200">${esc(item.title || item.path || item.id || "Asset")}</div>
+      <div class="mt-1 truncate font-mono text-[10px] text-neutral-600">${esc(item.path || item.kind || item.id || "")}</div>
+    </button>`);
+  const completionRows = briefRunRows(completedWork, "No completed-work summaries.", (item) => `
+    <div class="rounded-lg border border-emerald-900/40 bg-emerald-950/10 px-3 py-2">
+      <div class="text-xs font-medium text-emerald-100/90">${esc(item.title || "Completed work")}</div>
+      <div class="mt-1 line-clamp-4 text-[11px] leading-5 text-neutral-400">${esc(item.body || item.summary || "")}</div>
+    </div>`);
+  const liveTerminalCards = activeAgents
+    .filter((agent) => agent.terminal && agent.terminal.alive)
+    .map((agent) => activeAgentTerminalCard({
+      id: agent.agentId,
+      name: agent.name || agent.agentId,
+      provider: agent.provider,
+      model: agent.model,
+      mounted: true,
+      tmux_session: agent.terminal.session,
+      tmux_window: agent.terminal.window,
+    })).join("");
+  const decisionRows = briefRunRows(run.decisions, "No decisions recorded.", (item) => `
+    <div class="rounded-lg border border-neutral-800 bg-neutral-950/55 px-3 py-2 text-xs text-neutral-300">${esc(item.body || item.title || "")}</div>`);
+  const evidenceRows = briefRunRows(run.evidence, "No evidence recorded.", (item) => `
+    <div class="rounded-lg border border-neutral-800 bg-neutral-950/55 px-3 py-2 text-xs text-neutral-300">${esc(item.body || item.title || "")}</div>`);
+  const eventRows = briefRunRows(run.events, "No run events yet.", (event) => `
+    <div class="flex gap-2 border-b border-neutral-800/60 py-1.5 text-[11px] last:border-0">
+      <span class="shrink-0 text-neutral-600">${event.at ? esc(new Date(event.at).toLocaleString()) : ""}</span>
+      <span class="min-w-0 text-neutral-400">${esc(event.summary || event.type || "updated")}</span>
+    </div>`);
+  return `<section class="rounded-2xl border ${clean ? "border-emerald-700/35" : "border-amber-700/45"} bg-neutral-950/55 p-4">
+    <div class="flex flex-wrap items-start gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2">
+          <div class="text-sm font-semibold text-neutral-100">Brief Run</div>
+          <span class="rounded border border-neutral-800 bg-neutral-950 px-2 py-0.5 text-[10px] ${clean ? "text-emerald-300" : "text-amber-300"}">${clean ? "clean" : "blocked"}</span>
+          <span class="rounded border border-neutral-800 bg-neutral-950 px-2 py-0.5 text-[10px] text-neutral-500">${esc(run.status || "planning")}</span>
+        </div>
+        <div class="mt-1 truncate font-mono text-[10px] text-neutral-600">${esc(run.id)}</div>
+      </div>
+      <button id="brief-run-save" type="button" class="rounded-md bg-cyan-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-cyan-500">Save Document</button>
+      <button id="brief-run-create-session" type="button" class="rounded-md border border-cyan-700/70 bg-cyan-950/30 px-3 py-1.5 text-xs text-cyan-100 hover:bg-cyan-900/40">Start Conversation</button>
+      <button id="brief-run-dry-run" type="button" class="rounded-md border border-amber-700/60 bg-amber-950/20 px-3 py-1.5 text-xs text-amber-100 hover:bg-amber-900/30">Focused Dry-Run</button>
+    </div>
+    ${(missing.length || warnings.length) ? `<div class="mt-3 flex flex-wrap gap-1.5">
+      ${missing.map((item) => `<span class="rounded border border-red-800/60 bg-red-950/30 px-2 py-0.5 text-[10px] text-red-300">missing ${esc(item)}</span>`).join("")}
+      ${warnings.map((item) => `<span class="rounded border border-amber-800/50 bg-amber-950/20 px-2 py-0.5 text-[10px] text-amber-300">${esc(item)}</span>`).join("")}
+    </div>` : ""}
+    <div class="mt-4 grid grid-cols-1 gap-4 2xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
+      <div class="space-y-3">
+        <div class="grid grid-cols-1 gap-2 md:grid-cols-2">
+          <label class="text-[11px] text-neutral-500">Title
+            <input id="brief-run-title" value="${esc(brief.title || task.title || "")}" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" />
+          </label>
+          <label class="text-[11px] text-neutral-500">Domain
+            <input id="brief-run-domain" value="${esc(brief.domain || run.domain || "All")}" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" />
+          </label>
+        </div>
+        <label class="block text-[11px] text-neutral-500">Goal
+          <textarea id="brief-run-goal" rows="2" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500">${esc(brief.goal || "")}</textarea>
+        </label>
+        <div class="grid grid-cols-1 gap-2 md:grid-cols-2">
+          <label class="text-[11px] text-neutral-500">Current rendered state
+            <textarea id="brief-run-current" rows="3" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500">${esc(brief.currentRenderedState || "")}</textarea>
+          </label>
+          <label class="text-[11px] text-neutral-500">Problem / mismatch
+            <textarea id="brief-run-problem" rows="3" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500">${esc(brief.problemMismatch || "")}</textarea>
+          </label>
+        </div>
+        <div class="grid grid-cols-1 gap-2 md:grid-cols-2">
+          <label class="text-[11px] text-neutral-500">Constraints
+            <textarea id="brief-run-constraints" rows="4" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500">${esc((brief.constraints || []).join("\n"))}</textarea>
+          </label>
+          <label class="text-[11px] text-neutral-500">Acceptance criteria
+            <textarea id="brief-run-acceptance" rows="4" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500">${esc((brief.acceptanceCriteria || []).join("\n"))}</textarea>
+          </label>
+        </div>
+        <label class="block text-[11px] text-neutral-500">Next action
+          <textarea id="brief-run-next" rows="2" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500">${esc(brief.nextAction || "")}</textarea>
+        </label>
+        <div class="grid grid-cols-1 gap-2 md:grid-cols-3">
+          <label class="text-[11px] text-neutral-500">Owner
+            <input id="brief-run-owner" value="${esc(brief.owner || task.assignee || "")}" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" />
+          </label>
+          <label class="text-[11px] text-neutral-500">Persona
+            <input id="brief-run-persona" value="${esc(brief.persona || "")}" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" />
+          </label>
+          <label class="text-[11px] text-neutral-500">Goal ID
+            <input id="brief-run-goal-id" value="${esc(brief.goalId || run.goalId || "")}" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" />
+          </label>
+        </div>
+        <label class="block text-[11px] text-neutral-500">Source references
+          <textarea id="brief-run-source-refs" rows="2" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500">${esc((brief.sourceRefs || []).join("\n"))}</textarea>
+        </label>
+      </div>
+      <div class="space-y-3">
+        <div class="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
+          <div class="mb-2 text-[10px] uppercase tracking-wider text-neutral-600">Progress Checklist</div>
+          <div class="space-y-2">${checklist.map((item) => `
+            <label class="flex items-start gap-2 text-xs text-neutral-300">
+              <input type="checkbox" class="brief-run-check mt-0.5 accent-cyan-500" data-check-id="${esc(item.id)}" ${item.done ? "checked" : ""} ${item.id === "brief-clean" ? "disabled" : ""} />
+              <span>${esc(item.label)}</span>
+            </label>`).join("")}</div>
+          <button id="brief-run-save-checklist" type="button" class="mt-3 rounded-md border border-neutral-700 px-2 py-1 text-[11px] text-neutral-300 hover:bg-neutral-800">Save Checklist</button>
+        </div>
+        <div class="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-1">
+          <div class="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
+            <div class="mb-2 text-[10px] uppercase tracking-wider text-neutral-600">Linked Sessions</div>
+            <div class="space-y-2">${sessionRows}</div>
+          </div>
+          <div class="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
+            <div class="mb-2 text-[10px] uppercase tracking-wider text-neutral-600">Active Agents</div>
+            <div class="space-y-2">${agentRows}</div>
+          </div>
+        </div>
+        <div class="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
+          <div class="mb-2 text-[10px] uppercase tracking-wider text-neutral-600">Decisions</div>
+          <div class="space-y-2">${decisionRows}</div>
+          <div class="mt-2 flex gap-2">
+            <input id="brief-run-decision-input" class="min-w-0 flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-xs text-neutral-100" placeholder="Record decision" />
+            <button id="brief-run-add-decision" type="button" class="rounded-md border border-neutral-700 px-2 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800">Add</button>
+          </div>
+        </div>
+        <div class="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
+          <div class="mb-2 text-[10px] uppercase tracking-wider text-neutral-600">Evidence</div>
+          <div class="space-y-2">${evidenceRows}</div>
+          <div class="mt-2 flex gap-2">
+            <input id="brief-run-evidence-input" class="min-w-0 flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-xs text-neutral-100" placeholder="Record evidence" />
+            <button id="brief-run-add-evidence" type="button" class="rounded-md border border-neutral-700 px-2 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800">Add</button>
+          </div>
+        </div>
+        <div class="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
+          <div class="mb-2 text-[10px] uppercase tracking-wider text-neutral-600">Run Events</div>
+          <div>${eventRows}</div>
+        </div>
+      </div>
+    </div>
+    <div id="brief-run-operations" class="mt-4 space-y-4">
+      <section id="brief-run-meeting-review" class="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
+        <div class="mb-3 flex items-center gap-2">
+          <div class="text-[10px] uppercase tracking-wider text-neutral-600">Meeting Follow-up Review</div>
+          <span class="rounded border border-neutral-800 px-1.5 py-0.5 text-[10px] ${pendingMeetingProposals ? "text-amber-300" : "text-neutral-500"}">${pendingMeetingProposals} pending</span>
+        </div>
+        <div class="space-y-3">${synthesisRows}</div>
+      </section>
+      <div class="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)]">
+        <section class="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
+          <div class="mb-3 flex items-center gap-2">
+            <div class="text-[10px] uppercase tracking-wider text-neutral-600">Linked Meetings</div>
+            <span class="rounded border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">${linkedMeetings.length}</span>
+            <button id="brief-run-refresh-operations" type="button" class="ml-auto rounded-md border border-neutral-800 px-2 py-1 text-[10px] text-neutral-300 hover:bg-neutral-800">Refresh</button>
+          </div>
+          <div class="space-y-2">${meetingRows}</div>
+        </section>
+        <section class="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
+          <div class="text-[10px] uppercase tracking-wider text-neutral-600">Create Working Room</div>
+          <label class="mt-3 block text-[11px] text-neutral-500">Title
+            <input id="brief-run-meeting-title" value="${esc(`${run.title} working room`)}" class="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-xs text-neutral-100" />
+          </label>
+          <label class="mt-2 block text-[11px] text-neutral-500">Agenda
+            <textarea id="brief-run-meeting-agenda" rows="3" class="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-xs text-neutral-100">Review progress, risks, decisions, and next actions for this Brief Run.</textarea>
+          </label>
+          <label class="mt-2 block text-[11px] text-neutral-500">Participants
+            <input id="brief-run-meeting-members" value="${esc(meetingMembers)}" class="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-xs text-neutral-100" />
+          </label>
+          <label class="mt-2 block text-[11px] text-neutral-500">Schedule time
+            <input id="brief-run-meeting-when" type="datetime-local" value="${esc(meetingDateTimeLocal())}" class="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-xs text-neutral-100" />
+          </label>
+          <label class="mt-2 flex items-center gap-2 text-[11px] text-neutral-400">
+            <input id="brief-run-meeting-paid" type="checkbox" class="accent-cyan-500" />
+            Allow paid providers
+          </label>
+          <div class="mt-3 flex gap-2">
+            <button id="brief-run-meeting-start" type="button" class="rounded-md bg-cyan-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-cyan-500">Start now</button>
+            <button id="brief-run-meeting-schedule" type="button" class="rounded-md border border-cyan-700/70 px-3 py-1.5 text-xs text-cyan-200 hover:bg-cyan-950/30">Schedule</button>
+          </div>
+        </section>
+      </div>
+      <div class="grid grid-cols-1 gap-4 xl:grid-cols-3">
+        <section class="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
+          <div class="mb-2 text-[10px] uppercase tracking-wider text-neutral-600">Agenda Items</div>
+          <div class="space-y-2">${agendaRows}</div>
+          <div class="mt-2 flex gap-2">
+            <input id="brief-run-agenda-input" class="min-w-0 flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-xs text-neutral-100" placeholder="Proposed Agenda Item" />
+            <button id="brief-run-add-agenda" type="button" class="rounded-md border border-neutral-700 px-2 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800">Add</button>
+          </div>
+        </section>
+        <section class="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
+          <div class="mb-2 text-[10px] uppercase tracking-wider text-neutral-600">Context Assets</div>
+          <div class="space-y-2">${assetRows}</div>
+          <div class="mt-2 flex gap-2">
+            <input id="brief-run-asset-path" class="min-w-0 flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-xs text-neutral-100" placeholder="Relative file path" />
+            <button id="brief-run-add-asset" type="button" class="rounded-md border border-neutral-700 px-2 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800">Link</button>
+          </div>
+        </section>
+        <section class="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
+          <div class="mb-2 text-[10px] uppercase tracking-wider text-neutral-600">Completed Work</div>
+          <div class="space-y-2">${completionRows}</div>
+          <div class="mt-2 flex gap-2">
+            <input id="brief-run-completion-input" class="min-w-0 flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-xs text-neutral-100" placeholder="Completion summary" />
+            <button id="brief-run-add-completion" type="button" class="rounded-md border border-neutral-700 px-2 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800">Add</button>
+          </div>
+        </section>
+      </div>
+      <section class="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
+        <div class="mb-3 flex items-center gap-2">
+          <div class="text-[10px] uppercase tracking-wider text-neutral-600">Live Agent Terminals</div>
+          <span class="rounded border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">${activeAgents.filter((agent) => agent.terminal?.alive).length}</span>
+        </div>
+        <div id="brief-run-terminal-grid">${liveTerminalCards
+          ? `<div class="grid grid-cols-1 gap-3 xl:grid-cols-2">${liveTerminalCards}</div>`
+          : `<div class="text-xs text-neutral-600">No linked agent tmux sessions are live.</div>`}</div>
+      </section>
+    </div>
+    <pre id="brief-run-result" class="hidden mt-3 max-h-64 overflow-auto rounded-xl border border-neutral-800 bg-black/70 p-3 font-mono text-[11px] text-emerald-100/85 whitespace-pre-wrap"></pre>
+    <div id="brief-run-msg" class="mt-2 min-h-4 text-xs text-neutral-500"></div>
+  </section>`;
+}
+
+function renderTaskHtml({ board, task, comments = [], assignees = [], log = "", provenance = null, goalsRes = null, autonomyRes = null, briefRun = null }) {
   const status = task.status || task.state || "";
   const currentAssignee = task.assignee || "";
   const options = [
@@ -429,6 +839,8 @@ function renderTaskHtml({ board, task, comments = [], assignees = [], log = "", 
       </div>
     </div>
 
+    ${renderBriefRunWorkspace(briefRun, task)}
+
     <div class="grid grid-cols-1 gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
       <aside class="space-y-3">
         <div class="rounded-2xl border border-neutral-800 bg-neutral-950/45 p-4">
@@ -462,8 +874,393 @@ function renderTaskHtml({ board, task, comments = [], assignees = [], log = "", 
   </div>`;
 }
 
+function setBriefRunMessage(message, result = null) {
+  const msg = $("#brief-run-msg");
+  if (msg) msg.textContent = message || "";
+  const out = $("#brief-run-result");
+  if (out && result != null) {
+    out.textContent = typeof result === "string" ? result : JSON.stringify(result, null, 2).slice(0, 8000);
+    out.classList.toggle("hidden", !out.textContent);
+  }
+}
+
+function briefRunDocumentFromForm() {
+  const value = (id) => ($("#" + id) && $("#" + id).value || "").trim();
+  return {
+    title: value("brief-run-title"),
+    domain: value("brief-run-domain"),
+    goal: value("brief-run-goal"),
+    currentRenderedState: value("brief-run-current"),
+    problemMismatch: value("brief-run-problem"),
+    constraints: splitLines(value("brief-run-constraints")),
+    acceptanceCriteria: splitLines(value("brief-run-acceptance")),
+    nextAction: value("brief-run-next"),
+    owner: value("brief-run-owner"),
+    persona: value("brief-run-persona"),
+    goalId: value("brief-run-goal-id"),
+    sourceRefs: splitLines(value("brief-run-source-refs")),
+  };
+}
+
+async function updateFocusedBriefRun(patch, successMessage) {
+  if (!focusedTask || !window.ceo.briefRunUpdate) return null;
+  setBriefRunMessage("saving...");
+  let result = {};
+  try {
+    result = await window.ceo.briefRunUpdate(focusedTask.board, focusedTask.taskId, patch);
+  } catch (e) {
+    result = { ok: false, reason: String(e) };
+  }
+  if (!result || !result.ok) {
+    setBriefRunMessage(`save failed: ${result ? result.reason : "unknown"}`, result);
+    return result;
+  }
+  await openTaskInStudio(focusedTask);
+  const state = result.run || (result.workspace && result.workspace.run);
+  setBriefRunMessage(successMessage || "saved", {
+    validation: state && state.validation,
+    updatedAt: state && state.updatedAt,
+  });
+  return result;
+}
+
+async function saveBriefRunDocument() {
+  await updateFocusedBriefRun({
+    brief: briefRunDocumentFromForm(),
+    eventType: "brief_document_saved",
+    actor: "human",
+    summary: "Brief document saved and revalidated",
+  }, "document saved and revalidated");
+}
+
+async function saveBriefRunChecklist() {
+  const items = Array.from(document.querySelectorAll(".brief-run-check")).map((input) => ({
+    id: input.dataset.checkId,
+    label: (input.parentElement && input.parentElement.textContent || input.dataset.checkId || "").trim(),
+    done: !!input.checked,
+  }));
+  await updateFocusedBriefRun({
+    progressChecklist: items,
+    eventType: "brief_checklist_saved",
+    actor: "human",
+    summary: "Progress checklist updated",
+  }, "checklist saved");
+}
+
+async function addBriefRunEntry(kind) {
+  const input = kind === "decision" ? $("#brief-run-decision-input") : $("#brief-run-evidence-input");
+  const body = input && input.value.trim();
+  if (!body) return;
+  if (input) input.value = "";
+  const patch = kind === "decision"
+    ? { decision: { body }, eventType: "decision_recorded", actor: "human", summary: body }
+    : { evidenceItem: { body }, eventType: "evidence_recorded", actor: "human", summary: body };
+  await updateFocusedBriefRun(patch, `${kind} recorded`);
+}
+
+async function addBriefRunOperationalEntry(kind) {
+  const configs = {
+    agenda: {
+      input: "#brief-run-agenda-input",
+      patch: (body) => ({
+        agendaItem: { title: body, body, status: "proposed", type: "brief-run" },
+        eventType: "agenda_item_recorded",
+        actor: "human",
+        summary: body,
+      }),
+      success: "agenda item recorded",
+    },
+    completion: {
+      input: "#brief-run-completion-input",
+      patch: (body) => ({
+        completionSummary: { title: "Completed work", body, source: "human" },
+        eventType: "completion_summary_recorded",
+        actor: "human",
+        summary: body,
+      }),
+      success: "completion summary recorded",
+    },
+  };
+  const config = configs[kind];
+  if (!config) return;
+  const input = $(config.input);
+  const body = input && input.value.trim();
+  if (!body) return;
+  input.value = "";
+  await updateFocusedBriefRun(config.patch(body), config.success);
+}
+
+async function recordBriefRunAsset() {
+  if (!focusedTask || !window.ceo.recordBriefAsset) return;
+  const input = $("#brief-run-asset-path");
+  const assetPath = input && input.value.trim();
+  if (!assetPath) return;
+  setBriefRunMessage("linking context asset...");
+  let result = {};
+  try {
+    result = await window.ceo.recordBriefAsset({
+      board: focusedTask.board,
+      parentKind: "brief",
+      parentId: focusedTask.taskId,
+      assetKind: "context",
+      assetId: assetPath,
+      title: assetPath.split("/").filter(Boolean).pop() || assetPath,
+      path: assetPath,
+      summary: "Brief Run context asset",
+      requestedBy: "human",
+    });
+  } catch (e) {
+    result = { ok: false, reason: e.message || String(e) };
+  }
+  if (!result || !result.ok) {
+    setBriefRunMessage(`asset link failed: ${result ? result.reason : "unknown"}`, result);
+    return;
+  }
+  input.value = "";
+  await openTaskInStudio(focusedTask);
+  setBriefRunMessage("context asset linked");
+}
+
+function briefRunMeetingDraft() {
+  const value = (selector) => ($(selector) && $(selector).value || "").trim();
+  const scheduledValue = value("#brief-run-meeting-when");
+  const scheduledDate = scheduledValue ? new Date(scheduledValue) : null;
+  return {
+    title: value("#brief-run-meeting-title"),
+    agenda: value("#brief-run-meeting-agenda"),
+    members: value("#brief-run-meeting-members"),
+    allowPaid: !!($("#brief-run-meeting-paid") && $("#brief-run-meeting-paid").checked),
+    scheduledFor: scheduledDate && !Number.isNaN(scheduledDate.getTime())
+      ? scheduledDate.toISOString()
+      : "",
+  };
+}
+
+async function runBriefRunMeetingAction(action, meetingId = "") {
+  if (!focusedTask) return;
+  const methods = {
+    start: window.ceo.briefRunMeetingStart,
+    schedule: window.ceo.briefRunMeetingSchedule,
+    startScheduled: window.ceo.briefRunMeetingStartScheduled,
+  };
+  const method = methods[action];
+  if (!method) return;
+  const draft = briefRunMeetingDraft();
+  if (action === "schedule" && !draft.scheduledFor) {
+    setBriefRunMessage("choose a valid schedule time");
+    return;
+  }
+  setBriefRunMessage(action === "schedule" ? "scheduling meeting..." : "starting meeting...");
+  let result = {};
+  try {
+    result = action === "startScheduled"
+      ? await method(focusedTask.board, focusedTask.taskId, meetingId)
+      : await method(focusedTask.board, focusedTask.taskId, draft);
+  } catch (e) {
+    result = { ok: false, reason: e.message || String(e) };
+  }
+  if (!result || !result.ok) {
+    setBriefRunMessage(`meeting action failed: ${result ? result.reason : "unknown"}`, result);
+    return;
+  }
+  await openTaskInStudio(focusedTask);
+  setBriefRunMessage(action === "schedule" ? "meeting scheduled" : "meeting room started");
+}
+
+async function synthesizeBriefRunMeeting(meetingId) {
+  if (!focusedTask || !meetingId || !window.ceo.briefRunMeetingSynthesize) return;
+  setBriefRunMessage("synthesizing meeting follow-up...");
+  let result = {};
+  try {
+    result = await window.ceo.briefRunMeetingSynthesize(focusedTask.board, focusedTask.taskId, meetingId);
+  } catch (e) {
+    result = { ok: false, reason: e.message || String(e) };
+  }
+  if (!result || !result.ok) {
+    setBriefRunMessage(`meeting synthesis failed: ${result ? result.reason : "unknown"}`, result);
+    return;
+  }
+  await openTaskInStudio(focusedTask);
+  setBriefRunMessage(result.changed ? "meeting proposals ready for review" : "meeting synthesis already current");
+}
+
+async function reviewBriefRunMeetingProposal(button) {
+  if (!focusedTask || !button || !window.ceo.briefRunMeetingProposalAction) return;
+  const action = button.dataset.action;
+  const proposalType = button.dataset.proposalType;
+  if (action === "approve" && proposalType === "blocker") {
+    const approved = window.confirm("Approve this blocker and move the parent Hermes task to blocked?");
+    if (!approved) return;
+  }
+  button.disabled = true;
+  setBriefRunMessage(action === "approve" ? "materializing approved proposal..." : "rejecting proposal...");
+  let result = {};
+  try {
+    result = await window.ceo.briefRunMeetingProposalAction({
+      board: focusedTask.board,
+      taskId: focusedTask.taskId,
+      synthesisId: button.dataset.synthesisId,
+      proposalId: button.dataset.proposalId,
+      action,
+      humanApproved: action === "approve",
+      approvedBy: "human",
+    });
+  } catch (e) {
+    result = { ok: false, reason: e.message || String(e) };
+  }
+  if (!result || !result.ok) {
+    button.disabled = false;
+    setBriefRunMessage(`proposal review failed: ${result ? result.reason : "unknown"}`, result);
+    return;
+  }
+  await openTaskInStudio(focusedTask);
+  setBriefRunMessage(action === "approve" ? "proposal approved and recorded" : "proposal rejected");
+}
+
+function jumpToBriefRunSynthesis(synthesisId) {
+  if (!synthesisId) return;
+  const node = document.getElementById(`brief-run-synthesis-${synthesisId}`);
+  if (node) node.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
+async function openBriefRunMeeting(room) {
+  if (!room) return;
+  await openView("meetings");
+  await openPastMeetingRoom(room);
+}
+
+async function refreshBriefRunMeeting(room) {
+  if (!room || !window.ceo.meetingRoom) return;
+  const card = Array.from(document.querySelectorAll(".brief-run-meeting"))
+    .find((node) => node.dataset.room === room);
+  if (!card) return;
+  let result = {};
+  try {
+    result = await window.ceo.meetingRoom(room);
+  } catch {
+    return;
+  }
+  if (!result || !result.ok) return;
+  const feed = card.querySelector(".brief-run-meeting-feed");
+  const status = card.querySelector(".brief-run-meeting-status");
+  const requirements = card.querySelector(".brief-run-meeting-requirements");
+  const entries = (result.feed || []).slice(-4);
+  if (feed) {
+    feed.textContent = entries.length
+      ? entries.map((entry) => `[${entry.speaker || "agent"}] ${entry.body || ""}`).join("\n\n")
+      : "Waiting for room activity...";
+    feed.scrollTop = feed.scrollHeight;
+  }
+  if (status) {
+    status.textContent = result.running ? "running" : "done";
+    status.className = `brief-run-meeting-status rounded border border-neutral-800 px-1.5 py-0.5 text-[10px] ${result.running ? "text-cyan-300" : "text-emerald-300"}`;
+  }
+  if (requirements) {
+    requirements.textContent = result.requirements || "";
+    requirements.classList.toggle("hidden", !result.requirements);
+  }
+  if (result.requirements && !card.dataset.synthesisId && card.dataset.synthesisId !== "loading") {
+    card.dataset.synthesisId = "loading";
+    await synthesizeBriefRunMeeting(card.dataset.meetingId);
+  }
+}
+
+async function refreshBriefRunOperations({ reload = false } = {}) {
+  if (!focusedTask || !document.getElementById("brief-run-operations")) return;
+  if (reload) {
+    await openTaskInStudio(focusedTask);
+    return;
+  }
+  const agentIds = [...new Set(Array.from(
+    document.querySelectorAll("#brief-run-terminal-grid .active-agent-card"),
+  ).map((node) => node.dataset.agent).filter(Boolean))];
+  const rooms = [...new Set(Array.from(
+    document.querySelectorAll("#brief-run-operations .brief-run-meeting[data-room]"),
+  ).map((node) => node.dataset.room).filter(Boolean))];
+  await Promise.all([
+    ...agentIds.map((agentId) => refreshActiveAgentTerminal(agentId, { quiet: true })),
+    ...rooms.map((room) => refreshBriefRunMeeting(room)),
+  ]);
+}
+
+function stopBriefRunOpsTimer() {
+  if (!briefRunOpsTimer) return;
+  clearInterval(briefRunOpsTimer);
+  briefRunOpsTimer = null;
+}
+
+function startBriefRunOpsTimer() {
+  stopBriefRunOpsTimer();
+  if (!document.getElementById("brief-run-operations")) return;
+  refreshBriefRunOperations();
+  briefRunOpsTimer = setInterval(() => {
+    if (!document.getElementById("brief-run-operations")) {
+      stopBriefRunOpsTimer();
+      return;
+    }
+    refreshBriefRunOperations();
+  }, 2500);
+}
+
+async function createBriefRunSession() {
+  if (!focusedTask || !window.StudioSessions || !window.StudioSessions.prepareBriefSession) return;
+  const draft = {
+    board: focusedTask.board,
+    taskId: focusedTask.taskId,
+    runId: `${focusedTask.board}:${focusedTask.taskId}`,
+    title: ($("#brief-run-title") && $("#brief-run-title").value || focusedTask.taskTitle || "Brief Run").trim(),
+    leadAgentId: ($("#brief-run-owner") && $("#brief-run-owner").value || "ceo").trim() || "ceo",
+  };
+  await openView("sessions");
+  const result = await window.StudioSessions.prepareBriefSession(draft);
+  if (!result || !result.ok) {
+    appendSys(`Could not prepare brief conversation: ${result ? result.reason : "unknown"}`);
+    return;
+  }
+}
+
+async function openBriefRunSession(id) {
+  if (!id) return;
+  const result = await window.ceo.sessionsSetActive(id);
+  if (!result || !result.ok) {
+    setBriefRunMessage(`session unavailable: ${result ? result.reason : "unknown"}`, result);
+    return;
+  }
+  await openView("sessions");
+}
+
+async function runBriefFocusedDryRun() {
+  if (!focusedTask || !window.ceo.runnerRunOnce) return;
+  setBriefRunMessage("running focused autonomy dry-run...");
+  let result = {};
+  try {
+    result = await window.ceo.runnerRunOnce({
+      policy: {
+        boards: [focusedTask.board],
+        targetTaskIds: [focusedTask.taskId],
+        domain: currentDomain || "All",
+        dryRun: true,
+        execute: true,
+        maxDispatchPerCycle: 1,
+      },
+    });
+  } catch (e) {
+    result = { ok: false, reason: String(e) };
+  }
+  const phases = result && result.phases || {};
+  setBriefRunMessage(result && result.ok ? "focused dry-run complete" : `dry-run failed: ${result ? result.reason : "unknown"}`, {
+    ok: !!(result && result.ok),
+    errors: result && result.errors || [],
+    plan: phases.plan || [],
+    assign: phases.assign || [],
+    execute: phases.execute || [],
+    review: phases.review || [],
+  });
+}
+
 async function openTaskInStudio({ board, taskId, taskTitle, taskStatus } = {}) {
   if (!taskId) return;
+  stopBriefRunOpsTimer();
   focusedTask = { board, taskId, taskTitle, taskStatus };
   setAgentState("thinking");
   setStudioFocus(taskTitle || taskId, `${board || "board"} / ${taskStatus || "task"} / planning focus`, "Planning");
@@ -472,13 +1269,14 @@ async function openTaskInStudio({ board, taskId, taskTitle, taskStatus } = {}) {
   panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading task context...</div>';
   try {
     if (window.ceo.ceoFocusTask) await window.ceo.ceoFocusTask({ ...focusedTask });
-    const [r, assigneesRes, logRes, provenanceRes, goalsRes, autonomyRes] = await Promise.all([
+    const [r, assigneesRes, logRes, provenanceRes, goalsRes, autonomyRes, briefRunRes] = await Promise.all([
       window.ceo.ceoTaskDetail ? window.ceo.ceoTaskDetail(board, taskId) : null,
       window.ceo.ceoAssignees ? safeIpc(() => window.ceo.ceoAssignees(board)) : null,
       window.ceo.ceoTaskLog ? safeIpc(() => window.ceo.ceoTaskLog({ board, taskId })) : null,
       window.ceo.provenanceGraph ? safeIpc(() => window.ceo.provenanceGraph()) : null,
       window.ceo.listGoals ? safeIpc(() => window.ceo.listGoals({ domain: currentDomain })) : null,
       window.ceo.autonomyStatus ? safeIpc(() => window.ceo.autonomyStatus()) : null,
+      window.ceo.briefRunGet ? safeIpc(() => window.ceo.briefRunGet(board, taskId)) : null,
     ]);
     if (!r || !r.ok) {
       const md = [
@@ -500,7 +1298,9 @@ async function openTaskInStudio({ board, taskId, taskTitle, taskStatus } = {}) {
         provenance: provenanceRes && provenanceRes.ok ? provenanceRes : null,
         goalsRes: goalsRes && goalsRes.ok ? goalsRes : null,
         autonomyRes,
+        briefRun: briefRunRes && briefRunRes.ok ? briefRunRes : null,
       });
+      startBriefRunOpsTimer();
     }
     appendStream("sys", `Planning focus loaded: ${taskTitle || taskId}. Ask the CEO for a domain plan, acceptance criteria, risks, or the right agent team.`);
     const input = $("#chat-input");
@@ -962,37 +1762,52 @@ async function openProject(id) {
   await refreshDomains(res.project, currentDomain);
   await refreshFileTree(currentDomain);
   await renderStudioBoard(currentDomain);
-  $("#provider-note").textContent = res.providerNote
-    ? `model: ${res.providerId} — ${res.providerNote}`
-    : `model: ${res.providerId}`;
-  $("#panel2-stream").innerHTML = "";
+  const providerNote = $("#provider-note");
+  if (providerNote) {
+    providerNote.textContent = res.providerNote
+      ? `model: ${res.providerId} — ${res.providerNote}`
+      : `model: ${res.providerId}`;
+  }
+  const stream = $("#panel2-stream");
+  if (stream) stream.innerHTML = "";
   appendStream("sys", `Opened "${res.project.name}". Brain initialized & docs indexed.`);
   renderMeter(await window.ceo.costStatus());
+  await refreshEscalations();
   setAgentState("idle");
   window.CEOConvai?.syncContext?.(`opened project ${res.project.name}`);
 }
 
-/** One text turn: prompt -> agent -> reply in the stream. */
+/** One text turn: AGUI-rich chat in panel2 + artifacts in panel1 when available. */
 async function runTurn(prompt) {
   if (!prompt) return;
-  appendStream("user", prompt);
+  // Conversational brief creation: if the user is building a brief (or just
+  // asked to), the Brief Builder consumes this turn (draft → create → decompose).
+  if (window.BriefBuilder && await window.BriefBuilder.maybeHandle(prompt)) return;
+  if (window.StudioSessions && window.StudioSessions.ensureAutoSession && window.StudioSessions.runTurn) {
+    const sessionReady = await window.StudioSessions.ensureAutoSession(prompt);
+    if (sessionReady && sessionReady.ok) return window.StudioSessions.runTurn(prompt);
+    if (window.StudioSessions.isChatActive && window.StudioSessions.isChatActive()) {
+      return window.StudioSessions.runTurn(prompt);
+    }
+  }
   setAgentState("thinking");
 
-  // Preferred path: the Hermes CEO over AGUI. It streams prose into the chat
-  // and can render rich UI into the left panel (#panel1). The CEO owns the
-  // brain/soul/kanban — no local project session required.
-  if (window.CEOAgui && window.CEOAgui.isReady()) {
+  if (window.CEOAgui) {
     const out = await window.CEOAgui.run(prompt);
-    if (!out || !out.ok) {
-      appendStream("sys", `⚠ CEO: ${out ? out.reason : "unreachable"}`);
-      setAgentState("error");
+    if (out && out.ok) {
+      setAgentState("idle");
       return;
     }
-    setAgentState("idle");
-    return;
+    if (out && out.reason === "A turn is already running") return;
+    if (window.CEOAgui.appendSys) {
+      window.CEOAgui.appendSys(`⚠ ${out ? out.reason : "AGUI unreachable"} — using fallback.`);
+    } else {
+      appendStream("sys", `⚠ ${out ? out.reason : "AGUI unreachable"}`);
+    }
   }
 
-  // Fallback: the local Document Agent (requires an open project).
+  // Fallback: plain stream + Document Agent / Hermes ask
+  appendStream("user", prompt);
   if (!currentProject) { appendStream("sys", "Open a project first."); setAgentState("idle"); return; }
   const out = await window.ceo.ask(prompt);
   renderMeter(out.cost);
@@ -1001,12 +1816,86 @@ async function runTurn(prompt) {
   setAgentState("idle");
 }
 
+// --- Rich chat input helpers -------------------------------------------------
+
+function autoResizeTextarea(el) {
+  if (!el) return;
+  el.style.height = "auto";
+  const maxH = 220;
+  el.style.height = Math.min(el.scrollHeight, maxH) + "px";
+}
+
+function renderChatContextPills() {
+  const host = $("#chat-context-pills");
+  if (!host) return;
+  if (!chatInputContexts.length) {
+    host.classList.add("hidden");
+    host.innerHTML = "";
+    return;
+  }
+  host.classList.remove("hidden");
+  host.innerHTML = chatInputContexts.map((ctx) =>
+    `<span class="chat-context-pill inline-flex items-center gap-1 rounded-md border border-neutral-700 bg-neutral-700/30 px-2 py-0.5 text-[11px] text-neutral-300">
+      <span class="truncate max-w-[180px]">${esc(ctx.title || ctx.path)}</span>
+      <button class="chat-context-remove ml-0.5 text-neutral-500 hover:text-neutral-200" data-path="${esc(ctx.path)}" title="Remove">×</button>
+    </span>`
+  ).join("");
+}
+
+async function addChatContext() {
+  const path = window.prompt("Attach file path (relative to project root):", selectedFile ? selectedFile.path : "");
+  if (!path || !path.trim()) return;
+  const trimmed = path.trim();
+  if (chatInputContexts.some((c) => c.path === trimmed)) return;
+  chatInputContexts.push({ path: trimmed, title: trimmed });
+  renderChatContextPills();
+}
+
+function removeChatContext(path) {
+  chatInputContexts = chatInputContexts.filter((c) => c.path !== path);
+  renderChatContextPills();
+}
+
+function insertCodeBlock() {
+  const input = $("#chat-input");
+  if (!input) return;
+  const start = input.selectionStart || 0;
+  const end = input.selectionEnd || 0;
+  const before = input.value.slice(0, start);
+  const after = input.value.slice(end);
+  const block = "```\n\n```";
+  input.value = before + block + after;
+  const cursor = start + 4; // inside the code block
+  input.setSelectionRange(cursor, cursor);
+  input.focus();
+  autoResizeTextarea(input);
+}
+
+async function buildChatPromptWithContext(rawPrompt) {
+  if (!chatInputContexts.length) return rawPrompt;
+  const chunks = [];
+  for (const ctx of chatInputContexts) {
+    try {
+      const r = await window.ceo.docsRead(ctx.path);
+      const text = r && r.ok ? String(r.text || "").slice(0, 4000) : `(could not read ${ctx.path})`;
+      chunks.push(`--- file: ${ctx.path} ---\n${text}`);
+    } catch (e) {
+      chunks.push(`--- file: ${ctx.path} ---\n(error: ${e.message})`);
+    }
+  }
+  return [chunks.join("\n\n"), rawPrompt].join("\n\n");
+}
+
 async function send() {
   const input = $("#chat-input");
   const prompt = input.value.trim();
   if (!prompt) return;
   input.value = "";
-  await runTurn(prompt);
+  input.style.height = "auto";
+  const fullPrompt = await buildChatPromptWithContext(prompt);
+  chatInputContexts = [];
+  renderChatContextPills();
+  await runTurn(fullPrompt);
 }
 
 function closeCreateMenu() {
@@ -1572,6 +2461,10 @@ async function renderTasksView() {
 // --- Registry (agents + teams) — single source of truth for Agents/Teams.
 let registryState = { agents: [], teams: [], personas: [], providers: [], models: {} };
 let meetingRoomsState = [];
+let agentDirectoryState = { query: "", provider: "all", capability: "all", status: "all", group: "all" };
+let skillCatalogState = { skills: [], query: "" };
+let activeAgentsTimer = null;
+let goalsOpState = { message: "", output: "" };
 
 async function loadRegistry() {
   const [reg, per, prov, mods] = await Promise.all([
@@ -1580,8 +2473,18 @@ async function loadRegistry() {
     window.ceo.registryProviders ? window.ceo.registryProviders() : { providers: ["vertex"] },
     window.ceo.registryModels ? window.ceo.registryModels() : { providers: {} },
   ]);
+  const baseAgents = (reg && reg.agents) || [];
+  const agents = await Promise.all(baseAgents.map(async (agent) => {
+    if (!agent || !agent.tmux_session || !window.ceo.registryAlive) return { ...agent, mounted: false };
+    try {
+      const live = await window.ceo.registryAlive(agent.id);
+      return { ...agent, mounted: !!(live && live.alive) };
+    } catch {
+      return { ...agent, mounted: false };
+    }
+  }));
   registryState = {
-    agents: (reg && reg.agents) || [],
+    agents,
     teams: (reg && reg.teams) || [],
     personas: (per && per.personas) || [],
     providers: (prov && prov.providers) || ["vertex"],
@@ -1594,6 +2497,339 @@ function agentSubtitle(a) {
   const persona = a.persona ? esc(a.persona) : "no persona";
   const brain = esc(a.provider || "vertex") + (a.model ? ` · ${esc(a.model)}` : "");
   return `${persona} · ${brain}`;
+}
+
+function agentTeamNames(agentId) {
+  return (registryState.teams || [])
+    .filter((team) => (team.members || []).includes(agentId))
+    .map((team) => team.name);
+}
+
+function agentGroupName(agent) {
+  const id = String(agent.id || "").toLowerCase();
+  const caps = (agent.capabilities || []).join(" ").toLowerCase();
+  const persona = String(agent.persona || "").toLowerCase();
+  if (id === "ceo" || caps.includes("strategy") || caps.includes("orchestration")) return "Leadership";
+  if (caps.includes("implementation") || caps.includes("patches") || caps.includes("self-repair") || caps.includes("diagnostics") || caps.includes("test")) return "Execution";
+  if (caps.includes("requirements") || caps.includes("research") || caps.includes("roadmap") || caps.includes("task-planning") || caps.includes("adr") || caps.includes("spec")) return "Planning";
+  if (caps.includes("domain") || caps.includes("handoff") || caps.includes("document") || caps.includes("docs") || persona.includes("agenda")) return "Domain Systems";
+  if (caps.includes("coordination") || caps.includes("synthesis") || persona.includes("facilitator")) return "Coordination";
+  return "Specialists";
+}
+
+function uniqueSorted(values) {
+  return [...new Set(values.filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b)));
+}
+
+function agentDirectoryOptions() {
+  const agents = registryState.agents || [];
+  return {
+    providers: uniqueSorted(agents.map((a) => a.provider || "unknown")),
+    capabilities: uniqueSorted(agents.flatMap((a) => a.capabilities || [])),
+    groups: uniqueSorted(agents.map(agentGroupName)),
+  };
+}
+
+function agentMatchesDirectoryFilters(agent) {
+  const state = agentDirectoryState;
+  const teams = agentTeamNames(agent.id);
+  const haystack = [
+    agent.id,
+    agent.name,
+    agent.provider,
+    agent.model,
+    agent.persona,
+    agent.description,
+    ...(agent.capabilities || []),
+    ...teams,
+  ].join(" ").toLowerCase();
+  const query = String(state.query || "").trim().toLowerCase();
+  if (query && !haystack.includes(query)) return false;
+  if (state.provider !== "all" && (agent.provider || "unknown") !== state.provider) return false;
+  if (state.capability !== "all" && !(agent.capabilities || []).includes(state.capability)) return false;
+  if (state.group !== "all" && agentGroupName(agent) !== state.group) return false;
+  if (state.status === "mounted" && !agent.mounted) return false;
+  if (state.status === "configured" && !agent.tmux_session) return false;
+  if (state.status === "unmounted" && agent.mounted) return false;
+  if (state.status === "disabled" && agent.enabled !== false) return false;
+  if (state.status !== "disabled" && agent.enabled === false) return false;
+  return true;
+}
+
+function agentCardHtml(agent) {
+  const teams = agentTeamNames(agent.id);
+  const group = agentGroupName(agent);
+  const statusLabel = agent.mounted ? "live" : agent.tmux_session ? "mounted" : "available";
+  const statusColor = agent.mounted ? "bg-emerald-500" : agent.tmux_session ? "bg-amber-500" : "bg-neutral-600";
+  const caps = (agent.capabilities || []).slice(0, 5);
+  return `<article class="team-agent-card rounded-xl border border-neutral-800 bg-neutral-900/60 p-3 transition hover:border-cyan-500/40" data-agent="${esc(agent.id)}">
+    <div class="flex items-start gap-3">
+      <span class="mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${statusColor}"></span>
+      <div class="min-w-0 flex-1">
+        <div class="flex min-w-0 items-center gap-2">
+          <span class="truncate text-sm font-medium text-neutral-100">${esc(agent.name || agent.id)}</span>
+          <span class="rounded border border-neutral-800 bg-neutral-950/60 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-neutral-500">${esc(group)}</span>
+        </div>
+        <div class="mt-1 truncate text-[11px] text-neutral-500">${agentSubtitle(agent)}</div>
+        ${agent.description ? `<p class="mt-2 line-clamp-2 text-xs leading-5 text-neutral-500">${esc(agent.description)}</p>` : ""}
+      </div>
+      <div class="shrink-0 text-right">
+        <div class="text-[10px] uppercase tracking-wider ${agent.mounted ? "text-emerald-400" : "text-neutral-500"}">${statusLabel}</div>
+        <div class="mt-1 font-mono text-[10px] text-neutral-600">${esc(agent.provider || "unknown")}</div>
+      </div>
+    </div>
+    <div class="mt-3 flex flex-wrap gap-1.5">
+      ${caps.length ? caps.map((cap) => `<button type="button" class="agent-filter-chip rounded border border-neutral-800 bg-neutral-950/55 px-1.5 py-0.5 text-[10px] text-neutral-400 hover:border-cyan-700 hover:text-cyan-200" data-capability="${esc(cap)}">${esc(cap)}</button>`).join("") : `<span class="text-[10px] text-neutral-700">no capabilities tagged</span>`}
+    </div>
+    <div class="mt-3 flex flex-wrap items-center gap-2">
+      ${teams.length ? teams.slice(0, 3).map((team) => `<span class="rounded border border-neutral-800 bg-neutral-950/55 px-1.5 py-0.5 text-[10px] text-neutral-500">${esc(team)}</span>`).join("") : `<span class="text-[10px] text-neutral-700">no team</span>`}
+      <div class="ml-auto flex flex-wrap gap-1.5">
+        <button type="button" class="agent-action rounded-md bg-cyan-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-cyan-500" data-action="use" data-agent="${esc(agent.id)}">Use</button>
+        <button type="button" class="agent-action rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-[11px] text-neutral-200 hover:bg-neutral-800" data-action="dm" data-agent="${esc(agent.id)}">DM</button>
+        <button type="button" class="agent-action rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-[11px] text-neutral-200 hover:bg-neutral-800" data-action="detail" data-agent="${esc(agent.id)}">Details</button>
+      </div>
+    </div>
+  </article>`;
+}
+
+function liveTerminalAgents() {
+  return (registryState.agents || []).filter((agent) => agent && agent.mounted && agent.tmux_session);
+}
+
+function activeAgentElement(agentId, selector) {
+  return Array.from(document.querySelectorAll(selector)).find((el) => el.dataset.agent === agentId) || null;
+}
+
+function activeAgentTerminalCard(agent) {
+  const tmuxWindow = agent.tmux_window || "main";
+  return `<article class="active-agent-card min-h-[320px] rounded-xl border border-neutral-800 bg-neutral-950/50 p-3" data-agent="${esc(agent.id)}">
+    <div class="mb-2 flex items-start gap-2">
+      <span class="mt-1.5 h-2 w-2 rounded-full bg-emerald-500"></span>
+      <div class="min-w-0 flex-1">
+        <div class="truncate text-sm font-medium text-neutral-100">${esc(agent.name || agent.id)}</div>
+        <div class="mt-0.5 truncate font-mono text-[10px] text-neutral-500">${esc(agent.tmux_session)}:${esc(tmuxWindow)}</div>
+      </div>
+      <span class="active-agent-status rounded border border-neutral-800 bg-neutral-900 px-1.5 py-0.5 text-[10px] text-emerald-300" data-agent="${esc(agent.id)}">live</span>
+    </div>
+    <pre class="active-agent-output h-48 overflow-auto rounded-lg border border-neutral-800 bg-black/80 p-2 font-mono text-[11px] leading-relaxed text-emerald-100/85 whitespace-pre-wrap" data-agent="${esc(agent.id)}">Loading terminal...</pre>
+    <div class="mt-2 flex min-w-0 items-center gap-1.5">
+      <input class="active-agent-input min-w-0 flex-1 rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-xs text-neutral-100 outline-none focus:border-cyan-500" data-agent="${esc(agent.id)}" data-window="${esc(tmuxWindow)}" placeholder="Send terminal input..." />
+      <button type="button" class="active-agent-send rounded-md bg-cyan-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-cyan-500" data-agent="${esc(agent.id)}" data-window="${esc(tmuxWindow)}">Send</button>
+    </div>
+    <div class="mt-2 flex items-center gap-1.5">
+      <button type="button" class="active-agent-refresh rounded-md border border-neutral-800 bg-neutral-900 px-2 py-1 text-[11px] text-neutral-300 hover:bg-neutral-800" data-agent="${esc(agent.id)}">Refresh</button>
+      <button type="button" class="active-agent-open rounded-md border border-neutral-800 bg-neutral-900 px-2 py-1 text-[11px] text-neutral-300 hover:bg-neutral-800" data-agent="${esc(agent.id)}">Open full</button>
+      <span class="ml-auto truncate text-[10px] text-neutral-600">${esc(agent.provider || "unknown")}${agent.model ? " / " + esc(agent.model) : ""}</span>
+    </div>
+  </article>`;
+}
+
+function activeAgentTerminalsHtml() {
+  const liveAgents = liveTerminalAgents();
+  const cards = liveAgents.length
+    ? `<div class="grid grid-cols-1 gap-3 xl:grid-cols-2">${liveAgents.map(activeAgentTerminalCard).join("")}</div>`
+    : navEmpty("No live agent tmux sessions.");
+  return `<section class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+    <div class="mb-3 flex flex-wrap items-center gap-2">
+      <div class="min-w-0 flex-1">
+        <div class="text-sm font-semibold text-neutral-100">Active Agent Terminals</div>
+        <div class="mt-1 text-xs text-neutral-500">${liveAgents.length} live terminal${liveAgents.length === 1 ? "" : "s"}</div>
+      </div>
+      <button type="button" id="active-agents-refresh" class="rounded-md border border-neutral-700 bg-neutral-900 px-2.5 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800">Refresh all</button>
+    </div>
+    ${cards}
+  </section>`;
+}
+
+function stopActiveAgentsTimer() {
+  if (activeAgentsTimer) {
+    clearInterval(activeAgentsTimer);
+    activeAgentsTimer = null;
+  }
+}
+
+function startActiveAgentsTimer() {
+  stopActiveAgentsTimer();
+  refreshActiveAgentTerminals();
+  activeAgentsTimer = setInterval(() => {
+    if (studioView !== "agents" || !document.getElementById("active-agents-refresh")) {
+      stopActiveAgentsTimer();
+      return;
+    }
+    refreshActiveAgentTerminals({ quiet: true });
+  }, 2500);
+}
+
+async function refreshActiveAgentTerminals(opts = {}) {
+  const agents = liveTerminalAgents();
+  if (!agents.length) return;
+  await Promise.all(agents.map((agent) => refreshActiveAgentTerminal(agent.id, opts)));
+}
+
+async function refreshActiveAgentTerminal(agentId, opts = {}) {
+  const output = activeAgentElement(agentId, ".active-agent-output");
+  const status = activeAgentElement(agentId, ".active-agent-status");
+  if (!output) return;
+  if (!opts.quiet) output.textContent = "Loading terminal...";
+  let result = {};
+  try {
+    result = await window.ceo.registryTerminal(agentId);
+  } catch (e) {
+    result = { ok: false, reason: e.message || String(e) };
+  }
+  if (result && result.ok) {
+    output.textContent = result.output || "(empty)";
+    output.scrollTop = output.scrollHeight;
+    if (status) {
+      status.textContent = "live";
+      status.className = "active-agent-status rounded border border-neutral-800 bg-neutral-900 px-1.5 py-0.5 text-[10px] text-emerald-300";
+    }
+    return;
+  }
+  output.textContent = `Terminal unavailable: ${result ? result.reason : "unknown"}`;
+  if (status) {
+    status.textContent = "offline";
+    status.className = "active-agent-status rounded border border-neutral-800 bg-neutral-900 px-1.5 py-0.5 text-[10px] text-amber-300";
+  }
+}
+
+async function sendActiveAgentTerminalInput(agentId) {
+  const input = activeAgentElement(agentId, ".active-agent-input");
+  const status = activeAgentElement(agentId, ".active-agent-status");
+  if (!input) return;
+  const text = input.value || "";
+  if (!text.trim()) return;
+  const tmuxWindow = input.dataset.window || "main";
+  input.value = "";
+  if (status) status.textContent = "sending";
+  let result = {};
+  try {
+    result = await window.ceo.registryTerminalSend(agentId, text, tmuxWindow);
+  } catch (e) {
+    result = { ok: false, reason: e.message || String(e) };
+  }
+  if (!result || !result.ok) {
+    if (status) {
+      status.textContent = "failed";
+      status.className = "active-agent-status rounded border border-neutral-800 bg-neutral-900 px-1.5 py-0.5 text-[10px] text-red-300";
+    }
+    const output = activeAgentElement(agentId, ".active-agent-output");
+    if (output) output.textContent = `Send failed: ${result ? result.reason : "unknown"}`;
+    return;
+  }
+  setTimeout(() => refreshActiveAgentTerminal(agentId, { quiet: true }), 250);
+}
+
+function agentDirectoryPrompt(agents) {
+  const rows = agents.map((agent) => {
+    const teams = agentTeamNames(agent.id);
+    return `- ${agent.id}: ${agent.name || agent.id}; provider=${agent.provider || "unknown"}; persona=${agent.persona || "none"}; group=${agentGroupName(agent)}; capabilities=${(agent.capabilities || []).join(", ") || "none"}; teams=${teams.join(", ") || "none"}; mounted=${agent.mounted ? "yes" : "no"}; description=${agent.description || "none"}`;
+  }).join("\n");
+  return [
+    "Use this agent registry snapshot to recommend the right operating team for my next goal.",
+    "Map needed work to existing agents first. If an agent is missing, say exactly what role/capabilities to add.",
+    "Do not create tasks or dispatch workers yet; propose the team and meeting/workflow shape.",
+    "",
+    rows || "- No matching agents.",
+  ].join("\n");
+}
+
+function skillMatchesFilter(skill) {
+  const query = String(skillCatalogState.query || "").trim().toLowerCase();
+  if (!query) return true;
+  const hay = [
+    skill.id,
+    skill.name,
+    skill.category,
+    skill.description,
+    skill.source,
+    ...(skill.capabilities || []),
+    ...(skill.tags || []),
+  ].join(" ").toLowerCase();
+  return hay.includes(query);
+}
+
+function skillCardHtml(skill) {
+  const caps = (skill.capabilities || []).slice(0, 6);
+  return `<article class="skill-card rounded-xl border border-neutral-800 bg-neutral-900/60 p-3" data-skill="${esc(skill.id)}">
+    <div class="flex items-start gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2">
+          <span class="truncate text-sm font-medium text-neutral-100">${esc(skill.name || skill.id)}</span>
+          <span class="rounded border border-neutral-800 bg-neutral-950/60 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-neutral-500">${esc(skill.source || "builtin")}</span>
+        </div>
+        <div class="mt-1 text-[11px] text-neutral-500">${esc(skill.category || "general")}</div>
+        ${skill.description ? `<p class="mt-2 line-clamp-2 text-xs leading-5 text-neutral-500">${esc(skill.description)}</p>` : ""}
+      </div>
+      <button type="button" class="skill-route rounded-md bg-cyan-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-cyan-500" data-skill="${esc(skill.id)}">Route</button>
+    </div>
+    <div class="mt-3 flex flex-wrap gap-1.5">
+      ${caps.length ? caps.map((cap) => `<span class="rounded border border-neutral-800 bg-neutral-950/55 px-1.5 py-0.5 text-[10px] text-neutral-400">${esc(cap)}</span>`).join("") : `<span class="text-[10px] text-neutral-700">no inferred capabilities</span>`}
+    </div>
+  </article>`;
+}
+
+async function renderSkillsView() {
+  setPanelTitle("Skills");
+  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading skills...</div>';
+  let res = {};
+  try { res = window.ceo.listSkills ? await window.ceo.listSkills() : { skills: [] }; } catch { res = {}; }
+  skillCatalogState.skills = (res && res.skills) || [];
+  renderSkillsPanel();
+}
+
+function renderSkillsPanel(routeResult = null) {
+  const skills = skillCatalogState.skills || [];
+  const filtered = skills.filter(skillMatchesFilter);
+  const byCategory = new Map();
+  for (const skill of filtered) {
+    const category = skill.category || "general";
+    if (!byCategory.has(category)) byCategory.set(category, []);
+    byCategory.get(category).push(skill);
+  }
+  const groups = [...byCategory.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([category, rows]) => `
+    <section class="rounded-2xl border border-neutral-800 bg-neutral-950/30 p-3">
+      <div class="mb-2 flex items-center gap-2">
+        <span class="text-xs font-semibold uppercase tracking-wider text-neutral-400">${esc(category)}</span>
+        <span class="text-[10px] text-neutral-600">${rows.length}</span>
+      </div>
+      <div class="grid grid-cols-1 gap-3 xl:grid-cols-2">${rows.map(skillCardHtml).join("")}</div>
+    </section>`).join("") || navEmpty("No skills match the current search.");
+  const routeHtml = routeResult ? `<section class="rounded-2xl border border-cyan-700/40 bg-cyan-950/15 p-4">
+    <div class="mb-2 text-sm font-semibold text-cyan-100">Route Preview</div>
+    <div class="text-xs text-neutral-400">Lead: <span class="font-mono text-neutral-200">${esc(routeResult.leadAgent || "none")}</span></div>
+    <div class="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">${(routeResult.team || []).map((agent) => `<div class="rounded-lg border border-neutral-800 bg-neutral-950/50 px-3 py-2">
+      <div class="flex items-center gap-2"><span class="text-sm text-neutral-100">${esc(agent.name || agent.id)}</span><span class="ml-auto text-[10px] text-neutral-500">${esc(agent.provider || "")}</span></div>
+      <div class="mt-1 text-[10px] text-neutral-600">${esc((agent.reasons || []).join(", ") || "matched")}</div>
+    </div>`).join("") || `<div class="text-xs text-neutral-600">No agent matches yet.</div>`}</div>
+    ${routeResult.gaps && routeResult.gaps.length ? `<div class="mt-3 text-xs text-amber-300">${routeResult.gaps.map(esc).join("<br>")}</div>` : ""}
+    <div class="mt-3 text-xs text-neutral-500">${esc(routeResult.dispatchPath || "")}</div>
+  </section>` : "";
+  panelContent().innerHTML = `<div class="space-y-4">
+    <div class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="min-w-0 flex-1">
+          <div class="text-sm font-semibold text-neutral-100">Skill Catalog</div>
+          <div class="mt-1 text-xs text-neutral-500">Capability templates from CEO Studio, the harness, project skills, and local Kimi Desktop skills.</div>
+        </div>
+        <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-1 text-[11px] text-neutral-500">${skills.length} skills</span>
+      </div>
+      <input id="skill-search" value="${esc(skillCatalogState.query)}" placeholder="Search skills, sources, categories, capabilities..." class="mt-4 w-full rounded-lg border border-neutral-700 bg-neutral-950/60 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" />
+    </div>
+    ${routeHtml}
+    ${groups}
+  </div>`;
+}
+
+async function routeSkillFromCatalog(skillId) {
+  const objective = focusedTask?.taskTitle || $("#chat-input")?.value || "Route this capability to the right agents.";
+  let route = {};
+  try { route = await window.ceo.routeSkills({ skills: [skillId], objective, domain: currentDomain }); } catch (e) { route = { ok: false, reason: e.message }; }
+  if (!route || !route.ok) {
+    setVoiceStatus(`Skill route failed: ${route ? route.reason : "unknown"}`);
+    return;
+  }
+  renderSkillsPanel(route);
 }
 
 async function renderAgentsView() {
@@ -1612,26 +2848,67 @@ async function renderTeamsView() {
 
 function renderAgentsPanel() {
   const { agents } = registryState;
-  const roster = agents.length ? agents.map((a) => `
-    <button class="team-agent-card text-left rounded-xl border border-neutral-800 bg-neutral-900/60 p-3 hover:border-cyan-500/40 transition" data-agent="${esc(a.id)}">
-      <div class="flex items-center gap-2">
-        <span class="w-2 h-2 rounded-full ${a.tmux_session ? "bg-emerald-500" : "bg-neutral-600"}"></span>
-        <span class="text-sm font-medium text-neutral-100 truncate">${esc(a.name || a.id)}</span>
-        <span class="ml-auto text-[10px] uppercase tracking-wider text-neutral-500">${esc(a.provider || "vertex")}</span>
+  const opts = agentDirectoryOptions();
+  const filtered = agents.filter(agentMatchesDirectoryFilters);
+  const mountedCount = agents.filter((a) => a.mounted).length;
+  const configuredCount = agents.filter((a) => a.tmux_session).length;
+  const devinCount = agents.filter((a) => a.provider === "devin").length;
+  const missingPersonaCount = agents.filter((a) => !a.persona).length;
+  const grouped = opts.groups.map((group) => ({
+    group,
+    agents: filtered.filter((agent) => agentGroupName(agent) === group),
+  })).filter((item) => item.agents.length);
+  const groupSections = grouped.length ? grouped.map((item) => `
+    <section class="rounded-2xl border border-neutral-800 bg-neutral-950/30 p-3">
+      <div class="mb-2 flex items-center gap-2">
+        <span class="text-xs font-semibold uppercase tracking-wider text-neutral-400">${esc(item.group)}</span>
+        <span class="text-[10px] text-neutral-600">${item.agents.length}</span>
       </div>
-      <div class="mt-1.5 text-[11px] text-neutral-500 truncate">${agentSubtitle(a)}</div>
-      ${(a.capabilities || []).length ? `<div class="mt-2 flex flex-wrap gap-1">${a.capabilities.slice(0, 3).map((c) => `<span class="text-[9px] bg-neutral-800 text-neutral-400 px-1.5 py-0.5 rounded">${esc(c)}</span>`).join("")}</div>` : ""}
-    </button>`).join("") : navEmpty("No agents yet. Click “New agent” to hire one.");
+      <div class="grid grid-cols-1 gap-3 xl:grid-cols-2">${item.agents.map(agentCardHtml).join("")}</div>
+    </section>`).join("") : navEmpty("No agents match the current filters.");
+  const providerOptions = [`<option value="all">All providers</option>`].concat(opts.providers.map((provider) => `<option value="${esc(provider)}" ${agentDirectoryState.provider === provider ? "selected" : ""}>${esc(provider)}</option>`)).join("");
+  const capabilityOptions = [`<option value="all">All capabilities</option>`].concat(opts.capabilities.map((cap) => `<option value="${esc(cap)}" ${agentDirectoryState.capability === cap ? "selected" : ""}>${esc(cap)}</option>`)).join("");
+  const groupOptions = [`<option value="all">All groups</option>`].concat(opts.groups.map((group) => `<option value="${esc(group)}" ${agentDirectoryState.group === group ? "selected" : ""}>${esc(group)}</option>`)).join("");
 
   panelContent().innerHTML = `
     <div class="space-y-4">
-      <div class="flex items-center gap-2">
-        <span class="text-sm font-semibold text-neutral-100">Agents</span>
-        <span class="text-[11px] text-neutral-500">${agents.length} agent${agents.length === 1 ? "" : "s"}</span>
-        <button id="agent-new" class="ml-auto text-xs bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-3 py-1 font-medium transition">+ New agent</button>
+      <div class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+        <div class="flex flex-wrap items-center gap-2">
+          <div class="min-w-0 flex-1">
+            <div class="text-sm font-semibold text-neutral-100">Agent Directory</div>
+            <div class="mt-1 text-xs text-neutral-500">Registry-backed roster for selecting, mounting, messaging, and forming teams.</div>
+          </div>
+          <button id="agent-ask-ceo" class="rounded-md border border-cyan-700/60 bg-cyan-950/30 px-3 py-1.5 text-xs font-medium text-cyan-100 hover:bg-cyan-900/40">Ask CEO to route</button>
+          <button id="agent-new" class="rounded-md bg-cyan-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-cyan-500">+ New agent</button>
+        </div>
+        <div class="mt-4 grid grid-cols-2 gap-2 lg:grid-cols-4">
+          ${detailRow("Agents", `${agents.length}`)}
+          ${detailRow("Live / configured", `${mountedCount} / ${configuredCount}`)}
+          ${detailRow("Devin workers", `${devinCount}`)}
+          ${detailRow("Missing persona", `${missingPersonaCount}`)}
+        </div>
+        <div class="mt-4 grid grid-cols-1 gap-2 lg:grid-cols-[1.4fr_1fr_1fr_1fr_1fr]">
+          <input id="agent-search" value="${esc(agentDirectoryState.query)}" placeholder="Search agent, role, team, capability..." class="min-w-0 rounded-lg border border-neutral-700 bg-neutral-950/60 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" />
+          <select id="agent-filter-provider" class="rounded-lg border border-neutral-700 bg-neutral-950/60 px-2 py-2 text-xs text-neutral-100">${providerOptions}</select>
+          <select id="agent-filter-capability" class="rounded-lg border border-neutral-700 bg-neutral-950/60 px-2 py-2 text-xs text-neutral-100">${capabilityOptions}</select>
+          <select id="agent-filter-group" class="rounded-lg border border-neutral-700 bg-neutral-950/60 px-2 py-2 text-xs text-neutral-100">${groupOptions}</select>
+          <select id="agent-filter-status" class="rounded-lg border border-neutral-700 bg-neutral-950/60 px-2 py-2 text-xs text-neutral-100">
+            <option value="all" ${agentDirectoryState.status === "all" ? "selected" : ""}>All active</option>
+            <option value="mounted" ${agentDirectoryState.status === "mounted" ? "selected" : ""}>Live only</option>
+            <option value="configured" ${agentDirectoryState.status === "configured" ? "selected" : ""}>Configured terminal</option>
+            <option value="unmounted" ${agentDirectoryState.status === "unmounted" ? "selected" : ""}>Not live</option>
+            <option value="disabled" ${agentDirectoryState.status === "disabled" ? "selected" : ""}>Disabled</option>
+          </select>
+        </div>
+        <div class="mt-2 flex items-center gap-2 text-[11px] text-neutral-600">
+          <span>${filtered.length} visible</span>
+          <button id="agent-filters-clear" class="rounded border border-neutral-800 px-2 py-0.5 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200">Clear filters</button>
+        </div>
       </div>
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">${roster}</div>
+      ${activeAgentTerminalsHtml()}
+      ${groupSections}
     </div>`;
+  startActiveAgentsTimer();
 }
 
 function renderTeamsPanel() {
@@ -1977,7 +3254,7 @@ async function teamSetMembers(name, members) {
 
 // --- Agent detail (left panel) + live terminal/logs surface (right panel) ---
 let selectedAgentId = null;
-let selectedAgentRoom = "discovery";
+let selectedAgentRoom = null; // Start with null to avoid auto-loading previous sessions
 let agentSurfaceTab = "terminal";
 let agentTermTimer = null;
 let agentInputMode = "room"; // "room" or "terminal"
@@ -1989,10 +3266,52 @@ function detailRow(label, valueHtml) {
   </div>`;
 }
 
+async function askCeoToRouteVisibleAgents() {
+  const visible = (registryState.agents || []).filter(agentMatchesDirectoryFilters);
+  await runTurn(agentDirectoryPrompt(visible));
+}
+
+async function runAgentDirectoryAction(action, agentId) {
+  if (!agentId) return;
+  if (action === "use") {
+    if (window.StudioSessions && window.StudioSessions.startAgentSession) {
+      await window.StudioSessions.startAgentSession(agentId);
+    } else {
+      await openAgentDetail(agentId);
+      await mountSelectedAgent();
+    }
+    await loadRegistry();
+    renderRegistryPanel();
+    return;
+  }
+  if (action === "dm") {
+    await openChannel(`dm:${agentId}`);
+    return;
+  }
+  if (action === "detail") {
+    await openAgentDetail(agentId);
+  }
+}
+
+function updateAgentDirectoryFilter(key, value) {
+  agentDirectoryState = { ...agentDirectoryState, [key]: value || "all" };
+  renderAgentsPanel();
+}
+
+function clearAgentDirectoryFilters() {
+  agentDirectoryState = { query: "", provider: "all", capability: "all", status: "all", group: "all" };
+  renderAgentsPanel();
+}
+
 async function openAgentDetail(id) {
   const a = registryState.agents.find((x) => x.id === id);
   if (!a) return;
   selectedAgentId = id;
+  selectedAgentRoom = null; // Clear previous room to avoid loading last session
+  
+  // Don't auto-mount - let user decide when to mount
+  // This prevents automatically loading previous sessions
+  
   await renderAgentDetail(a);
   showAgentSurface(a);
 }
@@ -2004,6 +3323,30 @@ async function renderAgentDetail(a) {
     try { const live = await window.ceo.registryAlive(a.id); mounted = !!(live && live.alive); } catch { mounted = false; }
   }
   const brain = esc(a.provider || "vertex") + (a.model ? " · " + esc(a.model) : "");
+  
+  // Generate session list
+  const sessionsHtml = a.tmux_session ? `
+    <div class="mt-4 rounded-xl border border-neutral-800 bg-neutral-900/50 p-4">
+      <div class="text-[11px] uppercase tracking-wider text-neutral-600 mb-3">Sessions</div>
+      <div class="space-y-2">
+        <div class="flex items-center gap-3 rounded-lg border ${mounted ? "border-emerald-500/30 bg-emerald-950/20" : "border-neutral-800 bg-neutral-950/50"} p-3">
+          <div class="w-2 h-2 rounded-full ${mounted ? "bg-emerald-500" : "bg-neutral-600"}"></div>
+          <div class="flex-1">
+            <div class="text-sm font-medium text-neutral-100">${esc(a.tmux_session)}</div>
+            <div class="text-xs text-neutral-500">main window</div>
+          </div>
+          <div class="text-[10px] ${mounted ? "text-emerald-400" : "text-neutral-600"}">${mounted ? "● live" : "○ stopped"}</div>
+        </div>
+      </div>
+      <div class="mt-3 text-xs text-neutral-500">
+        ${mounted ? "Agent is running. Send a message below to start a new conversation." : "Click Mount to start this agent's session."}
+      </div>
+    </div>
+  ` : `<div class="mt-4 rounded-xl border border-neutral-800 bg-neutral-900/50 p-4">
+    <div class="text-[11px] uppercase tracking-wider text-neutral-600 mb-3">Sessions</div>
+    <div class="text-xs text-neutral-600">No tmux session configured for this agent</div>
+  </div>`;
+  
   panelContent().innerHTML = `
     <div class="space-y-4 max-w-2xl">
       <button id="agent-back" class="text-xs text-neutral-400 hover:text-neutral-200">← Back to team</button>
@@ -2028,12 +3371,14 @@ async function renderAgentDetail(a) {
           <button id="agent-edit" class="text-sm bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 rounded-md px-3 py-1.5 transition">Edit</button>
           <span id="agent-detail-msg" class="text-xs text-neutral-500"></span>
         </div>
-        <p class="text-[11px] text-neutral-600">Mounting starts the agent's CLI + a room watcher (its A2A presence). Watch it live in the right panel →</p>
+        <p class="text-[11px] text-neutral-600">Click Mount to start the agent's session. Once mounted, send a message below to start a fresh conversation in the right panel.</p>
       </div>
+      ${sessionsHtml}
     </div>`;
 }
 
 function showAgentSurface(a) {
+  closeChannelSurface();
   const surf = document.getElementById("agent-surface");
   if (!surf) return;
   // Inline style wins over Tailwind's class ordering so the toggle is deterministic.
@@ -2043,6 +3388,15 @@ function showAgentSurface(a) {
   const sub = document.getElementById("as-sub");
   if (name) name.textContent = a.name || a.id;
   if (sub) sub.textContent = agentSubtitle(a);
+  
+  // Clear previous terminal output and show clean state for new session
+  const out = document.getElementById("as-output");
+  const dot = document.getElementById("as-dot");
+  if (out) {
+    out.textContent = "Ready for new session.\n\nSend a message below to start a fresh conversation with this agent.";
+  }
+  if (dot) dot.className = "w-2 h-2 rounded-full bg-emerald-500";
+  
   setAgentSurfaceTab("terminal");
 }
 
@@ -2064,9 +3418,17 @@ function setAgentSurfaceTab(tab) {
   // (it pairs naturally with the Logs/room transcript view).
   const inputRow = document.getElementById("as-input-row");
   if (inputRow) inputRow.classList.remove("hidden");
-  pollAgentSurface();
-  if (agentTermTimer) clearInterval(agentTermTimer);
-  agentTermTimer = setInterval(pollAgentSurface, tab === "terminal" ? 1500 : 3000);
+  
+  const shouldPoll = tab === "terminal" ? !!selectedAgentId : !!selectedAgentRoom;
+  if (shouldPoll) {
+    pollAgentSurface();
+    if (agentTermTimer) clearInterval(agentTermTimer);
+    agentTermTimer = setInterval(pollAgentSurface, tab === "terminal" ? 1500 : 3000);
+  } else {
+    // Stop room polling when no room is selected to avoid loading old sessions.
+    if (agentTermTimer) clearInterval(agentTermTimer);
+    agentTermTimer = null;
+  }
 }
 
 async function pollAgentSurface() {
@@ -2086,7 +3448,7 @@ async function pollAgentSurface() {
     }
   } else {
     if (!selectedAgentRoom) {
-      out.textContent = "Send a message below to talk to this agent — it posts into the agent's A2A room and the transcript appears here.\n\nNote: agents on the \"echo\" brain only show presence; convene a meeting to get a real response.";
+      out.textContent = "Send a message below to start a new conversation with this agent.\n\nThis will create a fresh session in the agent's A2A room.";
     } else {
       let r = {};
       try { r = await window.ceo.meetingRoom(selectedAgentRoom); } catch { r = {}; }
@@ -2103,12 +3465,13 @@ async function mountSelectedAgent() {
   const msg = document.getElementById("agent-detail-msg");
   if (msg) msg.textContent = "mounting…";
   let r = {};
-  try { r = await window.ceo.registryMount(selectedAgentId); } catch (e) { r = { ok: false, reason: String(e) }; }
-  if (r && r.room) selectedAgentRoom = r.room;
+  try { r = await window.ceo.registryMount(selectedAgentId, { allowPaid: true }); } catch (e) { r = { ok: false, reason: String(e) }; }
+  // Don't auto-select the room - let the user start a fresh session
+  // if (r && r.room) selectedAgentRoom = r.room;
   if (!r || !r.ok) { if (msg) msg.textContent = "mount failed: " + (r ? r.reason : "unknown"); return; }
   await loadRegistry();
   const a = registryState.agents.find((x) => x.id === selectedAgentId);
-  if (a) { await renderAgentDetail(a); pollAgentSurface(); }
+  if (a) { await renderAgentDetail(a); }
 }
 
 async function unmountSelectedAgent() {
@@ -2140,9 +3503,14 @@ async function sendAgentKeys() {
     // Talk to the agent by posting into its A2A room (the real channel), not by
     // typing into a watcher pane. Then show the room transcript in Logs.
     const r = await window.ceo.registryMessage(selectedAgentId, text, "CEO");
-    if (r && r.room) selectedAgentRoom = r.room;
-    setAgentSurfaceTab("logs");
-    setTimeout(pollAgentSurface, 400);
+    if (r && r.room) {
+      selectedAgentRoom = r.room;
+      setAgentSurfaceTab("logs");
+      // Start polling the new room
+      if (agentTermTimer) clearInterval(agentTermTimer);
+      agentTermTimer = setInterval(pollAgentSurface, 3000);
+      setTimeout(pollAgentSurface, 400);
+    }
   }
 }
 
@@ -2294,8 +3662,101 @@ async function boardChannelMembers(slug) {
   return (registryState.agents || []).map((a) => a.id).slice(0, 8);
 }
 
+function agentHasTerminal(agentId) {
+  const agent = (registryState.agents || []).find((a) => a.id === agentId);
+  return !!(agent && (agent.tmux_session || agent.mounted));
+}
+
+async function loadBoardSwarmRows(board) {
+  const rows = [];
+  const seen = new Set();
+  try {
+    const r = window.ceo.runnerStatus ? await window.ceo.runnerStatus() : null;
+    const workers = (r && r.workers) || [];
+    for (const w of workers.filter((worker) => worker.board === board)) {
+      const key = `runner:${w.taskId || ""}:${w.agentId || ""}:${w.pid || ""}`;
+      seen.add(key);
+      rows.push({
+        source: "runner",
+        board,
+        taskId: w.taskId,
+        title: w.title || w.taskId || "Worker",
+        agentId: w.agentId || "",
+        model: w.model || "",
+        pid: w.pid,
+        alive: w.alive !== false,
+        branch: w.branch || "",
+      });
+    }
+  } catch { /* runner is optional */ }
+  try {
+    const r = window.ceo.ceoSwarm ? await window.ceo.ceoSwarm(board) : null;
+    const workers = (r && r.workers) || [];
+    for (const w of workers) {
+      const agentId = w.agentId || w.assignee || "";
+      const key = `board:${w.id || w.taskId || ""}:${agentId}:${w.worker_pid || w.pid || ""}`;
+      if (seen.has(key) || rows.some((row) => row.taskId && row.taskId === (w.id || w.taskId))) continue;
+      rows.push({
+        source: "board",
+        board,
+        taskId: w.id || w.taskId,
+        title: w.title || w.id || "Running task",
+        agentId,
+        model: "",
+        pid: w.worker_pid || w.pid,
+        alive: !!w.alive,
+        branch: "",
+      });
+    }
+  } catch { /* board swarm is optional */ }
+  return rows;
+}
+
+function renderChannelSwarm() {
+  const host = document.getElementById("chan-swarm");
+  if (!host) return;
+  if (!channelState || channelState.kind !== "board") {
+    host.classList.add("hidden");
+    host.innerHTML = "";
+    return;
+  }
+  host.classList.remove("hidden");
+  const rows = channelState.swarmWorkers || [];
+  if (!rows.length) {
+    host.innerHTML = '<div class="text-[11px] text-neutral-600">No active board workers. New runner activity will appear here.</div>';
+    return;
+  }
+  host.innerHTML = `
+    <div class="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-wider text-neutral-500">
+      <span>Live swarm</span>
+      <span class="rounded border border-neutral-800 px-1.5 py-0.5">${rows.length}</span>
+    </div>
+    <div class="flex gap-2 overflow-x-auto pb-1">
+      ${rows.map((w) => {
+        const canTerminal = agentHasTerminal(w.agentId);
+        return `<div class="chan-swarm-card min-w-[220px] rounded-lg border border-neutral-800 bg-neutral-900/55 p-2">
+          <div class="flex items-center gap-2">
+            <span class="h-2 w-2 shrink-0 rounded-full ${w.alive ? "bg-emerald-500" : "bg-neutral-600"}"></span>
+            <span class="min-w-0 flex-1 truncate text-xs font-medium text-neutral-100">${esc(w.agentId || "worker")}</span>
+            <span class="text-[10px] text-neutral-600">${esc(w.source)}</span>
+          </div>
+          <div class="mt-1 truncate text-[11px] text-neutral-400">${esc(w.title || w.taskId || "Running work")}</div>
+          <div class="mt-1 flex items-center gap-2 text-[10px] text-neutral-600">
+            <span>${w.pid ? `pid ${esc(w.pid)}` : "no pid"}</span>
+            ${w.model ? `<span>${esc(w.model)}</span>` : ""}
+          </div>
+          <div class="mt-2 flex gap-1.5">
+            ${canTerminal ? `<button type="button" class="chan-swarm-terminal rounded-md border border-neutral-700 px-2 py-1 text-[11px] text-neutral-200 hover:bg-neutral-800" data-agent="${esc(w.agentId)}">Agent terminal</button>` : ""}
+            ${w.taskId ? `<button type="button" class="chan-swarm-task rounded-md border border-neutral-700 px-2 py-1 text-[11px] text-neutral-200 hover:bg-neutral-800" data-board="${esc(w.board)}" data-task-id="${esc(w.taskId)}" data-task-title="${esc(w.title || "")}">Task</button>` : ""}
+          </div>
+        </div>`;
+      }).join("")}
+    </div>`;
+}
+
 // Switch the one right panel back to the default CEO conversation.
 function switchToCeoChannel() {
+  closeAgentSurface();
   closeChannelSurface();
   $("#chat-input")?.focus();
   if ($("#panel-title")?.textContent === "Channels") renderChannelsView();
@@ -2303,6 +3764,7 @@ function switchToCeoChannel() {
 
 async function openChannel(key) {
   if (!key) return;
+  if (channelState) closeChannelSurface();
   await loadRegistry();
   const [kind, ...rest] = key.split(":");
   const id = rest.join(":");
@@ -2321,16 +3783,22 @@ async function openChannel(key) {
     key, kind, id, name,
     room: kind === "meeting" ? id : channelRoomName(key),
     members,
+    swarmWorkers: [],
     ceoInRoom: false,
     live: false,
   };
-  document.getElementById("agent-surface")?.classList.add("hidden");
+  closeAgentSurface();
   const surf = document.getElementById("channel-surface");
-  if (surf) surf.classList.remove("hidden");
+  if (surf) { surf.classList.remove("hidden"); surf.style.display = "flex"; }
   const nameEl = document.getElementById("chan-name");
   if (nameEl) nameEl.textContent = name + (kind === "dm" ? " (DM)" : kind === "board" ? " · team log" : kind === "meeting" ? " · meeting" : "");
   renderChannelMembers();
+  renderChannelSwarm();
   renderChannelComposerSelects();
+  if (kind === "board") {
+    channelState.swarmWorkers = await loadBoardSwarmRows(id);
+    renderChannelSwarm();
+  }
   await pollChannel();
   if (channelTimer) clearInterval(channelTimer);
   channelTimer = setInterval(pollChannel, 2500);
@@ -2374,7 +3842,9 @@ function closeChannelSurface() {
   if (channelTimer) { clearInterval(channelTimer); channelTimer = null; }
   if (channelState) { try { window.ceo.roomLoopStop(channelState.room); } catch { /* ignore */ } }
   channelState = null;
-  document.getElementById("channel-surface")?.classList.add("hidden");
+  const surf = document.getElementById("channel-surface");
+  if (surf) { surf.classList.add("hidden"); surf.style.display = "none"; }
+  renderChannelSwarm();
 }
 
 function renderChannelMembers() {
@@ -2458,6 +3928,10 @@ function isWorkEvent(body) {
 
 async function pollChannel() {
   if (!channelState) return;
+  if (channelState.kind === "board") {
+    channelState.swarmWorkers = await loadBoardSwarmRows(channelState.id);
+    renderChannelSwarm();
+  }
   let r = {};
   try {
     r = await window.ceo.meetingRoom(channelState.room);
@@ -2603,6 +4077,21 @@ document.addEventListener("click", (e) => {
   if (e.target.closest("#chan-discuss")) { startChannelDiscussion(); return; }
   if (e.target.closest("#chan-send")) { sendChannelMessage(); return; }
   if (e.target.closest("#chan-add")) { addAgentToChannel(); return; }
+  const swarmTerminal = e.target.closest(".chan-swarm-terminal");
+  if (swarmTerminal && swarmTerminal.dataset.agent) {
+    openTerminalForAgent(swarmTerminal.dataset.agent);
+    return;
+  }
+  const swarmTask = e.target.closest(".chan-swarm-task");
+  if (swarmTask && swarmTask.dataset.taskId) {
+    openTaskInStudio({
+      board: swarmTask.dataset.board,
+      taskId: swarmTask.dataset.taskId,
+      taskTitle: swarmTask.dataset.taskTitle,
+      taskStatus: "running",
+    });
+    return;
+  }
 });
 document.addEventListener("change", (e) => {
   if (e.target && e.target.id === "chan-ceo") toggleCeoInRoom();
@@ -2824,12 +4313,98 @@ function renderPastMeetings(rooms = []) {
     </button>`).join("");
 }
 
+function renderStandupPanel(status = {}, runnerStatus = {}) {
+  const policies = Array.isArray(status.policies) ? status.policies : [];
+  const executions = Array.isArray(status.executions) ? status.executions : [];
+  const domain = currentDomain || "All";
+  const active = policies.find((p) => p.domain === domain) || policies[0] || null;
+  const enabled = active && active.enabled !== false;
+  const timeLocal = active?.timeLocal || "09:00";
+  const agendaLabel = active?.agendaDomain ? `Agenda domain: ${active.agendaDomain}` : "Agenda domain selected automatically";
+  const meetingId = active?.meetingId || "not scheduled";
+  const automatic = !!(enabled && runnerStatus.running && runnerStatus.policy?.allowStandups !== false);
+  const latest = executions
+    .filter((execution) => !active || execution.policyId === active.id)
+    .slice(0, 4);
+  const executionRows = latest.length
+    ? latest.map((execution) => {
+      const pending = (execution.synthesis?.proposals || []).filter((proposal) => proposal.status === "pending").length;
+      const statusTone = execution.status === "review_pending"
+        ? "text-amber-300"
+        : execution.status === "started"
+          ? "text-cyan-300"
+          : execution.status === "failed" || execution.status === "uncertain"
+            ? "text-red-300"
+            : "text-neutral-400";
+      const standaloneProposals = !(execution.briefRefs || []).length
+        ? (execution.synthesis?.proposals || []).filter((proposal) => proposal.status === "pending")
+        : [];
+      const proposalRows = standaloneProposals.map((proposal) => `
+        <div class="rounded-md border border-neutral-800 bg-black/35 px-2.5 py-2">
+          <div class="flex min-w-0 items-start gap-2">
+            <div class="min-w-0 flex-1">
+              <div class="text-[10px] uppercase text-neutral-600">${esc(proposal.type || "proposal")}</div>
+              <div class="mt-0.5 text-[11px] text-neutral-300">${esc(proposal.title || proposal.body)}</div>
+            </div>
+            <div class="flex shrink-0 gap-1">
+              <button class="standup-proposal-action rounded ${proposal.type === "blocker" ? "bg-red-700 hover:bg-red-600" : "bg-cyan-700 hover:bg-cyan-600"} px-2 py-1 text-[10px] text-white" data-action="approve" data-execution-id="${esc(execution.id)}" data-proposal-id="${esc(proposal.id)}" data-proposal-type="${esc(proposal.type)}">${esc(proposal.type === "blocker" ? "Raise escalation" : meetingProposalActionLabel(proposal.type))}</button>
+              <button class="standup-proposal-action rounded border border-neutral-700 px-2 py-1 text-[10px] text-neutral-300 hover:bg-neutral-800" data-action="reject" data-execution-id="${esc(execution.id)}" data-proposal-id="${esc(proposal.id)}" data-proposal-type="${esc(proposal.type)}">Reject</button>
+            </div>
+          </div>
+        </div>
+      `).join("");
+      const firstBrief = (execution.briefRefs || [])[0];
+      return `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2">
+        <div class="flex min-w-0 items-center gap-2">
+          <span class="h-2 w-2 shrink-0 rounded-full ${execution.status === "review_pending" ? "bg-amber-400" : execution.status === "started" ? "bg-cyan-400" : execution.status === "failed" || execution.status === "uncertain" ? "bg-red-400" : "bg-neutral-600"}"></span>
+          <div class="min-w-0 flex-1">
+            <div class="truncate text-xs text-neutral-200">${esc(execution.title || execution.meetingId || "Standup")}</div>
+            <div class="mt-0.5 truncate font-mono text-[10px] text-neutral-600">${esc(execution.room || execution.scheduledFor || execution.id)}</div>
+          </div>
+          <span class="shrink-0 text-[10px] ${statusTone}">${pending ? `${pending} review` : esc(execution.status || "pending")}</span>
+          ${firstBrief ? `<button class="standup-open-brief shrink-0 rounded border border-amber-800/70 px-1.5 py-1 text-[10px] text-amber-200 hover:bg-amber-950/30" data-board="${esc(firstBrief.board)}" data-task-id="${esc(firstBrief.taskId)}" data-title="${esc(execution.title || "Standup review")}">Review</button>` : ""}
+          ${execution.room ? `<button class="nav-mtg-open-room shrink-0 rounded border border-neutral-700 px-1.5 py-1 text-[10px] text-neutral-300 hover:bg-neutral-800" data-room="${esc(execution.room)}">Open</button>` : ""}
+        </div>
+        ${proposalRows ? `<div class="mt-2 space-y-1.5">${proposalRows}</div>` : ""}
+      </div>`;
+    }).join("")
+    : '<div class="text-xs text-neutral-600">No standup occurrences yet.</div>';
+  return `
+    <section class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="min-w-0 flex-1">
+          <div class="text-sm font-semibold text-neutral-100">Autonomous Standup</div>
+          <div class="mt-1 text-xs text-neutral-500">Daily project cadence that schedules a working room and creates proposal-only Agenda Items.</div>
+        </div>
+        <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] ${enabled ? "text-emerald-300" : "text-neutral-500"}">${enabled ? "enabled" : "not enabled"}</span>
+        <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] ${automatic ? "text-emerald-300" : "text-neutral-500"}">${automatic ? "automatic" : "manual"}</span>
+        <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] ${status.due ? "text-amber-300" : "text-neutral-500"}">${Number(status.due || 0)} due</span>
+        <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] ${status.pendingReview ? "text-amber-300" : "text-neutral-500"}">${Number(status.pendingReview || 0)} review</span>
+      </div>
+      <div class="mt-3 grid grid-cols-1 gap-3 md:grid-cols-[140px_minmax(0,1fr)_auto_auto]">
+        <label class="block text-xs text-neutral-400">Morning time
+          <input id="nav-standup-time" type="time" value="${esc(timeLocal)}" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-800/70 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" />
+        </label>
+        <div class="min-w-0 rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2">
+          <div class="truncate text-xs text-neutral-300">${esc(active?.domain || domain)} · ${esc(agendaLabel)}</div>
+          <div class="mt-1 truncate font-mono text-[10px] text-neutral-600">${esc(meetingId)}</div>
+        </div>
+        <button id="nav-standup-enable" class="self-end rounded-md bg-cyan-600 px-3 py-2 text-xs font-medium text-white hover:bg-cyan-500">Enable / Update</button>
+        <button id="nav-standup-run-due" class="self-end rounded-md border border-neutral-700 px-3 py-2 text-xs font-medium text-neutral-300 hover:bg-neutral-800">Start Due</button>
+      </div>
+      <div id="nav-standup-msg" class="mt-2 text-xs text-neutral-500"></div>
+      <div class="mt-3 space-y-2">${executionRows}</div>
+    </section>`;
+}
+
 async function renderMeetingsView() {
   setPanelTitle("Meetings");
   stopNavMeetingPoll();
   panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading session setup…</div>';
-  const [meetingOptions] = await Promise.all([
+  const [meetingOptions, standupStatus, runnerStatus] = await Promise.all([
     window.ceo.meetingOptions ? safeIpc(() => window.ceo.meetingOptions(), {}) : {},
+    window.ceo.standupStatus ? safeIpc(() => window.ceo.standupStatus(), {}) : {},
+    window.ceo.runnerStatus ? safeIpc(() => window.ceo.runnerStatus(), {}) : {},
     loadRegistry(),
   ]);
   navMeetingOpts = mergeMeetingRoster(meetingOptions || {});
@@ -2858,6 +4433,7 @@ async function renderMeetingsView() {
         </div>
         <button id="nav-mtg-toggle-create" class="rounded-md bg-cyan-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-cyan-500">${navMeetingCreateOpen ? "Close Create" : "Create Meeting"}</button>
       </div>
+      ${renderStandupPanel(standupStatus || {}, runnerStatus || {})}
       <div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <section class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
           <div class="mb-3 flex items-center gap-2">
@@ -2943,9 +4519,9 @@ async function renderMeetingsView() {
       </div>
       <section class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
         <div class="flex items-center gap-2 text-[11px] uppercase tracking-wider text-neutral-500">
-          <span>Live Room</span><span id="nav-mtg-room" class="font-mono text-neutral-400 normal-case">${esc(navMeetingRoom || "")}</span><span id="nav-mtg-state" class="ml-auto normal-case"></span>
+          <span>Live Room</span><span id="nav-mtg-room" class="font-mono text-cyan-400 normal-case">${esc(navMeetingRoom || "")}</span><span id="nav-mtg-state" class="ml-auto normal-case"></span>
         </div>
-        <div id="nav-mtg-transcript" class="mt-3 max-h-[520px] overflow-auto space-y-2 pr-1 text-sm"><div class="rounded-lg border border-neutral-800 bg-neutral-950/45 p-3 text-neutral-600">No meeting started.</div></div>
+        <div id="nav-mtg-transcript" class="mt-3 max-h-[520px] overflow-auto pr-1"><div class="rounded-lg border border-neutral-800 bg-neutral-950/45 p-3 text-neutral-600">No meeting started.</div></div>
         <div id="nav-mtg-req" class="hidden mt-4 border-t border-neutral-800/60 pt-3">
           <div class="mb-1 flex items-center gap-2">
             <div class="text-[11px] uppercase tracking-wider text-emerald-400/80">Saved Result</div>
@@ -3049,6 +4625,604 @@ async function deleteScheduledMeeting(id) {
   await renderMeetingsView();
 }
 
+async function enableProjectStandup() {
+  const msg = $("#nav-standup-msg");
+  const timeLocal = ($("#nav-standup-time") && $("#nav-standup-time").value) || "09:00";
+  if (msg) msg.textContent = "scheduling...";
+  let r = {};
+  try {
+    r = await window.ceo.standupConfigure({
+      enabled: true,
+      domain: currentDomain || "All",
+      board: "ceo-studio",
+      timeLocal,
+    });
+  } catch (e) {
+    r = { ok: false, reason: String(e) };
+  }
+  if (!r || !r.ok) {
+    if (msg) msg.textContent = `standup failed: ${r ? r.reason : "unknown"}`;
+    return;
+  }
+  await renderMeetingsView();
+}
+
+async function runDueStandups() {
+  const msg = $("#nav-standup-msg");
+  if (msg) msg.textContent = "checking due standups...";
+  let r = {};
+  try { r = await window.ceo.standupRunDue(); } catch (e) { r = { ok: false, reason: String(e) }; }
+  if (!r || !r.ok) {
+    if (msg) msg.textContent = `standup failed: ${r ? r.reason : "unknown"}`;
+    return;
+  }
+  if (msg) msg.textContent = `${r.due || 0} due standup(s) started`;
+  await renderMeetingsView();
+}
+
+async function reviewStandaloneStandupProposal(button) {
+  if (!button || !window.ceo.standupProposalAction) return;
+  const action = button.dataset.action;
+  const type = button.dataset.proposalType;
+  if (action === "approve" && type === "blocker") {
+    const confirmed = window.confirm("Approve this blocker and add it to Human Escalations?");
+    if (!confirmed) return;
+  }
+  button.disabled = true;
+  let result;
+  try {
+    result = await window.ceo.standupProposalAction({
+      executionId: button.dataset.executionId,
+      proposalId: button.dataset.proposalId,
+      action,
+      humanApproved: action === "approve",
+      reviewedBy: "human",
+    });
+  } catch (error) {
+    result = { ok: false, reason: String(error) };
+  }
+  if (!result || !result.ok) {
+    button.disabled = false;
+    alert(`Could not review standup proposal: ${result ? result.reason : "unknown"}`);
+    return;
+  }
+  await refreshEscalations();
+  await renderMeetingsView();
+}
+
+function localDateValue(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function currentStandupPolicy(status = {}) {
+  const policies = Array.isArray(status.policies) ? status.policies : [];
+  const domain = currentDomain || "All";
+  return policies.find((p) => p.domain === domain) || policies[0] || null;
+}
+
+function goalResultOutput(title, result) {
+  return `${title}\n${JSON.stringify(result || {}, null, 2).slice(0, 6000)}`;
+}
+
+function runnerDryRunSummary(result = {}) {
+  const phases = result.phases || {};
+  const count = (name) => Array.isArray(phases[name]) ? phases[name].length : (phases[name] ? 1 : 0);
+  const standupPhase = phases.standups || {};
+  return {
+    ok: !!result.ok,
+    skipped: !!result.skipped,
+    reason: result.reason || "",
+    dryRun: result.policy && result.policy.dryRun,
+    boards: result.boards || [],
+    errors: result.errors || [],
+    standups: {
+      skipped: standupPhase.skipped || "",
+      due: Number(standupPhase.due?.due || 0),
+      completed: Array.isArray(standupPhase.reconcile?.completed) ? standupPhase.reconcile.completed.length : 0,
+    },
+    phases: {
+      unblock: count("unblock"),
+      reap: count("reap"),
+      research: count("research"),
+      staleRunning: count("staleRunning"),
+      plan: count("plan"),
+      assign: count("assign"),
+      execute: count("execute"),
+      review: count("review"),
+    },
+  };
+}
+
+function renderGoalsOperatingPanel({ goals = [], autonomyRes = {}, runnerRes = {}, standupStatus = {}, board = "" } = {}) {
+  const today = localDateValue();
+  const dailyGoals = goals.filter((g) => g.layer === "daily" && g.status === "active");
+  const todayGoals = dailyGoals.filter((g) => !g.horizonStart || g.horizonStart === today || g.horizonEnd === today);
+  const autonomyPolicy = (autonomyRes && autonomyRes.policy) || {};
+  const autonomyState = (autonomyRes && autonomyRes.state) || {};
+  const runnerPolicy = (runnerRes && runnerRes.policy) || {};
+  const standupPolicy = currentStandupPolicy(standupStatus);
+  const standupEnabled = standupPolicy && standupPolicy.enabled !== false;
+  const standupTime = standupPolicy?.timeLocal || "09:00";
+  const standupExecutions = (standupStatus.executions || [])
+    .filter((execution) => !standupPolicy || execution.policyId === standupPolicy.id)
+    .slice(0, 3);
+  const cadenceAutomatic = !!(runnerRes && runnerRes.running && runnerPolicy.allowStandups !== false && standupEnabled);
+  const standupExecutionRows = standupExecutions.length
+    ? standupExecutions.map((execution) => {
+      const pending = (execution.synthesis?.proposals || []).filter((proposal) => proposal.status === "pending").length;
+      return `<div class="flex min-w-0 items-center gap-2 border-t border-neutral-800/70 py-2 first:border-0">
+        <span class="h-2 w-2 shrink-0 rounded-full ${execution.status === "review_pending" ? "bg-amber-400" : execution.status === "started" ? "bg-cyan-400" : "bg-neutral-600"}"></span>
+        <span class="min-w-0 flex-1 truncate text-[11px] text-neutral-300">${esc(execution.title || execution.meetingId)}</span>
+        <span class="shrink-0 text-[10px] ${pending ? "text-amber-300" : "text-neutral-600"}">${pending ? `${pending} review` : esc(execution.status || "")}</span>
+      </div>`;
+    }).join("")
+    : '<div class="py-2 text-[11px] text-neutral-600">No occurrences recorded.</div>';
+  const outputHtml = goalsOpState.output
+    ? `<pre id="goals-op-output" class="mt-3 max-h-72 overflow-auto rounded-xl border border-neutral-800 bg-black/70 p-3 font-mono text-[11px] leading-relaxed text-emerald-100/85 whitespace-pre-wrap">${esc(goalsOpState.output)}</pre>`
+    : `<pre id="goals-op-output" class="hidden mt-3 max-h-72 overflow-auto rounded-xl border border-neutral-800 bg-black/70 p-3 font-mono text-[11px] leading-relaxed text-emerald-100/85 whitespace-pre-wrap"></pre>`;
+  return `<section class="rounded-2xl border border-cyan-700/30 bg-cyan-950/10 p-4">
+    <div class="flex flex-wrap items-start gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="text-sm font-semibold text-neutral-100">Daily Operating Loop</div>
+        <div class="mt-1 text-xs text-neutral-500">Goal -> standup -> review -> autonomy proposal -> runner dry-run. Board: <span class="font-mono text-neutral-300">${esc(board || "unknown")}</span></div>
+      </div>
+      <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] ${autonomyRes && autonomyRes.running ? "text-emerald-300" : "text-neutral-500"}">autonomy ${autonomyRes && autonomyRes.running ? "running" : "stopped"}</span>
+      <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] ${runnerRes && runnerRes.running ? "text-emerald-300" : "text-neutral-500"}">runner ${runnerRes && runnerRes.running ? "running" : "stopped"}</span>
+      <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] ${standupEnabled ? "text-emerald-300" : "text-neutral-500"}">standup ${standupEnabled ? "enabled" : "not enabled"}</span>
+      <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] ${cadenceAutomatic ? "text-emerald-300" : "text-neutral-500"}">cadence ${cadenceAutomatic ? "automatic" : "manual"}</span>
+    </div>
+    <div class="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1.05fr)_minmax(320px,0.95fr)]">
+      <div class="rounded-xl border border-neutral-800 bg-neutral-950/45 p-3">
+        <div class="mb-2 flex items-center gap-2">
+          <div class="text-xs font-semibold uppercase tracking-wider text-neutral-400">Today's Goal</div>
+          <span class="rounded border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">${todayGoals.length} active today</span>
+        </div>
+        <input id="goal-daily-title" class="w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" placeholder="What should the swarm make true today?" />
+        <textarea id="goal-daily-outcome" rows="2" class="mt-2 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" placeholder="Outcome / why this matters"></textarea>
+        <textarea id="goal-daily-criteria" rows="3" class="mt-2 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" placeholder="Success criteria, one per line"></textarea>
+        <button id="goal-daily-create" class="mt-2 rounded-md bg-cyan-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-cyan-500">Create Daily Goal</button>
+      </div>
+      <div class="rounded-xl border border-neutral-800 bg-neutral-950/45 p-3">
+        <div class="mb-2 text-xs font-semibold uppercase tracking-wider text-neutral-400">Cadence Controls</div>
+        <div class="grid grid-cols-2 gap-2 text-xs">
+          ${detailRow("Autonomy mode", esc(autonomyPolicy.mode || "propose"))}
+          ${detailRow("Last run", esc(autonomyState.lastRunAt ? new Date(autonomyState.lastRunAt).toLocaleString() : "never"))}
+          ${detailRow("Runner interval", `${esc(runnerPolicy.intervalMinutes || 15)}m`)}
+          ${detailRow("Standup", standupPolicy ? `${esc(standupPolicy.meetingId)} / ${esc(standupTime)}` : "not configured")}
+          ${detailRow("Due / review", `${Number(standupStatus.due || 0)} / ${Number(standupStatus.pendingReview || 0)}`)}
+          ${detailRow("Last cadence", esc(runnerRes?.state?.lastResult?.standups?.skipped || (standupExecutions[0]?.status || "never")))}
+        </div>
+        <label class="mt-3 block text-xs text-neutral-400">Standup time
+          <input id="goals-standup-time" type="time" value="${esc(standupTime)}" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" />
+        </label>
+        <div class="mt-3 grid grid-cols-2 gap-2">
+          <button id="goals-standup-configure" class="rounded-md border border-cyan-700/70 bg-cyan-950/25 px-2 py-1.5 text-xs text-cyan-100 hover:bg-cyan-900/35">Enable Standup</button>
+          <button id="goals-standup-start" class="rounded-md bg-cyan-600 px-2 py-1.5 text-xs font-medium text-white hover:bg-cyan-500">Start Standup</button>
+          <button id="goals-review-daily" class="rounded-md border border-neutral-700 px-2 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800">Review Goals</button>
+          <button id="goals-autonomy-cycle" class="rounded-md border border-neutral-700 px-2 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800">Autonomy Cycle</button>
+          <button id="goals-runner-toggle" class="col-span-2 rounded-md ${runnerRes && runnerRes.running ? "border border-red-800/70 bg-red-950/20 text-red-200 hover:bg-red-950/40" : "bg-cyan-600 text-white hover:bg-cyan-500"} px-2 py-1.5 text-xs font-medium">${runnerRes && runnerRes.running ? "Stop Runner" : "Start Runner"}</button>
+          <button id="goals-runner-dry-run" class="col-span-2 rounded-md border border-amber-700/60 bg-amber-950/20 px-2 py-1.5 text-xs text-amber-100 hover:bg-amber-900/30">Runner Dry-Run</button>
+        </div>
+        <div class="mt-3 rounded-lg border border-neutral-800 bg-neutral-950/40 px-3">${standupExecutionRows}</div>
+      </div>
+    </div>
+    <div id="goals-op-msg" class="mt-3 text-xs text-neutral-500">${esc(goalsOpState.message || "")}</div>
+    ${outputHtml}
+  </section>`;
+}
+
+function setGoalsOpStatus(message, output = null) {
+  goalsOpState = { message: message || "", output: output == null ? goalsOpState.output : String(output || "") };
+  const msg = $("#goals-op-msg");
+  if (msg) msg.textContent = goalsOpState.message;
+  const out = $("#goals-op-output");
+  if (out && output != null) {
+    out.textContent = goalsOpState.output;
+    out.classList.toggle("hidden", !goalsOpState.output);
+  }
+}
+
+async function boardForGoalsOps() {
+  return await currentBoardSlug();
+}
+
+async function createDailyGoalFromPanel() {
+  const title = ($("#goal-daily-title") && $("#goal-daily-title").value || "").trim();
+  const outcome = ($("#goal-daily-outcome") && $("#goal-daily-outcome").value || "").trim();
+  const criteria = ($("#goal-daily-criteria") && $("#goal-daily-criteria").value || "").trim();
+  if (!title) { setGoalsOpStatus("daily goal title required"); return; }
+  setGoalsOpStatus("creating daily goal...");
+  const today = localDateValue();
+  let r = {};
+  try {
+    r = await window.ceo.upsertGoal({
+      layer: "daily",
+      title,
+      outcome,
+      domain: currentDomain || "All",
+      status: "active",
+      horizonStart: today,
+      horizonEnd: today,
+      successCriteria: criteria,
+    });
+  } catch (e) {
+    r = { ok: false, reason: String(e) };
+  }
+  goalsOpState = {
+    message: r && r.ok ? `created ${r.goal.id}` : `goal failed: ${r ? r.reason : "unknown"}`,
+    output: goalResultOutput("Daily goal result", r),
+  };
+  await renderGoalsView();
+}
+
+async function reviewDailyGoalsFromPanel() {
+  setGoalsOpStatus("reviewing daily goals...");
+  const board = await boardForGoalsOps();
+  let r = {};
+  try { r = await window.ceo.reviewGoals({ board, layer: "daily", domain: currentDomain || "All" }); }
+  catch (e) { r = { ok: false, reason: String(e) }; }
+  setGoalsOpStatus(r && r.ok ? `daily review complete: ${(r.review && r.review.goalReviews || []).length} goal(s)` : `review failed: ${r ? r.reason : "unknown"}`, goalResultOutput("Daily goal review", r));
+}
+
+async function runGoalsAutonomyCycle() {
+  setGoalsOpStatus("running conservative autonomy cycle...");
+  const board = await boardForGoalsOps();
+  let r = {};
+  try { r = await window.ceo.autonomyRunCycle({ board, domain: currentDomain || "All", force: true }); }
+  catch (e) { r = { ok: false, reason: String(e) }; }
+  const actionCount = ((r && r.proposedActions) || []).length;
+  setGoalsOpStatus(r && r.ok ? `autonomy cycle complete: ${actionCount} proposed action(s)` : `autonomy failed: ${r ? r.reason : "unknown"}`, goalResultOutput("Autonomy cycle", r));
+}
+
+async function runGoalsRunnerDryRun() {
+  setGoalsOpStatus("running swarm dry-run...");
+  const board = await boardForGoalsOps();
+  let r = {};
+  try {
+    r = await window.ceo.runnerRunOnce({
+      policy: {
+        boards: board ? [board] : "all",
+        domain: currentDomain || "All",
+        dryRun: true,
+        execute: true,
+        maxDispatchPerCycle: 1,
+      },
+    });
+  } catch (e) {
+    r = { ok: false, reason: String(e) };
+  }
+  const summary = runnerDryRunSummary(r || {});
+  setGoalsOpStatus(r && r.ok ? "runner dry-run complete" : `runner dry-run failed: ${r ? r.reason : "unknown"}`, goalResultOutput("Runner dry-run summary", summary));
+}
+
+async function toggleGoalsRunner() {
+  if (!window.ceo.runnerStatus || !window.ceo.runnerStart || !window.ceo.runnerStop) return;
+  setGoalsOpStatus("updating autonomy runner...");
+  let current = {};
+  try { current = await window.ceo.runnerStatus(); } catch { current = {}; }
+  let result;
+  try {
+    result = current && current.running
+      ? await window.ceo.runnerStop()
+      : await window.ceo.runnerStart({ policy: { allowStandups: true } });
+  } catch (error) {
+    result = { ok: false, reason: String(error) };
+  }
+  goalsOpState = {
+    message: result && result.ok
+      ? `runner ${result.running ? "started" : "stopped"}`
+      : `runner update failed: ${result ? result.reason : "unknown"}`,
+    output: goalResultOutput("Autonomy runner", result),
+  };
+  await renderGoalsView();
+}
+
+async function configureGoalsStandup() {
+  const timeLocal = ($("#goals-standup-time") && $("#goals-standup-time").value) || "09:00";
+  const board = await boardForGoalsOps();
+  setGoalsOpStatus("configuring daily standup...");
+  let r = {};
+  try {
+    r = await window.ceo.standupConfigure({
+      enabled: true,
+      domain: currentDomain || "All",
+      board: board || "ceo-studio",
+      timeLocal,
+    });
+  } catch (e) {
+    r = { ok: false, reason: String(e) };
+  }
+  goalsOpState = {
+    message: r && r.ok ? `standup enabled: ${r.policy.meetingId}` : `standup failed: ${r ? r.reason : "unknown"}`,
+    output: goalResultOutput("Standup configure", r),
+  };
+  await renderGoalsView();
+}
+
+async function startGoalsStandupNow() {
+  setGoalsOpStatus("starting standup room...");
+  let status = {};
+  try { status = await window.ceo.standupStatus(); } catch { status = {}; }
+  let policy = currentStandupPolicy(status);
+  if (!policy) {
+    const board = await boardForGoalsOps();
+    const timeLocal = ($("#goals-standup-time") && $("#goals-standup-time").value) || "09:00";
+    const configured = await window.ceo.standupConfigure({
+      enabled: true,
+      domain: currentDomain || "All",
+      board: board || "ceo-studio",
+      timeLocal,
+    });
+    if (!configured || !configured.ok) {
+      setGoalsOpStatus(`standup failed: ${configured ? configured.reason : "unknown"}`, goalResultOutput("Standup start", configured));
+      return;
+    }
+    policy = configured.policy;
+  }
+  let r = {};
+  try { r = await window.ceo.meetingScheduleStart(policy.meetingId); }
+  catch (e) { r = { ok: false, reason: String(e) }; }
+  if (!r || !r.ok) {
+    setGoalsOpStatus(`standup start failed: ${r ? r.reason : "unknown"}`, goalResultOutput("Standup start", r));
+    return;
+  }
+  try {
+    await window.ceo.standupConfigure({
+      enabled: true,
+      domain: policy.domain || currentDomain || "All",
+      board: policy.board || await boardForGoalsOps() || "ceo-studio",
+      timeLocal: policy.timeLocal || (($("#goals-standup-time") && $("#goals-standup-time").value) || "09:00"),
+    });
+  } catch { /* keep the started room even if reschedule refresh fails */ }
+  navMeetingRoom = r.room;
+  navMeetingMeta = null;
+  goalsOpState = { message: `standup started: ${r.room}`, output: goalResultOutput("Standup start", r) };
+  await openView("meetings");
+}
+
+async function renderGoalsView() {
+  setPanelTitle("Goals");
+  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading goals…</div>';
+  
+  if (!currentProject) {
+    panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Open a project first to view goals.</div>';
+    return;
+  }
+
+  let r;
+  let board = "";
+  let autonomyRes = {};
+  let runnerRes = {};
+  let standupStatus = {};
+  try {
+    const loaded = await Promise.all([
+      window.ceo.listGoals ? safeIpc(() => window.ceo.listGoals({ domain: currentDomain }), { ok: false, reason: "goals API unavailable" }) : { ok: false, reason: "goals API unavailable" },
+      currentBoardSlug(),
+      window.ceo.autonomyStatus ? safeIpc(() => window.ceo.autonomyStatus(), {}) : {},
+      window.ceo.runnerStatus ? safeIpc(() => window.ceo.runnerStatus(), {}) : {},
+      window.ceo.standupStatus ? safeIpc(() => window.ceo.standupStatus(), {}) : {},
+    ]);
+    [r, board, autonomyRes, runnerRes, standupStatus] = loaded;
+  } catch (e) {
+    r = { ok: false, reason: String(e) };
+  }
+
+  if (!r || !r.ok) {
+    panelContent().innerHTML = `<div class="text-neutral-500 text-sm">Could not load goals: ${r ? r.reason : "unknown"}</div>`;
+    return;
+  }
+
+  const goals = r.goals || [];
+  const byLayer = {};
+  goals.forEach(g => {
+    if (!byLayer[g.layer]) byLayer[g.layer] = [];
+    byLayer[g.layer].push(g);
+  });
+
+  const layers = ["daily", "weekly", "monthly", "quarterly", "roadmap"];
+  const layerHtml = layers.map(layer => {
+    const layerGoals = byLayer[layer] || [];
+    if (!layerGoals.length) return '';
+    
+    return `<div class="mb-6">
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-sm font-semibold text-neutral-100 capitalize">${layer}</span>
+        <span class="text-[11px] text-neutral-500">${layerGoals.length} goal${layerGoals.length !== 1 ? 's' : ''}</span>
+      </div>
+      <div class="space-y-2">
+        ${layerGoals.map(goal => `
+          <div class="rounded-xl border border-neutral-800 bg-neutral-900/50 p-4">
+            <div class="flex items-start gap-3">
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 mb-1">
+                  <span class="text-sm font-medium text-neutral-100">${esc(goal.title)}</span>
+                  <span class="text-[10px] rounded-full border ${goal.status === 'active' ? 'border-emerald-500/40 text-emerald-300' : goal.status === 'done' ? 'border-neutral-600 text-neutral-400' : 'border-amber-500/30 text-amber-300'} bg-neutral-950/70 px-2 py-0.5 uppercase tracking-wider">${esc(goal.status)}</span>
+                  ${goal.domain && goal.domain !== 'All' ? `<span class="text-[10px] bg-cyan-500/20 text-cyan-400 px-1.5 py-0.5 rounded">${esc(goal.domain)}</span>` : ''}
+                </div>
+                ${goal.outcome ? `<div class="text-xs text-neutral-400 mb-2 line-clamp-2">${esc(goal.outcome)}</div>` : ''}
+                ${goal.successCriteria && goal.successCriteria.length ? `
+                  <div class="text-[11px] text-neutral-500">
+                    <div class="mb-1">Success criteria:</div>
+                    <ul class="list-disc list-inside space-y-0.5">
+                      ${goal.successCriteria.slice(0, 3).map(c => `<li>${esc(c)}</li>`).join('')}
+                      ${goal.successCriteria.length > 3 ? `<li class="text-neutral-600">+${goal.successCriteria.length - 3} more</li>` : ''}
+                    </ul>
+                  </div>
+                ` : ''}
+              </div>
+              <div class="text-[10px] text-neutral-600 whitespace-nowrap">
+                ${goal.updatedAt ? new Date(goal.updatedAt).toLocaleDateString() : ''}
+              </div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>`;
+  }).join('');
+
+  panelContent().innerHTML = `
+    <div class="space-y-4">
+      <div class="flex items-center gap-2">
+        <span class="text-sm font-semibold text-neutral-100">Project Goals</span>
+        <span class="text-[11px] text-neutral-500">${goals.length} total</span>
+        ${currentDomain && currentDomain !== 'All' ? `<span class="text-[11px] text-cyan-400">Filtered by: ${esc(currentDomain)}</span>` : ''}
+      </div>
+      ${renderGoalsOperatingPanel({ goals, autonomyRes, runnerRes, standupStatus, board })}
+      ${layerHtml || '<div class="text-neutral-500 text-sm">No goals found. Create goals using the CEO chat with the set_goal command.</div>'}
+    </div>
+  `;
+}
+
+async function renderTerminalView() {
+  setPanelTitle("Terminal");
+  const host = panelContent();
+  host.innerHTML = '';
+
+  const container = document.createElement('div');
+  container.className = 'h-full flex flex-col';
+  host.appendChild(container);
+
+  if (window.CEOPuTI) {
+    window.CEOPuTI.mount(container);
+    await window.CEOPuTI.refreshAgents();
+    const pendingAgent = window.__ceoPendingTerminalAgent;
+    if (pendingAgent && window.CEOPuTI.openAgent) {
+      window.__ceoPendingTerminalAgent = null;
+      await window.CEOPuTI.openAgent(pendingAgent);
+    }
+  } else {
+    host.innerHTML = '<div class="text-neutral-500 text-sm p-4">PuTI terminal module is loading. If this persists, reload the app.</div>';
+  }
+}
+
+async function openTerminalForAgent(agentId) {
+  const id = String(agentId || "").trim();
+  if (!id) return false;
+  window.__ceoPendingTerminalAgent = id;
+  await openView("terminal");
+  if (window.CEOPuTI && window.CEOPuTI.openAgent) {
+    await window.CEOPuTI.openAgent(id);
+    return true;
+  }
+  return false;
+}
+
+async function renderVoiceView() {
+  setPanelTitle("Voice Pilot");
+  const host = panelContent();
+  host.innerHTML = '';
+
+  // Create voice panel container
+  const container = document.createElement('div');
+  container.id = 'voice-panel-container';
+  container.className = 'h-full';
+  host.appendChild(container);
+
+  // Initialize voice panel if available
+  if (window.voicePanel && window.voicePanel.init) {
+    window.voicePanel.init();
+  } else {
+    // Fallback: show manual interface
+    host.innerHTML = `
+      <div class="h-full flex flex-col p-4">
+        <div class="flex-1 overflow-auto space-y-3" id="voice-transcript"></div>
+        <div class="flex items-center gap-3 pt-3 border-t border-neutral-800">
+          <select id="voice-pilot-select" class="bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-sm">
+            <option value="ceo">CEO</option>
+            <option value="ba">BA</option>
+            <option value="architect">Architect</option>
+            <option value="pm">PM</option>
+            <option value="builder">Builder</option>
+          </select>
+          <button id="voice-mic-btn" class="flex-1 bg-red-600 hover:bg-red-500 text-white rounded px-4 py-2 text-sm font-medium transition">
+            🎤 Hold to Speak
+          </button>
+          <button id="voice-stop-btn" class="bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 rounded px-3 py-2 text-sm">
+            ⏹
+          </button>
+        </div>
+        <div class="text-xs text-neutral-500 pt-2">
+          Web Speech API (local) → Hermes/Devin → Piper TTS (local)
+        </div>
+      </div>
+    `;
+
+    // Wire up fallback controls
+    const micBtn = document.getElementById('voice-mic-btn');
+    const stopBtn = document.getElementById('voice-stop-btn');
+    const pilotSelect = document.getElementById('voice-pilot-select');
+    const transcript = document.getElementById('voice-transcript');
+
+    if (pilotSelect) {
+      pilotSelect.addEventListener('change', (e) => {
+        if (window.ceo && window.ceo.voiceChatSetPilot) {
+          window.ceo.voiceChatSetPilot(e.target.value);
+        }
+      });
+    }
+
+    if (stopBtn) {
+      stopBtn.addEventListener('click', () => {
+        if (window.ceo && window.ceo.voiceChatInterrupt) {
+          window.ceo.voiceChatInterrupt();
+        }
+      });
+    }
+
+    if (micBtn) {
+      micBtn.addEventListener('mousedown', startVoiceInput);
+      micBtn.addEventListener('mouseup', stopVoiceInput);
+      micBtn.addEventListener('mouseleave', stopVoiceInput);
+    }
+
+    function startVoiceInput() {
+      micBtn.classList.add('bg-red-700');
+      micBtn.textContent = '🎤 Listening...';
+
+      // Try to use Web Speech API directly as fallback
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (SpeechRecognition && !window._voiceRecognition) {
+        const rec = new SpeechRecognition();
+        rec.continuous = false;
+        rec.interimResults = true;
+        rec.lang = 'en-US';
+
+        rec.onresult = (e) => {
+          const text = Array.from(e.results).map(r => r[0].transcript).join('');
+          if (transcript) {
+            transcript.innerHTML += `<div class="text-neutral-300">You: ${text}</div>`;
+          }
+        };
+
+        rec.onend = async () => {
+          micBtn.classList.remove('bg-red-700');
+          micBtn.textContent = '🎤 Hold to Speak';
+          window._voiceRecognition = null;
+
+          // Send to agent
+          const finalText = transcript?.lastElementChild?.textContent?.replace('You: ', '') || '';
+          if (finalText && window.ceo && window.ceo.voiceChat) {
+            const response = await window.ceo.voiceChat(finalText);
+            if (response.ok && transcript) {
+              transcript.innerHTML += `<div class="text-cyan-400">${response.agentName || 'Agent'}: ${response.text}</div>`;
+            }
+          }
+        };
+
+        rec.start();
+        window._voiceRecognition = rec;
+      }
+    }
+
+    function stopVoiceInput() {
+      if (window._voiceRecognition) {
+        window._voiceRecognition.stop();
+      }
+    }
+  }
+}
+
 async function openPastMeetingRoom(room) {
   if (!room) return;
   navMeetingRoom = room;
@@ -3069,13 +5243,35 @@ async function pollNavMeeting() {
     const feed = r.feed || [];
     const nearBottom = host.scrollHeight - host.scrollTop - host.clientHeight < 80;
     const previousTop = host.scrollTop;
-    host.innerHTML = feed.length ? feed.map((it) => {
-      const isFac = /facilitator|orchestrator/i.test(it.speaker);
-      return `<div class="rounded-lg border ${isFac ? "border-cyan-500/30 bg-cyan-950/10" : "border-neutral-800 bg-neutral-900/50"} p-2.5">
-        <div class="text-[11px] font-medium ${isFac ? "text-cyan-300" : "text-neutral-300"}">${esc(it.speaker)}</div>
-        <div class="mt-1 whitespace-pre-wrap text-[12px] text-neutral-300">${esc(it.body)}</div>
+    
+    if (!feed.length) {
+      host.innerHTML = `<div class="flex flex-col items-center justify-center h-full text-neutral-500">
+        <div class="text-4xl mb-2">💬</div>
+        <div class="text-sm">No messages in this room yet</div>
+        <div class="text-xs text-neutral-600 mt-1">Waiting for the session to begin…</div>
       </div>`;
-    }).join("") : `<div class="text-neutral-600">Waiting for the session to begin…</div>`;
+    } else {
+      host.innerHTML = `<div class="space-y-3">
+        ${feed.map((it, idx) => {
+          const isFac = /facilitator|orchestrator/i.test(it.speaker);
+          const isSystem = /system|facilitator/i.test(it.speaker);
+          const speakerColor = isFac ? "text-cyan-300" : isSystem ? "text-amber-300" : "text-emerald-300";
+          const borderClass = isFac ? "border-cyan-500/20 bg-cyan-950/20" : isSystem ? "border-amber-500/20 bg-amber-950/20" : "border-neutral-800 bg-neutral-900/50";
+          
+          return `<div class="rounded-xl border ${borderClass} p-3 hover:border-neutral-700 transition">
+            <div class="flex items-center gap-2 mb-2">
+              <div class="w-6 h-6 rounded-full ${isFac ? "bg-cyan-500/20" : isSystem ? "bg-amber-500/20" : "bg-emerald-500/20"} flex items-center justify-center">
+                <span class="text-xs">${isFac ? "🎯" : isSystem ? "⚙️" : "👤"}</span>
+              </div>
+              <div class="text-xs font-semibold ${speakerColor}">${esc(it.speaker)}</div>
+              ${it.timestamp ? `<div class="ml-auto text-[10px] text-neutral-600">${new Date(it.timestamp).toLocaleTimeString()}</div>` : ''}
+            </div>
+            <div class="text-sm text-neutral-200 leading-relaxed whitespace-pre-wrap">${esc(it.body)}</div>
+          </div>`;
+        }).join("")}
+      </div>`;
+    }
+    
     host.scrollTop = nearBottom ? host.scrollHeight : previousTop;
   }
   const state = $("#nav-mtg-state");
@@ -3105,25 +5301,39 @@ async function pollNavMeeting() {
 }
 
 async function openView(view) {
-  studioView = view || "domain";
+  const next = view || "domain";
+  stopBriefRunOpsTimer();
+  if (studioView === "sessions" && next !== "sessions" && window.StudioSessions && window.StudioSessions.onLeave) {
+    window.StudioSessions.onLeave();
+  }
+  studioView = next;
   setActiveNav(studioView);
   if (studioView !== "meetings") stopNavMeetingPoll();
+  if (studioView !== "agents") stopActiveAgentsTimer();
   closeAgentSurface();
   switch (studioView) {
+    case "sessions":
+      if (window.StudioSessions) return window.StudioSessions.openView();
+      panelContent().innerHTML = '<div class="text-sm text-red-300">Sessions module failed to load. Reload the app.</div>';
+      return;
     case "board": return renderBoardView();
     case "tasks": return renderTasksView();
     case "agents": return renderAgentsView();
+    case "skills": return renderSkillsView();
     case "teams": return renderTeamsView();
     case "personas": return renderPersonasView();
     case "channels": return renderChannelsView();
     case "meetings": return renderMeetingsView();
+    case "goals": return renderGoalsView();
+    case "terminal": return renderTerminalView();
+    case "voice": return renderVoiceView();
     case "domain":
     default: return renderStudioBoard(currentDomain);
   }
 }
 
 window.ceoUI = {
-  appendStream, setAgentState, setVoiceStatus, renderMeter,
+  appendStream, setAgentState, setVoiceStatus, renderMeter, setPanelTitle,
   hasProject: () => !!currentProject,
   getContext: () => ({
     project: currentProject ? { id: currentProject.id, name: currentProject.name, slug: currentProject.slug } : null,
@@ -3187,6 +5397,7 @@ window.ceoUI = {
   },
   // Voice agent render control: drive the left nav and the agent/team panels.
   openView: (view) => openView(view),
+  openTerminal: openTerminalForAgent,
   async openChannel(key) {
     await openView("channels");
     await openChannel(key);
@@ -3216,8 +5427,47 @@ $("#create-menu-toggle").addEventListener("click", (e) => {
 });
 $("#create-project").addEventListener("click", createProject);
 $("#create-domain").addEventListener("click", createDomain);
+$("#create-brief")?.addEventListener("click", () => {
+  closeCreateMenu();
+  if (window.BriefBuilder) window.BriefBuilder.start();
+  else appendStream("sys", "Brief builder not loaded.");
+});
 $("#create-task").addEventListener("click", () => createTask());
+$("#human-escalations")?.addEventListener("click", async (e) => {
+  e.stopPropagation();
+  escalationPanelOpen = !escalationPanelOpen;
+  await refreshEscalations();
+});
+$("#human-escalation-panel")?.addEventListener("click", async (e) => {
+  e.stopPropagation();
+  const row = e.target.closest("[data-notification-id]");
+  if (!row) return;
+  const id = row.dataset.notificationId;
+  const notice = escalationNotifications.find((n) => n.id === id);
+  if (e.target.closest(".notif-open") && notice) {
+    if (notice.metadata && notice.metadata.room) {
+      await openView("meetings");
+      await openPastMeetingRoom(notice.metadata.room);
+      return;
+    }
+    await openTaskInStudio({
+      board: notice.board,
+      taskId: notice.taskId,
+      taskTitle: notice.taskTitle || notice.title,
+      taskStatus: "blocked",
+    });
+    return;
+  }
+  if (e.target.closest(".notif-ack")) {
+    await window.ceo.notificationsAck(id);
+    await refreshEscalations();
+  }
+});
 document.addEventListener("click", (e) => {
+  if (!e.target.closest("#human-escalation-panel") && !e.target.closest("#human-escalations")) {
+    escalationPanelOpen = false;
+    renderEscalationPanel();
+  }
   if (!e.target.closest("#create-menu") && !e.target.closest("#create-menu-toggle")) closeCreateMenu();
 });
 $("#project-switcher").addEventListener("change", (e) => openProject(e.target.value));
@@ -3237,6 +5487,7 @@ $("#file-tree").addEventListener("click", (e) => {
   if (node) showFile(node.dataset.path);
 });
 panelContent().addEventListener("click", async (e) => {
+  // Channel items
   const channel = e.target.closest(".channel-item");
   if (channel) {
     const key = channel.dataset.channel;
@@ -3244,6 +5495,8 @@ panelContent().addEventListener("click", async (e) => {
     else await openChannel(key);
     return;
   }
+  
+  // Task cards
   const task = e.target.closest(".studio-task-card");
   if (task) {
     await openTaskInStudio({
@@ -3254,16 +5507,129 @@ panelContent().addEventListener("click", async (e) => {
     });
     return;
   }
+  
+  // Add task button
   const add = e.target.closest("#studio-add-task");
   if (add) {
     await createTask(add.dataset.board);
     return;
   }
+  
+  // Meeting controls
+  if (e.target.closest("#nav-mtg-toggle-create")) {
+    navMeetingCreateOpen = !navMeetingCreateOpen;
+    await renderMeetingsView();
+    return;
+  }
+  if (e.target.closest("#nav-mtg-start")) { startNavMeeting(); return; }
+  if (e.target.closest("#nav-mtg-schedule")) { scheduleNavMeeting(); return; }
+  if (e.target.closest("#nav-standup-enable")) { enableProjectStandup(); return; }
+  if (e.target.closest("#nav-standup-run-due")) { runDueStandups(); return; }
+  const standupProposalAction = e.target.closest(".standup-proposal-action");
+  if (standupProposalAction) { reviewStandaloneStandupProposal(standupProposalAction); return; }
+  const standupBrief = e.target.closest(".standup-open-brief");
+  if (standupBrief) {
+    await openTaskInStudio({
+      board: standupBrief.dataset.board,
+      taskId: standupBrief.dataset.taskId,
+      taskTitle: standupBrief.dataset.title,
+      taskStatus: "planning",
+    });
+    return;
+  }
+  if (e.target.closest("#goal-daily-create")) { createDailyGoalFromPanel(); return; }
+  if (e.target.closest("#goals-review-daily")) { reviewDailyGoalsFromPanel(); return; }
+  if (e.target.closest("#goals-autonomy-cycle")) { runGoalsAutonomyCycle(); return; }
+  if (e.target.closest("#goals-runner-toggle")) { toggleGoalsRunner(); return; }
+  if (e.target.closest("#goals-runner-dry-run")) { runGoalsRunnerDryRun(); return; }
+  if (e.target.closest("#goals-standup-configure")) { configureGoalsStandup(); return; }
+  if (e.target.closest("#goals-standup-start")) { startGoalsStandupNow(); return; }
+  const scheduledStart = e.target.closest(".nav-mtg-run-scheduled");
+  if (scheduledStart) { startScheduledMeeting(scheduledStart.dataset.mtgId); return; }
+  const scheduledDelete = e.target.closest(".nav-mtg-delete-scheduled");
+  if (scheduledDelete) { deleteScheduledMeeting(scheduledDelete.dataset.mtgId); return; }
+  const pastRoom = e.target.closest(".nav-mtg-open-room");
+  if (pastRoom) {
+    openPastMeetingRoom(pastRoom.dataset.room);
+    return;
+  }
+  const tmpl = e.target.closest(".nav-mtg-template");
+  if (tmpl) { applyMeetingTemplate(tmpl.dataset.template); return; }
+  const teamCard = e.target.closest(".nav-mtg-team-card");
+  if (teamCard) { selectMeetingTeam(teamCard.dataset.mtgTeam || ""); return; }
+  
+  // Domain save
   const domainSave = e.target.closest("#domain-create-save");
   if (domainSave) {
     await saveDomainFromWizard();
     return;
   }
+  
+  // Personas view: library + editor
+  if (e.target.closest("#persona-generate")) { openPersonaGenerateModal(); return; }
+  if (e.target.closest("#persona-new")) { openPersonaEditor(null, { content: "" }); return; }
+  if (e.target.closest("#persona-back")) { renderPersonasView(); return; }
+  if (e.target.closest("#pe-save")) { savePersonaFromEditor(); return; }
+  if (e.target.closest("#pe-delete")) { deletePersonaFromEditor(); return; }
+	  const personaCard = e.target.closest(".persona-card");
+	  if (personaCard) { openPersonaEditor(personaCard.dataset.id); return; }
+
+	  const skillRoute = e.target.closest(".skill-route");
+	  if (skillRoute) { await routeSkillFromCatalog(skillRoute.dataset.skill); return; }
+	  
+	  // Agents/Teams panels: roster + team management
+	  if (e.target.closest("#agent-new")) { openAgentModal(null); return; }
+	  if (e.target.closest("#agent-ask-ceo")) { await askCeoToRouteVisibleAgents(); return; }
+	  if (e.target.closest("#agent-filters-clear")) { clearAgentDirectoryFilters(); return; }
+	  if (e.target.closest("#active-agents-refresh")) { await refreshActiveAgentTerminals(); return; }
+	  const activeAgentRefresh = e.target.closest(".active-agent-refresh");
+	  if (activeAgentRefresh) { await refreshActiveAgentTerminal(activeAgentRefresh.dataset.agent); return; }
+	  const activeAgentSend = e.target.closest(".active-agent-send");
+	  if (activeAgentSend) { await sendActiveAgentTerminalInput(activeAgentSend.dataset.agent); return; }
+	  const activeAgentOpen = e.target.closest(".active-agent-open");
+	  if (activeAgentOpen) { await openAgentDetail(activeAgentOpen.dataset.agent); return; }
+	  const agentChip = e.target.closest(".agent-filter-chip");
+	  if (agentChip) { updateAgentDirectoryFilter("capability", agentChip.dataset.capability || "all"); return; }
+	  const agentAction = e.target.closest(".agent-action");
+	  if (agentAction) {
+	    await runAgentDirectoryAction(agentAction.dataset.action, agentAction.dataset.agent);
+	    return;
+	  }
+	  const card = e.target.closest(".team-agent-card");
+	  if (card) {
+	    if (window.StudioSessions && window.StudioSessions.startAgentSession) {
+	      await window.StudioSessions.startAgentSession(card.dataset.agent);
+	    } else {
+      openAgentDetail(card.dataset.agent);
+    }
+    return;
+  }
+  // Agent detail view buttons
+  if (e.target.closest("#agent-back")) { closeAgentSurface(); renderRegistryPanel(); return; }
+  if (e.target.closest("#agent-edit")) { openAgentModal(selectedAgentId); return; }
+  if (e.target.closest("#agent-mount")) { mountSelectedAgent(); return; }
+  if (e.target.closest("#agent-unmount")) { unmountSelectedAgent(); return; }
+  const remove = e.target.closest(".team-remove");
+  if (remove) {
+    const team = registryState.teams.find((x) => x.name === remove.dataset.team);
+    const members = (team ? team.members : []).filter((m) => m !== remove.dataset.agent);
+    await teamSetMembers(remove.dataset.team, members);
+    return;
+  }
+  const delTeam = e.target.closest(".team-delete");
+  if (delTeam) {
+    if (!confirm(`Delete team "${delTeam.dataset.team}"?`)) return;
+    const r = await window.ceo.registryDeleteTeam(delTeam.dataset.team);
+    if (r && r.ok) { await loadRegistry(); renderRegistryPanel(); }
+    return;
+  }
+  if (e.target.closest("#team-new")) {
+    const name = prompt("New team name:");
+    if (name && name.trim()) await teamSetMembers(name.trim(), []);
+    return;
+  }
+  
+  // Domain wizard controls
   const domainCancel = e.target.closest("#domain-create-cancel");
   if (domainCancel) {
     await renderStudioBoard(currentDomain);
@@ -3345,6 +5711,8 @@ panelContent().addEventListener("click", async (e) => {
     await askCeoAboutContext();
     return;
   }
+  
+  // Task wizard controls
   const taskSave = e.target.closest("#task-new-save");
   if (taskSave) {
     await saveTaskFromWizard();
@@ -3355,6 +5723,36 @@ panelContent().addEventListener("click", async (e) => {
     await renderStudioBoard(currentDomain);
     return;
   }
+  
+  // Task detail controls
+  if (e.target.closest("#brief-run-save")) { await saveBriefRunDocument(); return; }
+  if (e.target.closest("#brief-run-save-checklist")) { await saveBriefRunChecklist(); return; }
+  if (e.target.closest("#brief-run-add-decision")) { await addBriefRunEntry("decision"); return; }
+  if (e.target.closest("#brief-run-add-evidence")) { await addBriefRunEntry("evidence"); return; }
+  if (e.target.closest("#brief-run-add-agenda")) { await addBriefRunOperationalEntry("agenda"); return; }
+  if (e.target.closest("#brief-run-add-completion")) { await addBriefRunOperationalEntry("completion"); return; }
+  if (e.target.closest("#brief-run-add-asset")) { await recordBriefRunAsset(); return; }
+  if (e.target.closest("#brief-run-meeting-start")) { await runBriefRunMeetingAction("start"); return; }
+  if (e.target.closest("#brief-run-meeting-schedule")) { await runBriefRunMeetingAction("schedule"); return; }
+  if (e.target.closest("#brief-run-refresh-operations")) { await refreshBriefRunOperations({ reload: true }); return; }
+  const proposalAction = e.target.closest(".brief-run-proposal-action");
+  if (proposalAction) { await reviewBriefRunMeetingProposal(proposalAction); return; }
+  const meetingSynthesize = e.target.closest(".brief-run-meeting-synthesize");
+  if (meetingSynthesize) { await synthesizeBriefRunMeeting(meetingSynthesize.dataset.meetingId); return; }
+  const synthesisJump = e.target.closest(".brief-run-jump-synthesis");
+  if (synthesisJump) { jumpToBriefRunSynthesis(synthesisJump.dataset.synthesisId); return; }
+  const briefMeetingStart = e.target.closest(".brief-run-meeting-start-scheduled");
+  if (briefMeetingStart) { await runBriefRunMeetingAction("startScheduled", briefMeetingStart.dataset.meetingId); return; }
+  const briefMeetingOpen = e.target.closest(".brief-run-meeting-open");
+  if (briefMeetingOpen) { await openBriefRunMeeting(briefMeetingOpen.dataset.room); return; }
+  const briefMeetingRefresh = e.target.closest(".brief-run-meeting-refresh");
+  if (briefMeetingRefresh) { await refreshBriefRunMeeting(briefMeetingRefresh.dataset.room); return; }
+  const briefAsset = e.target.closest(".brief-run-open-asset");
+  if (briefAsset && briefAsset.dataset.path) { await showFile(briefAsset.dataset.path); return; }
+  if (e.target.closest("#brief-run-create-session")) { await createBriefRunSession(); return; }
+  if (e.target.closest("#brief-run-dry-run")) { await runBriefFocusedDryRun(); return; }
+  const briefSession = e.target.closest(".brief-run-open-session");
+  if (briefSession) { await openBriefRunSession(briefSession.dataset.sessionId); return; }
   const assign = e.target.closest("#task-assign-save");
   if (assign && focusedTask) {
     const select = $("#task-assignee");
@@ -3410,65 +5808,25 @@ panelContent().addEventListener("click", async (e) => {
 document.querySelectorAll("#studio-nav .nav-item").forEach((b) => {
   b.addEventListener("click", () => openView(b.dataset.view));
 });
-// Meetings + Agents/Teams panel controls (delegated, since panels re-render on open).
-panelContent().addEventListener("click", async (e) => {
-  if (e.target.closest("#nav-mtg-toggle-create")) {
-    navMeetingCreateOpen = !navMeetingCreateOpen;
-    await renderMeetingsView();
-    return;
-  }
-  if (e.target.closest("#nav-mtg-start")) { startNavMeeting(); return; }
-  if (e.target.closest("#nav-mtg-schedule")) { scheduleNavMeeting(); return; }
-  const scheduledStart = e.target.closest(".nav-mtg-run-scheduled");
-  if (scheduledStart) { startScheduledMeeting(scheduledStart.dataset.mtgId); return; }
-  const scheduledDelete = e.target.closest(".nav-mtg-delete-scheduled");
-  if (scheduledDelete) { deleteScheduledMeeting(scheduledDelete.dataset.mtgId); return; }
-  const pastRoom = e.target.closest(".nav-mtg-open-room");
-  if (pastRoom) { openPastMeetingRoom(pastRoom.dataset.room); return; }
-  const tmpl = e.target.closest(".nav-mtg-template");
-  if (tmpl) { applyMeetingTemplate(tmpl.dataset.template); return; }
-  const teamCard = e.target.closest(".nav-mtg-team-card");
-  if (teamCard) { selectMeetingTeam(teamCard.dataset.mtgTeam || ""); return; }
-  // Personas view: library + editor
-  if (e.target.closest("#persona-generate")) { openPersonaGenerateModal(); return; }
-  if (e.target.closest("#persona-new")) { openPersonaEditor(null, { content: "" }); return; }
-  if (e.target.closest("#persona-back")) { renderPersonasView(); return; }
-  if (e.target.closest("#pe-save")) { savePersonaFromEditor(); return; }
-  if (e.target.closest("#pe-delete")) { deletePersonaFromEditor(); return; }
-  const personaCard = e.target.closest(".persona-card");
-  if (personaCard) { openPersonaEditor(personaCard.dataset.id); return; }
-  // Agents/Teams panels: roster + team management
-  if (e.target.closest("#agent-new")) { openAgentModal(null); return; }
-  const card = e.target.closest(".team-agent-card");
-  if (card) { openAgentDetail(card.dataset.agent); return; }
-  // Agent detail view buttons
-  if (e.target.closest("#agent-back")) { closeAgentSurface(); renderRegistryPanel(); return; }
-  if (e.target.closest("#agent-edit")) { openAgentModal(selectedAgentId); return; }
-  if (e.target.closest("#agent-mount")) { mountSelectedAgent(); return; }
-  if (e.target.closest("#agent-unmount")) { unmountSelectedAgent(); return; }
-  const remove = e.target.closest(".team-remove");
-  if (remove) {
-    const team = registryState.teams.find((x) => x.name === remove.dataset.team);
-    const members = (team ? team.members : []).filter((m) => m !== remove.dataset.agent);
-    await teamSetMembers(remove.dataset.team, members);
-    return;
-  }
-  const delTeam = e.target.closest(".team-delete");
-  if (delTeam) {
-    if (!confirm(`Delete team "${delTeam.dataset.team}"?`)) return;
-    const r = await window.ceo.registryDeleteTeam(delTeam.dataset.team);
-    if (r && r.ok) { await loadRegistry(); renderRegistryPanel(); }
-    return;
-  }
-  if (e.target.closest("#team-new")) {
-    const name = prompt("New team name:");
-    if (name && name.trim()) await teamSetMembers(name.trim(), []);
-    return;
-  }
-});
 panelContent().addEventListener("change", async (e) => {
   if (e.target && e.target.id === "nav-mtg-team") {
     selectMeetingTeam(e.target.value);
+    return;
+  }
+  if (e.target && e.target.id === "agent-filter-provider") {
+    updateAgentDirectoryFilter("provider", e.target.value || "all");
+    return;
+  }
+  if (e.target && e.target.id === "agent-filter-capability") {
+    updateAgentDirectoryFilter("capability", e.target.value || "all");
+    return;
+  }
+  if (e.target && e.target.id === "agent-filter-group") {
+    updateAgentDirectoryFilter("group", e.target.value || "all");
+    return;
+  }
+  if (e.target && e.target.id === "agent-filter-status") {
+    updateAgentDirectoryFilter("status", e.target.value || "all");
     return;
   }
   if (e.target && e.target.classList && e.target.classList.contains("team-add") && e.target.value) {
@@ -3477,9 +5835,49 @@ panelContent().addEventListener("change", async (e) => {
     await teamSetMembers(e.target.dataset.team, members);
   }
 });
+panelContent().addEventListener("input", (e) => {
+  if (e.target && e.target.id === "skill-search") {
+    const value = e.target.value || "";
+    skillCatalogState = { ...skillCatalogState, query: value };
+    renderSkillsPanel();
+    const next = document.getElementById("skill-search");
+    if (next) {
+      next.focus();
+      next.setSelectionRange(value.length, value.length);
+    }
+    return;
+  }
+  if (e.target && e.target.id === "agent-search") {
+    const value = e.target.value || "";
+    agentDirectoryState = { ...agentDirectoryState, query: value };
+    renderAgentsPanel();
+    const next = document.getElementById("agent-search");
+    if (next) {
+      next.focus();
+      next.setSelectionRange(value.length, value.length);
+    }
+  }
+});
+panelContent().addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target && e.target.classList && e.target.classList.contains("active-agent-input")) {
+    e.preventDefault();
+    sendActiveAgentTerminalInput(e.target.dataset.agent);
+  }
+});
 
+$("#chat-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$("#chat-input").addEventListener("input", () => autoResizeTextarea($("#chat-input")));
+$("#chat-attach").addEventListener("click", addChatContext);
+$("#chat-code").addEventListener("click", insertCodeBlock);
 $("#send").addEventListener("click", send);
-$("#chat-input").addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+
+// Remove context pills
+$("#chat-context-pills").addEventListener("click", (e) => {
+  const btn = e.target.closest(".chat-context-remove");
+  if (btn) removeChatContext(btn.dataset.path);
+});
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && panelFullscreen) setPanelFullscreen(false);
 });
@@ -3565,13 +5963,37 @@ async function onDictationStop() {
 
 $("#dictate").addEventListener("click", () => (dictating ? stopDictation() : startDictation()));
 
-// Disable dictation if voice (ElevenLabs key) isn't configured.
+// Dictation button: use Web Speech API in local mode, cloud STT otherwise.
 (async () => {
   try {
     const st = await window.ceo.voiceAvailable();
-    if (!st || !st.available) {
-      const b = $("#dictate");
-      if (b) { b.disabled = true; b.title = "Dictation disabled (no ELEVENLABS_API_KEY)"; }
+    const b = $("#dictate");
+    if (!b) return;
+    if (st && st.mode === "local") {
+      // Replace dictation with Web Speech API (local, free)
+      b.disabled = false;
+      b.title = "Dictate (local — Web Speech API)";
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) { b.disabled = true; b.title = "Speech recognition not supported"; return; }
+      b.addEventListener("click", () => {
+        const rec = new SpeechRecognition();
+        rec.lang = "en-US"; rec.interimResults = false; rec.maxAlternatives = 1;
+        b.disabled = true;
+        setVoiceStatus("🎙 Listening…");
+        rec.onresult = (e) => {
+          const text = e.results[0][0].transcript.trim();
+          const input = $("#chat-input");
+          if (text) input.value = input.value ? `${input.value} ${text}` : text;
+          input.focus();
+          setVoiceStatus("");
+          b.disabled = false;
+        };
+        rec.onerror = (e) => { setVoiceStatus(`⚠ ${e.error}`); b.disabled = false; };
+        rec.onend = () => { b.disabled = false; };
+        rec.start();
+      }, { once: false });
+    } else if (!st || !st.available) {
+      b.disabled = true; b.title = "Dictation disabled (no voice configured)";
     }
   } catch { /* voice optional */ }
 })();
@@ -3595,6 +6017,7 @@ setInterval(async () => {
     window.CEOConvai.stop("cost guardrail");
   }
 }, 2000);
+setInterval(() => { refreshEscalations().catch(() => {}); }, 15000);
 
 (async function init() {
   setAgentState("idle");
@@ -3602,4 +6025,38 @@ setInterval(async () => {
   wireAgentSurface();
   renderArchitectureOverview();
   await refreshProjects();
+  
+  // Listen for CEO-triggered terminal open requests
+  if (window.ceo && window.ceo.onTerminalOpenRequest) {
+    window.ceo.onTerminalOpenRequest(async ({ agentId }) => {
+      console.log("[renderer] CEO requested terminal open for agent:", agentId);
+      try {
+        // Show the agent inspect panel
+        const inspectPanel = $("#panel-inspect");
+        const inspectTitle = $("#panel-inspect-title");
+        const inspectOutput = $("#panel-inspect-output");
+        
+        if (inspectPanel && inspectTitle && inspectOutput) {
+          inspectPanel.classList.remove("hidden");
+          inspectTitle.textContent = `Agent terminal: ${agentId}`;
+          inspectOutput.textContent = `Opening terminal for ${agentId}...`;
+          
+          // Actually open the terminal via IPC
+          const result = await window.ceo.terminalOpen({ agentId });
+          if (result && result.ok) {
+            setVoiceStatus(`Opened terminal for ${agentId}`);
+            inspectOutput.textContent = `Terminal opened: ${result.terminalId}\nSession: ${result.session}\nWindow: ${result.window}`;
+          } else {
+            setVoiceStatus(`Failed to open terminal for ${agentId}: ${result ? result.reason : 'unknown'}`);
+            inspectOutput.textContent = `Failed to open terminal: ${result ? result.reason : 'unknown'}`;
+          }
+        } else {
+          setVoiceStatus(`Terminal UI elements not found`);
+        }
+      } catch (e) {
+        console.error("[renderer] Error opening terminal from CEO request:", e);
+        setVoiceStatus(`Error opening terminal: ${e.message}`);
+      }
+    });
+  }
 })();

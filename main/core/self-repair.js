@@ -40,14 +40,15 @@ function buildSystemBug(input = {}) {
       "A repair is implemented or a clear external blocker is recorded.",
       "Verification commands pass and evidence is attached to the bug.",
     ],
-    owner: text(input.owner) || "Self-repair",
+    owner: text(input.owner) || "self-repair-engineer",
     persona: text(input.persona) || "self-repair-engineer",
     goalId: text(input.goalId),
     requestedBy: input.requestedBy || "self-repair",
   };
 }
 
-function buildRepairTask({ bugId, bugTitle, board, goalId, workspace, verification } = {}) {
+function buildRepairTask({ bugId, bugTitle, board, goalId, workspace, verification, evidence } = {}) {
+  const evidenceItems = Array.isArray(evidence) ? evidence.map(text).filter(Boolean) : list(evidence);
   return {
     board,
     parentKind: "bug",
@@ -65,8 +66,9 @@ function buildRepairTask({ bugId, bugTitle, board, goalId, workspace, verificati
       "The commit hash and verification output are posted back to the bug/task.",
     ],
     verification: list(verification).length ? list(verification) : ["npm test", "npm run check"],
+    evidence: evidenceItems,
     workspace: text(workspace) || "Use the CEO_STUDIO repo or an isolated worktree if dispatching to a worker.",
-    owner: "Self-repair",
+    owner: "self-repair-engineer",
     persona: "self-repair-engineer",
     goalId: text(goalId),
     requestedBy: "self-repair",
@@ -114,8 +116,9 @@ function reportSystemBug(input = {}, { projectSlug, projectPath } = {}) {
       bugTitle: bugInput.title,
       board: bug.board,
       goalId: bugInput.goalId,
-      workspace: input.workspace,
+      workspace: input.workspace || projectPath,
       verification: input.verification,
+      evidence: input.output ? [text(input.output).slice(0, 5000)] : bugInput.evidence,
     });
     repairTask = domainBoard.createChildTask({ ...repairInput, projectPath }, { projectSlug });
   }

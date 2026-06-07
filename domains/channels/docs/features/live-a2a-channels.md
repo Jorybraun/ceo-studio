@@ -27,10 +27,33 @@ renderer/app.js  ──IPC──>  main/index.js  ──>  main/core/meetings.js
 autonomy-runner.js  ── meetings.post(boardRoom(b)) ──┘  (work milestones)
 ```
 
-- **Durable bus**: `runtime/harness/brain/rooms/<room>/chat.log`, lines formatted
+- **Durable bus**: `<project>/brain/rooms/<room>/chat.log`, lines formatted
   `[<iso>] <speaker>: <body>`. This is the single source of truth a channel reads.
+  The path resolves via the harness `HARNESS_WORKSPACE` (= project root; see
+  `runtime/harness/config/paths.py`), so `main/core/meetings.js` (read + room-loop
+  spawns) and `main/core/mount.js` (registry mount + agent messaging) MUST agree on
+  it. They previously diverged — meetings.js used `<project>/runtime/harness/brain/rooms`
+  while mount.js used `<project>/brain/rooms` — which split the read path from the
+  write path so messages sent to an agent never showed up in the feed. Both now
+  pin `HARNESS_WORKSPACE` to the project root.
+- **Executable harness**: project checkouts may carry only partial harness context
+  (`runtime/harness/personas`, docs, or room history) without the runnable
+  `runtime/harness/bin/agent` and `agents/` Python modules. In that case,
+  `main/core/meetings.js` uses CEO Studio's bundled `runtime/harness` as the
+  executable harness while still setting `HARNESS_WORKSPACE=<project>` so rooms,
+  transcripts, and channel logs stay project-local.
+- **Presence vs. chat**: watcher liveness is tracked in the room's `presence/` dir
+  (used by `domain-room who`), NOT by posting `heartbeat at <iso>` lines into
+  `chat.log`. `launch-agent` no longer passes `--heartbeat`, and the feed parser
+  (`meetings.js _parseLog`) drops any legacy heartbeat lines, so the human-visible
+  transcript stays conversation-only.
 - **Room naming**: UI rooms are `chan-<key>` (lowercased/sanitized); board
   team-logs are `meetings.boardRoom(slug)` = `chan-board-<slug>`.
+- **Project board selection**: when the UI asks for boards in `All` scope,
+  `hermes:boards_for_domain` returns the active project's board first. This
+  prevents a non-CEO project such as PIPE from rendering the first unrelated
+  board in the Hermes registry (`ceo-studio`) while the project header says
+  another project is selected.
 - **Live loop**: a non-detached child per room, tracked in `meetings.js`
   `roomLoops`, killed on close and on app quit (`stopAllRoomLoops`).
 
@@ -51,6 +74,10 @@ autonomy-runner.js  ── meetings.post(boardRoom(b)) ──┘  (work mileston
   board), Group channels (teams), Direct messages (agents).
 - Board channels resolve members from the live swarm (`ceoSwarm`), falling back
   to the registry when idle.
+- Board channels show a compact live swarm strip sourced from `runnerStatus`
+  plus `ceoSwarm`. Mounted registry agents get an `Agent terminal` action that
+  opens the shared PuTI/xterm Terminal view; direct Devin subprocess workers get
+  a task-context action instead of a fake terminal.
 - Human/CEO drop-in posting with shared-context injection (`withChannelContext`).
 - Add-agent-to-channel flow that restarts the loop to include the new member and
   posts the notice as a non-human speaker.

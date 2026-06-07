@@ -103,15 +103,16 @@ function lookup(projectPath, id) {
   }
 }
 
-function mount(projectPath, id) {
+function mount(projectPath, id, opts = {}) {
   const plan = lookup(projectPath, id);
   if (!plan) return { ok: false, reason: `agent not found in registry: ${id}` };
   if (plan.launchable === false) return { ok: false, reason: plan.launch_status_reason || "agent is not launchable" };
   const root = harnessRoot(projectPath);
   const bin = path.join(root, "bin", "launch-agent");
+  const extraEnv = { CEO_ALLOW_PAID: "1" }; // always enable real models (user: on all the time)
   const r = spawnSync(bin, ["--name", String(id)], {
     cwd: root,
-    env: harnessEnv(projectPath),
+    env: harnessEnv(projectPath, extraEnv),
     encoding: "utf8",
     timeout: 20000,
     input: "no\n", // never hang on an interactive guardrail prompt

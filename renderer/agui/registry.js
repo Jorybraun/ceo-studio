@@ -167,7 +167,12 @@ const RENDERERS = {
 function renderComponent(node) {
   if (!node || typeof node !== "object") return null;
   const fn = RENDERERS[node.type];
-  const props = node.props || {};
+  // Merge top-level properties (except `type`) into props so callers
+  // can use either { type, props: {...} } or { type, ...props }.
+  const props = { ...(node.props || {}) };
+  Object.entries(node).forEach(([k, v]) => {
+    if (k !== "type" && k !== "props" && !(k in props)) props[k] = v;
+  });
   if (!fn) {
     const el = document.createElement("div");
     el.className = "text-[11px] text-neutral-600 italic mb-2";

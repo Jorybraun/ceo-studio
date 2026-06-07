@@ -4,21 +4,17 @@
     "type": "split",
     "children": [
       {
-        "id": "d90f415ca1db5c0a",
+        "id": "a06c349bac46f524",
         "type": "tabs",
         "children": [
           {
-            "id": "636404cfae7150d1",
+            "id": "10f66b550db1a14b",
             "type": "leaf",
             "state": {
-              "type": "markdown",
-              "state": {
-                "file": "DOMAIN_DESIGN.md",
-                "mode": "source",
-                "source": false
-              },
+              "type": "empty",
+              "state": {},
               "icon": "lucide-file",
-              "title": "DOMAIN_DESIGN"
+              "title": "New tab"
             }
           }
         ]
@@ -94,7 +90,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "DOMAIN_DESIGN.md",
+                "file": "E2E_PLAN.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -104,7 +100,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks for DOMAIN_DESIGN"
+              "title": "Backlinks for E2E_PLAN"
             }
           },
           {
@@ -113,12 +109,12 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "DOMAIN_DESIGN.md",
+                "file": "E2E_PLAN.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
               "icon": "links-going-out",
-              "title": "Outgoing links from DOMAIN_DESIGN"
+              "title": "Outgoing links from E2E_PLAN"
             }
           },
           {
@@ -156,13 +152,13 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "DOMAIN_DESIGN.md",
+                "file": "E2E_PLAN.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Outline of DOMAIN_DESIGN"
+              "title": "Outline of E2E_PLAN"
             }
           }
         ]
@@ -183,53 +179,53 @@
       "bases:Create new base": false
     }
   },
-  "active": "636404cfae7150d1",
+  "active": "10f66b550db1a14b",
   "lastOpenFiles": [
+    "E2E_PLAN.md",
+    "DOMAIN_DESIGN.md",
+    "architecture-current.md",
+    "ARCHITECTURE.md",
+    "AGENDA.md",
+    "AGENTS.md",
+    "Plan/Plan 2.0.md",
+    "dogfood-output/self-qa/report-2026-06-05T02-40-07-514Z.md",
+    "dogfood-output/self-qa/report-2026-06-05T02-36-40-160Z.md",
+    "dogfood-output/self-qa/report-2026-06-05T02-32-36-969Z.md",
+    "dogfood-output/self-qa/report-2026-06-05T02-23-52-007Z.md",
+    "scripts/studio-pipe-brief-driver.js",
+    "brain/rooms/chan-board-ceo-studio/agenda.md",
+    "brain/rooms/chan-dm-dogfood-tester/agents/dogfood-tester.json",
+    "brain/rooms/chan-dm-dogfood-tester/agents/dogfood-tester",
+    "brain/rooms/chan-dm-dogfood-tester/agents",
+    "brain/rooms/chan-dm-dogfood-tester/chat.log",
+    "brain/rooms/chan-dm-dogfood-tester/agenda.md",
+    "brain/rooms/chan-dm-dogfood-tester",
+    "brain/rooms/sess-ade79809/chat.log",
+    "brain/rooms/sess-ade79809",
+    "brain/rooms/sess-985cf47b/agents",
+    "brain/rooms/sess-985cf47b/chat.log",
+    "Plan rebuild.md",
+    "domains/meetings/captured-agenda-items.md",
+    "node_modules/@azure/msal-browser/README.md",
+    "node_modules/@azure/identity/README.md",
+    "node_modules/lodash/README.md",
+    "node_modules/esbuild-shim-plugin/node_modules/@esbuild/darwin-arm64/README.md",
+    "node_modules/@google/adk-devtools/node_modules/@esbuild/darwin-arm64/README.md",
+    "node_modules/@azure/keyvault-keys/README.md",
+    "node_modules/web-streams-polyfill/README.md",
+    "node_modules/@grpc/grpc-js/README.md",
+    "node_modules/@azure/msal-common/README.md",
+    "node_modules/@azure/msal-common/node/README.md",
+    "node_modules/@azure/msal-common/browser/README.md",
+    "Screenshot 2026-06-03 at 9.42.26 AM.png",
+    "Screenshot 2026-06-03 at 8.41.14 AM.png",
+    "Screenshot 2026-06-03 at 8.40.45 AM.png",
+    "Screenshot 2026-06-03 at 8.10.09 AM.png",
     "dogfood-output/screenshots/05-after-create.png",
     "dogfood-output/screenshots/04-newtask-form-projectselected.png",
     "dogfood-output/screenshots/03-newtask-form.png",
     "dogfood-output/screenshots/02-board.png",
     "dogfood-output/screenshots/01-app-open.png",
-    "dogfood-output/console.jsonl",
-    "dogfood-output/cdp-eval.js",
-    "dogfood-output/console-logger.js",
-    "dogfood-output/cdp-driver.js",
-    "runtime/harness/brain/rooms/discovery/chat.log.lockd",
-    "scripts/start-autonomy.js",
-    "test/autonomy-runner.test.js",
-    "dogfood-output/self-qa/report-2026-06-02T02-11-58-136Z.md",
-    "main/core/autonomy-runner.js",
-    "domains/domain-lifecycle/docs/features/meeting-workspace.md",
-    "domains/meetings/index.md",
-    "domains/meetings/definition.md",
-    "domains/meetings/AGENTS.md",
-    "domains/meetings/requirements",
-    "domains/meetings/plans",
-    "dogfood-output/self-qa/report-2026-06-02T02-02-33-591Z.md",
-    "runtime/harness/brain/rooms/ceo-planning/requirements.md",
-    "runtime/harness/brain/rooms/ceo-planning/agenda.md",
-    "runtime/harness/brain/rooms/session-1780363695275/agenda.md",
-    "runtime/harness/brain/rooms/session-1780363641692/requirements.md",
-    "runtime/harness/brain/rooms/session-1780363641692/agenda.md",
-    "brain/testing-scenarios/teams/meetings-ui-mounted-filter.md",
-    "domains/teams/agendas/2026-06-02-session-1780363379013.md",
-    "runtime/harness/brain/rooms/session-1780363379013/requirements.md",
-    "runtime/harness/brain/rooms/session-1780363379013/agenda.md",
-    "runtime/harness/brain/rooms/discovery/requirements.md",
-    "runtime/harness/brain/rooms/__a2atest__/agenda.md",
-    "brain/testing-scenarios/teams/room-based-agent-communication.md",
-    "brain/testing-scenarios/teams/a2a-agent-communication.md",
-    "brain/rooms/discovery/agenda.md",
-    "brain/testing-scenarios/teams/channels-feature-testing.md",
-    "brain/testing-scenarios/teams/terminal-input-agent-surface.md",
-    "brain/testing-scenarios/index.md",
-    "domains/teams/testing-scenarios.md",
-    "domains/teams/channels-testing-log.md",
-    "dogfood-output/self-qa/screenshots/pass-1-end.png",
-    "dogfood-output/self-qa/screenshots/pass-1-start.png",
-    "dogfood-output/screenshots/07-meeting-started.png",
-    "dogfood-output/screenshots/06-meetings-view.png",
-    "dogfood-output/screenshots/05-ba-mounted.png",
-    "dogfood-output/screenshots/04-teams-view.png"
+    "dogfood-output/self-qa/screenshots/pass-1-end.png"
   ]
 }

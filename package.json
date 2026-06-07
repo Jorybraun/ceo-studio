@@ -5,9 +5,9 @@
   "description": "Agnostic desktop app + cost-guarded agent runtime for an AI Project CEO. M0 foundation.",
   "main": "main/index.js",
   "scripts": {
-    "start": "npm run build:agui && electron .",
-    "start:debug": "bash scripts/launch-electron-debug.sh",
-    "debug:mcp": "bash scripts/launch-electron-debug.sh",
+    "start": "npm run build:renderer && env -u ELECTRON_RUN_AS_NODE electron .",
+    "start:debug": "env -u ELECTRON_RUN_AS_NODE bash scripts/launch-electron-debug.sh",
+    "debug:mcp": "env -u ELECTRON_RUN_AS_NODE bash scripts/launch-electron-debug.sh",
     "smoke:electron": "node scripts/smoke-electron-cdp.js",
     "smoke:domain-architect": "node scripts/smoke-domain-architect-cdp.js",
     "qa:self": "node scripts/self-qa-cdp.js",
@@ -15,20 +15,29 @@
     "autonomy:dry-run": "node scripts/start-autonomy.js --slug ceo-studio --dry-run --once",
     "autonomy:once": "node scripts/start-autonomy.js --slug ceo-studio --once --max 1",
     "autonomy:start": "node scripts/start-autonomy.js --slug ceo-studio --loop",
+    "autonomy:report": "node scripts/start-autonomy.js --slug ceo-studio --report",
+    "postinstall": "node scripts/fix-node-pty-perms.js",
+    "build:renderer": "npm run build:agui && npm run build:puti",
     "build:agui": "esbuild renderer/agui/client.src.js --bundle --format=iife --platform=browser --target=chrome120 --outfile=renderer/agui/client.bundle.js",
-    "test": "node test/core.test.js && node test/main.boot.test.js && node test/voice.test.js && node test/agui.test.js && node test/autonomy-runner.test.js",
+    "build:puti": "node scripts/fix-node-pty-perms.js && esbuild renderer/puti.js --bundle --format=iife --platform=browser --target=chrome120 --outfile=renderer/puti.bundle.js",
+    "test": "node test/core.test.js && node test/main.boot.test.js && node test/voice.test.js && node test/agui.test.js && node test/autonomy-runner.test.js && node test/brief-intake.test.js",
     "docs:check": "node scripts/docs-check.js",
-    "check": "node --check main/index.js && node --check main/preload.js && node --check main/core/domains.js && node --check main/core/domain-architect.js && node --check main/core/brief-decomposer.js && node --check main/core/voice.js && node --check main/core/convai.js && node --check main/core/env.js && node --check main/core/agui-server.js && node --check main/core/jobs.js && node --check main/core/ticket-planner.js && node --check main/core/domain-board.js && node --check main/core/autonomy.js && node --check main/core/autonomy-loop.js && node --check main/core/autonomy-runner.js && node --check main/core/orchestration-org.js && node --check main/core/provenance.js && node --check main/core/goals.js && node --check main/core/goal-review.js && node --check main/core/self-repair.js && node --check main/core/personas.js && node --check main/core/gbrain.js && node --check scripts/smoke-electron-cdp.js && node --check scripts/smoke-domain-architect-cdp.js && node --check scripts/self-qa-cdp.js && node --check renderer/app.js && node --check --input-type=module < renderer/convai.js && npm run docs:check"
+    "check": "node --check main/index.js && node --check main/preload.js && node --check main/core/domains.js && node --check main/core/domain-architect.js && node --check main/core/brief-decomposer.js && node --check main/core/meeting-synthesis.js && node --check main/core/voice.js && node --check main/core/convai.js && node --check main/core/env.js && node --check main/core/agui-server.js && node --check main/core/sessions.js && node --check main/core/session-agent.js && node --check main/core/session-capture.js && node --check main/core/pty-terminal.js && node --check renderer/studio-sessions.js && node --check renderer/puti.js && node --check main/core/jobs.js && node --check main/core/ticket-planner.js && node --check main/core/domain-board.js && node --check main/core/brief-intake.js && node --check main/core/board-overlay.js && node --check main/core/unblocker.js && node --check main/core/notifications.js && node --check main/core/autonomy.js && node --check main/core/autonomy-loop.js && node --check main/core/autonomy-runner.js && node --check main/core/orchestration-org.js && node --check main/core/skills.js && node --check main/core/standups.js && node --check main/core/provenance.js && node --check main/core/goals.js && node --check main/core/goal-review.js && node --check main/core/self-repair.js && node --check main/core/personas.js && node --check main/core/gbrain.js && node --check scripts/smoke-electron-cdp.js && node --check scripts/smoke-domain-architect-cdp.js && node --check scripts/self-qa-cdp.js && node --check renderer/app.js && node --check renderer/brief-builder.js && node --check main/core/voice-chat.js && node --check --input-type=module < renderer/convai.js && npm run build:puti && npm run docs:check"
   },
   "devDependencies": {
     "chrome-remote-interface": "^0.34.0",
-    "electron": "^30.0.0",
+    "electron": "^30.5.1",
     "esbuild": "^0.28.0"
   },
   "dependencies": {
     "@ag-ui/client": "^0.0.54",
     "@ag-ui/core": "^0.0.54",
     "@google/adk": "^1.1.0",
-    "@google/adk-devtools": "^1.1.0"
+    "@google/adk-devtools": "^1.1.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-unicode11": "^0.9.0",
+    "@xterm/addon-webgl": "^0.19.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.1.0"
   }
 }

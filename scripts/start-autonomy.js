@@ -14,6 +14,7 @@
  *   --slug <s>        project slug (brain namespace). Default: ceo-studio
  *   --path <dir>      project repo path. Default: cwd
  *   --dry-run         propose only; never spawn Devin or mutate the board
+ *   --report          print the oversight inventory (no cycle, no spend) and exit
  *   --once            run a single cycle and exit
  *   --loop            run forever on the policy interval
  *   --max <n>         maxDispatchPerCycle (0 = unlimited)
@@ -66,11 +67,41 @@ function cycle() {
   return r;
 }
 
-console.log(`[autonomy] slug=${slug} path=${projectPath} dryRun=${dryRun} loop=${loop} model=${policy.model}`);
-cycle();
+// Oversight report — read-only inventory of every task's true disposition
+// (delivered / open-pr / in-review / needs-human / stranded / DIVERGED / live).
+// No cycle is run and nothing is spawned: this is the "what is the swarm doing
+// and what got abandoned?" surface.
+function printReport() {
+  const rep = runner.report({ projectSlug: slug, projectPath });
+  if (!rep.ok) { console.log(JSON.stringify(rep, null, 2)); return rep; }
+  const s = rep.summary || { byDisposition: {} };
+  console.log(`\n[autonomy report] slug=${slug} running=${rep.running} mode=${rep.integrationMode} tasks=${s.tasks}`);
+  const order = ["live", "diverged", "open-pr", "delivered", "in-review", "needs-human", "stranded", "blocked"];
+  console.log("disposition: " + order.map((d) => `${d}=${s.byDisposition[d] || 0}`).join("  "));
+  if ((rep.workers || []).length) {
+    console.log(`live workers (${rep.workers.length}): ` + rep.workers.map((w) => `${w.board}/${w.taskId}${w.alive ? "" : "(dead)"}`).join(", "));
+  }
+  for (const b of rep.boards || []) {
+    if (!b.ok) { console.log(`\n== ${b.board} == (read failed: ${b.reason})`); continue; }
+    console.log(`\n== ${b.board} == (${b.tasks.length} tasks)`);
+    // Lead with the rows a human must act on; deliver/archived noise goes last.
+    const rank = (t) => order.indexOf(t.disposition) === -1 ? order.length : order.indexOf(t.disposition);
+    for (const t of [...b.tasks].sort((x, y) => rank(x) - rank(y))) {
+      const flags = [t.diverged ? "DIVERGED" : "", t.escalated ? "escalated" : "", t.humanRequired ? "human-required" : "", t.repairGeneration ? `repairGen=${t.repairGeneration}` : ""].filter(Boolean).join(" ");
+      console.log(`  ${t.disposition.padEnd(12)} ${t.id.padEnd(12)} ahead=${String(t.ahead).padEnd(3)} ${flags ? `[${flags}] ` : ""}${t.title.slice(0, 52)}`);
+    }
+  }
+  return rep;
+}
 
-if (loop) {
-  const ms = Math.max(1, runner.getPolicy(slug).intervalMinutes) * 60 * 1000;
-  console.log(`[autonomy] looping every ${ms / 60000} minutes (Ctrl-C to stop)`);
-  setInterval(cycle, ms);
+console.log(`[autonomy] slug=${slug} path=${projectPath} dryRun=${dryRun} loop=${loop} model=${policy.model}`);
+if (has("report")) {
+  printReport();
+} else {
+  cycle();
+  if (loop) {
+    const ms = Math.max(1, runner.getPolicy(slug).intervalMinutes) * 60 * 1000;
+    console.log(`[autonomy] looping every ${ms / 60000} minutes (Ctrl-C to stop)`);
+    setInterval(cycle, ms);
+  }
 }

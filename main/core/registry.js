@@ -22,6 +22,12 @@
  *
  * WRITES go to the project's agents.json when a project is open, otherwise to
  * the shipped harness agents.json.
+ *
+ * Editing or deleting an agent that lives only in a lower-precedence (shipped/
+ * default) source is copy-on-write: updateAgent() materializes a project-level
+ * override, and deleteAgent() writes a disabled tombstone (the cockpit directory
+ * hides enabled:false agents) rather than failing with "agent not found". This
+ * is why the cockpit can edit shipped agents (e.g. `pm`) it merely inherits.
  */
 const path = require("path");
 const fs = require("fs");
@@ -131,6 +137,30 @@ function read(projectPath) {
   };
 }
 
+/**
+ * Agent ids that resolve from a source *other than* the write target — i.e.
+ * agents inherited from a shipped/default registry the cockpit can't edit in
+ * place. Used so edits/deletes of shipped agents become project-level overrides
+ * instead of failing with "agent not found".
+ */
+function _inheritedAgentIds(projectPath) {
+  const wp = path.resolve(writePath(projectPath));
+  const ids = new Set();
+  for (const p of readPaths(projectPath)) {
+    if (path.resolve(p) === wp) continue; // the write target is editable in place
+    let data;
+    try {
+      if (!fs.existsSync(p)) continue;
+      data = JSON.parse(fs.readFileSync(p, "utf8"));
+    } catch { continue; }
+    for (const spec of data.agents || []) {
+      const a = slugify(spec.id || spec.name);
+      if (a) ids.add(a);
+    }
+  }
+  return ids;
+}
+
 /** Load the raw write-target file (agents array + teams object), creating a shell if missing. */
 function _loadWritable(projectPath) {
   const p = writePath(projectPath);
@@ -198,8 +228,15 @@ function updateAgent(projectPath, id, updates = {}) {
   const aid = slugify(id);
   if (!aid) return { ok: false, reason: "agent id required" };
   const { path: p, data } = _loadWritable(projectPath);
-  const existing = data.agents.find((a) => slugify(a.id || a.name) === aid);
-  if (!existing) return { ok: false, reason: `agent not found: ${aid}` };
+  let existing = data.agents.find((a) => slugify(a.id || a.name) === aid);
+  if (!existing) {
+    // Copy-on-write: the agent may be inherited from a shipped/default registry
+    // that is not the write target (e.g. runtime/harness/agents.json). Edits to
+    // such an agent should materialize a project-level override instead of
+    // failing with "agent not found" (the cockpit lists shipped agents).
+    existing = read(projectPath).agents.find((a) => slugify(a.id || a.name) === aid);
+    if (!existing) return { ok: false, reason: `agent not found: ${aid}` };
+  }
   // keep the id stable even if the name changes
   const merged = normalizeAgent({ ...existing, ...updates, id: aid });
   merged.id = aid;
@@ -213,13 +250,23 @@ function deleteAgent(projectPath, id) {
   const { path: p, data } = _loadWritable(projectPath);
   const before = data.agents.length;
   data.agents = data.agents.filter((a) => slugify(a.id || a.name) !== aid);
-  if (data.agents.length === before) return { ok: false, reason: `agent not found: ${aid}` };
-  // also drop from any team
+  const hadOverride = data.agents.length !== before;
+  const inherited = _inheritedAgentIds(projectPath).has(aid);
+  if (!hadOverride && !inherited) return { ok: false, reason: `agent not found: ${aid}` };
+  if (inherited) {
+    // The agent is defined in a shipped/default registry we can't edit in place.
+    // Dropping a project override isn't enough — it would just reappear from the
+    // default. Write a disabled tombstone override instead; the cockpit hides
+    // enabled:false agents, so it disappears. Removing the override re-enables it.
+    const base = read(projectPath).agents.find((a) => slugify(a.id || a.name) === aid) || { id: aid, name: aid };
+    _persistAgent(data.agents, normalizeAgent({ ...base, id: aid, enabled: false }));
+  }
+  // also drop from any team defined in the write target
   for (const name of Object.keys(data.teams)) {
     data.teams[name] = (data.teams[name] || []).filter((m) => slugify(m) !== aid);
   }
   _save(p, data);
-  return { ok: true, id: aid };
+  return { ok: true, id: aid, disabled: inherited };
 }
 
 /** Create or replace a team's member list. */

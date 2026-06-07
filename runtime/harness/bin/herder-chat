@@ -755,24 +755,20 @@ class HerderChatApp(App):
         if subprocess.run(["tmux", "has-session", "-t", f"={session}"], capture_output=True).returncode == 0:
             return True
 
-        # Guardrail: do NOT silently auto-spawn a paid/separate API session.
-        # (This used to start a separate Grok session on a simple @mention.)
+        # Guardrail: keep auto-launches bounded by the shared caps/kill-switch.
         try:
             from config import cost_limits as _cl
             allowed, reason = _cl.can_spawn(plan["id"], interactive=False)
             if not allowed:
                 log.write(
                     f"[red]Refusing to auto-launch '{plan['id']}': {reason}[/red]\n"
-                    f"[dim]If you really want this, launch it explicitly: "
-                    f"CEO_ALLOW_PAID=1 ./bin/launch-agent --name {plan['id']}[/dim]"
+                    f"[dim]Resolve the guardrail reason, then launch explicitly: "
+                    f"./bin/launch-agent --name {plan['id']}[/dim]"
                 )
                 return False
         except Exception:
-            # If the guardrail module can't be imported, fail safe for paid agents.
-            _id = plan.get("id", agent_name)
-            if _id.startswith("grok-") and _id != "grok":
-                log.write(f"[red]Refusing to auto-launch paid session '{_id}' (guardrail unavailable).[/red]")
-                return False
+            log.write(f"[red]Refusing to auto-launch '{plan.get('id', agent_name)}' (guardrail unavailable).[/red]")
+            return False
 
         log.write(
             f"[yellow]@{plan['id']} ({plan['display_name']}) not running — "

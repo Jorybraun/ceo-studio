@@ -9,6 +9,9 @@ Meeting and follow-up sessions are first-class Domain Lifecycle work. They let a
 - Store synthesized output under `agendas/`.
 - Keep the Agenda Item proposal-only until a human approves Kanban task creation or agent dispatch.
 - If provider, model, or registry support is missing, capture a `bug/system repair` Agenda Item instead of silently dropping the gap.
+- For Brief Run meetings, parse the durable room synthesis into typed follow-up proposals automatically.
+- Keep proposal generation separate from materialization: only an explicit human approval may record the proposal or change the parent task state.
+- Preserve rejected proposals and source hashes so repeated room polling does not recreate or silently re-approve them.
 
 ## Calendar Automation
 Calendar scheduling is tracked as domain work, not implied future work.
@@ -25,4 +28,4 @@ Agenda Item:
 - Confirm synthesized output is saved under `agendas/`.
 - Confirm a meeting Agenda Item points at the saved artifact.
 - Confirm provider/registry failures create a domain-owned repair Agenda Item.
-
+- Confirm meeting proposal approval is explicit, auditable, and idempotent.

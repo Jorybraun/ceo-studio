@@ -25,6 +25,10 @@ const http = require("http");
 const crypto = require("crypto");
 const { EventType } = require("@ag-ui/core");
 const hermes = require("./hermes");
+const sessions = require("./sessions");
+const sessionAgent = require("./session-agent");
+const sessionCapture = require("./session-capture");
+const meetings = require("./meetings");
 
 // --- The component registry contract (must mirror renderer/agui/registry.js) ---
 // Kept here as a compact spec so we can teach the CEO how to render UI.
@@ -42,7 +46,12 @@ Each <component> is { "type": "<name>", ...props }. Available components:
 - {"type":"callout","variant":"info|success|warn|error","text":"..."}
 - {"type":"image","url":"https://...","alt":"..."}
 - {"type":"divider"}
-Only include the block when a visual would genuinely help (architecture, diagrams, documents, code, plans, comparisons). Keep prose concise when you also render UI.`;
+Only include the block when a visual would genuinely help (architecture, diagrams, documents, code, plans, comparisons). Keep prose concise when you also render UI.
+
+When the user is in a Studio Session, prefer rendering plans as markdown cards; the human approves plans in the workflow bar before execute.
+After plan approval (decompose phase), render the session decomposition as a list of items: each item has title, type (decomposition|step|feature), status, and optional actionItems. The left panel shows this summary when the session is selected.
+You may also include top-level JSON keys alongside components:
+{ "title": "...", "plan": { "title", "overview", "body" }, "decomposition": { "overview", "items": [{ "title", "type", "status", "actionItems": [] }] } }`;
 
 let _server = null;
 let _port = 0;
@@ -60,15 +69,16 @@ function _send(res, event) {
  */
 function _extractUi(reply) {
   const text = String(reply || "");
-  const m = text.match(/```agui\s*\n([\s\S]*?)\n```/i);
+  const m = text.match(/```agui\b\s*([\s\S]*?)```/i);
   if (!m) return { prose: text.trim(), ui: null };
   const prose = (text.slice(0, m.index) + text.slice(m.index + m[0].length)).trim();
   let ui = null;
+  let raw = null;
   try {
-    const parsed = JSON.parse(m[1]);
-    ui = _normalizeUi(parsed);
+    raw = JSON.parse(m[1].trim());
+    ui = _normalizeUi(raw);
   } catch { /* malformed block → ignore, keep prose */ }
-  return { prose, ui };
+  return { prose, ui, raw };
 }
 
 /** Normalize/validate a UI spec into { title, components:[{type,props}] }. */
@@ -82,7 +92,10 @@ function _normalizeUi(parsed) {
       const { type, ...props } = c;
       return { type, props };
     });
-  return { title: parsed.title || "", components };
+  const out = { title: parsed.title || "", components };
+  if (parsed.decomposition && typeof parsed.decomposition === "object") out.decomposition = parsed.decomposition;
+  if (parsed.plan && typeof parsed.plan === "object") out.plan = parsed.plan;
+  return out;
 }
 
 /**
@@ -95,7 +108,7 @@ function _makeStreamSplitter(onProse) {
   let inAgui = false;
   const handleLine = (line) => {
     const trimmed = line.trim();
-    if (!inAgui && /^```agui\s*$/i.test(trimmed)) { inAgui = true; return; }
+    if (!inAgui && /^```agui\b/i.test(trimmed)) { inAgui = true; return; }
     if (inAgui && /^```\s*$/.test(trimmed)) { inAgui = false; return; }
     if (inAgui) return;                          // block body is rendered separately
     if (/^session_id:\s*\S+$/i.test(trimmed)) return; // -Q footer
@@ -147,9 +160,52 @@ async function _handleRun(body, res) {
     _send(res, { type: EventType.TEXT_MESSAGE_CONTENT, messageId, delta });
   });
 
+  const slug = sessions.getProjectSlug();
+  const projectPath = sessions.getProjectPath();
+  const active = slug ? sessions.getActiveSession(slug) : null;
+
   let result;
   try {
-    result = await hermes.askStream(prompt, { onDelta: (d) => splitter.feed(d) });
+    if (active && projectPath) {
+      sessions.appendTranscript(slug, active.id, { role: "user", content: userText });
+      const live = sessions.roomLoopStatus(slug, active.id);
+      if (live && live.running) {
+        meetings.post({
+          projectPath,
+          room: active.room,
+          speaker: "You",
+          body: userText,
+        });
+        result = {
+          ok: true,
+          reply: `Posted to live room "${active.room}". Agent replies will appear in the room log below.`,
+        };
+        splitter.feed(result.reply);
+        sessions.appendTranscript(slug, active.id, { role: "assistant", content: result.reply });
+      } else {
+        meetings.post({
+          projectPath,
+          room: active.room,
+          speaker: "You",
+          body: userText,
+        });
+        result = await sessionAgent.askLead(projectPath, active, prompt, {
+          onDelta: (d) => splitter.feed(d),
+        });
+        if (result && result.ok && result.reply) {
+          const displayReply = _extractUi(result.reply).prose || result.reply;
+          sessions.appendTranscript(slug, active.id, { role: "assistant", content: displayReply });
+          meetings.post({
+            projectPath,
+            room: active.room,
+            speaker: active.leadAgentId || "Lead",
+            body: displayReply,
+          });
+        }
+      }
+    } else {
+      result = await hermes.askStream(prompt, { onDelta: (d) => splitter.feed(d) });
+    }
     splitter.end();
   } catch (e) {
     splitter.end();
@@ -166,9 +222,16 @@ async function _handleRun(body, res) {
   }
 
   // Parse the UI block from the full reply and ship it as shared state.
-  const { ui } = _extractUi(result.reply);
+  const { ui, raw } = _extractUi(result.reply);
   if (ui && ui.components.length) {
     _send(res, { type: EventType.STATE_SNAPSHOT, snapshot: { ui } });
+  }
+  if (active && slug && ui) {
+    sessionCapture.captureFromAgentReply(slug, active.id, {
+      ui,
+      raw,
+      phase: active.phase,
+    });
   }
 
   _send(res, { type: EventType.RUN_FINISHED, threadId, runId });

@@ -95,8 +95,7 @@ def cmd_room(args):
     # one at a time) — they never create a long-lived tmux session. So the
     # "max concurrent tmux agents" proxy must not gate them (otherwise the room
     # goes silent whenever the user happens to have agents mounted). Spend is
-    # still fully bounded by the kill switch, the paid gate (CEO_ALLOW_PAID),
-    # and the per-cycle / hourly spawn caps, which all remain active.
+    # still fully bounded by the kill switch and per-cycle / hourly spawn caps.
     os.environ.setdefault("CEO_GUARDRAIL_DISABLE_TMUX", "1")
     from agents import room_loop
     from agents import meeting as meeting_mod
@@ -117,7 +116,7 @@ def cmd_room(args):
 
 
 def cmd_dispatch(args):
-    # A human at a TTY may dispatch paid providers; automated callers can't (unless CEO_ALLOW_PAID=1).
+    # Provider cost is governed by the shared caps/kill-switch, not a paid-label block.
     r = agent_adapter.dispatch(args.provider, args.agent, args.room, args.task,
                                model=args.model, timeout=args.timeout,
                                interactive=sys.stdin.isatty())

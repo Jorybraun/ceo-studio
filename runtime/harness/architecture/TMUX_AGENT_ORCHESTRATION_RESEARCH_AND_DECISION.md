@@ -130,6 +130,7 @@ Relevant pattern:
 - Agents expose capabilities through Agent Cards.
 - Long-running work is modeled as tasks with status, messages, artifacts, streaming updates, and push notifications.
 - JSON-RPC / HTTP / SSE provide precise machine-to-machine coordination while hiding internal implementation details.
+- CEO Studio's Agents view is the lightweight Agent Card directory: it reads the canonical registry, groups agents by operating role, filters by provider/capability/status/team metadata, and exposes explicit actions to select/mount an agent, open a direct channel, inspect details, or ask the Hermes CEO to route work against the visible roster. It is a cockpit over the registry, not a second source of truth.
 
 Lesson for PIPE/Harness:
 
@@ -205,6 +206,7 @@ The registry must drive launch/chat/steer/dashboard/manager behavior, including:
 - capabilities
 - health policy and stale timeout
 - current lifecycle state or pointer to state file
+- dashboard-facing directory fields derived from the above: operating group, provider/capability filters, mounted/configured state, and team membership. These are computed from registry + runtime health and should not create a parallel roster.
 
 Unknown or disabled agents should fail visibly. They should not silently create misleading watcher-only sessions.
 

@@ -51,12 +51,14 @@ Room names: UI channels are `chan-<key>`; board team-logs are
   "No team channels yet." when the respective sources are empty.
 - **C1.3** ⬜ The currently open channel is visually highlighted (active key).
 - **C1.4** ⬜ Clicking **Project CEO** returns the right panel to the default CEO
-  conversation and stops/hides the channel surface (`switchToCeoChannel`).
+  conversation and stops/hides both overlay surfaces (`switchToCeoChannel`).
 - **C1.5** ⬜ Clicking a team / board / DM entry opens that channel in the single
   right panel (`openChannel`); the agent surface is hidden, the channel surface
-  is shown.
+  is shown. This must clear any inline `display:flex` state left by the agent
+  surface, not only add the `hidden` class.
 - **C1.6** ⬜ Only one channel surface is active at a time; switching channels
-  swaps the conversation, it does not stack panels.
+  swaps the conversation, stops the previous room loop, and does not stack
+  panels.
 - **C1.7** ⬜ Pressing **Escape** with a channel open closes the channel surface.
 
 ## 2. Channel membership resolution

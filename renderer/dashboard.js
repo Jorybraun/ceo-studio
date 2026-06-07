@@ -957,7 +957,7 @@
           const msg = document.getElementById("agent-persona-msg");
           if (msg) msg.textContent = "mounting...";
           try {
-            const r = await window.ceo.registryMount(selectedAgentId);
+            const r = await window.ceo.registryMount(selectedAgentId, { allowPaid: true });
             if (r && r.ok) {
               if (msg) msg.textContent = "mounted";
               await loadAgents();

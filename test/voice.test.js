@@ -78,9 +78,10 @@ ok("voice spend trips the hard session cap", capMeter.canProceed().ok === false)
 // --- tts()/stt() reject gracefully without a key (no crash) ---
 (async () => {
   let ttsErr = null, sttErr = null;
-  try { await voice.tts("hello"); } catch (e) { ttsErr = e; }
+  const offlineEnv = { ELEVENLABS_API_KEY: "", OLLAMA_BASE: "http://127.0.0.1:9" };
+  try { await voice.tts("hello", { env: offlineEnv }); } catch (e) { ttsErr = e; }
   ok("tts() throws clear NO_VOICE_KEY error offline", ttsErr && ttsErr.code === "NO_VOICE_KEY");
-  try { await voice.stt(Buffer.from([1, 2, 3]), { mime: "audio/webm" }); } catch (e) { sttErr = e; }
+  try { await voice.stt(Buffer.from([1, 2, 3]), { mime: "audio/webm", env: offlineEnv }); } catch (e) { sttErr = e; }
   ok("stt() throws clear NO_VOICE_KEY error offline", sttErr && sttErr.code === "NO_VOICE_KEY");
 
   console.log(`\n${passed} voice checks passed.`);

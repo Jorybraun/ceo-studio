@@ -352,12 +352,74 @@ const clientTools = {
   },
   // --- Render / navigation control: drive the Studio UI directly ---
   async open_view({ view } = {}) {
-    const allowed = ["domain", "board", "tasks", "teams", "channels", "meetings"];
+    const allowed = ["domain", "board", "tasks", "teams", "channels", "meetings", "sessions"];
     const v = String(view || "").toLowerCase();
     if (!allowed.includes(v)) return `Unknown view "${view}". Choose one of: ${allowed.join(", ")}.`;
     await ui().openView?.(v);
     ui().appendStream?.("sys", `🧭 Opened ${v} view`);
     return `Opened the ${v} view.`;
+  },
+  async get_active_studio_session() {
+    const r = await window.ceo.sessionsActive();
+    if (!r || !r.session) return "No active Studio session. Open Sessions and select or start one.";
+    const s = r.session;
+    let decomp = null;
+    try {
+      const d = await window.ceo.sessionsDecomposition(s.id);
+      if (d && d.ok) decomp = d.decomposition;
+    } catch { /* optional */ }
+    const items = (decomp && decomp.items) || [];
+    const lines = [
+      `Session "${s.title}" (${s.id})`,
+      `Phase: ${s.phase} · Lead: ${s.leadAgentId} · Room: ${s.room}`,
+      s.planDoc && s.planDoc.body
+        ? `Plan: ${s.planDoc.title}${s.planApprovedAt ? " (approved)" : " (pending approval)"}`
+        : "Plan: none",
+      `Decomposition (${decomp && decomp.source ? decomp.source : "empty"}): ${items.length} item(s)`,
+      ...items.slice(0, 12).map((it) => `  - [${it.type || "decomposition"}] ${it.title} (${it.status || "proposed"})`),
+      (s.plannedTeam || []).length
+        ? `Planned team: ${s.plannedTeam.map((m) => `${m.role}:${m.agentId}`).join(", ")}`
+        : "Planned team: none",
+      (s.workers || []).length
+        ? `Workers: ${s.workers.map((w) => `${w.agentId}(${w.status})`).join(", ")}`
+        : "Workers: none",
+    ];
+    if (window.StudioSessions && window.StudioSessions.refreshSessionDetail) {
+      await window.StudioSessions.refreshSessionDetail();
+    }
+    return lines.join("\n");
+  },
+  async set_session_decomposition({ title, overview, body, items } = {}) {
+    const active = await window.ceo.sessionsActive();
+    if (!active || !active.session) return "No active Studio session.";
+    const r = await window.ceo.sessionsSetDecomposition(active.session.id, {
+      title,
+      overview,
+      body,
+      items: Array.isArray(items) ? items : [],
+      source: "voice-agent",
+    });
+    if (!r || !r.ok) return `Could not save decomposition: ${r ? r.reason : "unknown"}`;
+    if (window.StudioSessions) {
+      if (window.StudioSessions.refreshActive) await window.StudioSessions.refreshActive();
+      if (window.StudioSessions.refreshSessionDetail) await window.StudioSessions.refreshSessionDetail();
+    }
+    const n = (r.decomposition && r.decomposition.items && r.decomposition.items.length) || 0;
+    ui().appendStream?.("sys", `Saved session decomposition (${n} items)`);
+    return `Saved decomposition on session "${active.session.title}" (${n} items). Left panel updated.`;
+  },
+  async set_session_plan({ title, overview, body } = {}) {
+    const active = await window.ceo.sessionsActive();
+    if (!active || !active.session) return "No active Studio session.";
+    if (!body || !String(body).trim()) return "Plan body (markdown) is required.";
+    const r = await window.ceo.sessionsSetPlan(active.session.id, { title, overview, body });
+    if (!r || !r.ok) return `Could not save plan: ${r ? r.reason : "unknown"}`;
+    if (window.StudioSessions) {
+      if (window.StudioSessions.refreshActive) await window.StudioSessions.refreshActive();
+      if (window.StudioSessions.refreshSessionDetail) await window.StudioSessions.refreshSessionDetail();
+    }
+    ui().appendStream?.("sys", `Captured session plan: ${(r.session && r.session.planDoc && r.session.planDoc.title) || title || "Plan"}`);
+    return `Captured plan on session "${active.session.title}". Awaiting human approval before execute.`;
   },
   async open_agent_detail({ agent } = {}) {
     if (!agent) return "Provide the agent id or name.";
@@ -371,7 +433,7 @@ const clientTools = {
     const reg = await window.ceo.registryList();
     const a = ((reg && reg.agents) || []).find((x) => x.id === agent || x.name === agent);
     if (!a) return `No agent "${agent}".`;
-    const r = await window.ceo.registryMount(a.id);
+    const r = await window.ceo.registryMount(a.id, { allowPaid: true });
     if (!r || !r.ok) return `Could not mount ${a.name || a.id}: ${r ? r.reason : "unknown"}`;
     ui().refreshTeam?.();
     ui().appendStream?.("sys", `▶ Mounted ${a.name || a.id}`);
@@ -1269,14 +1331,186 @@ window.CEOConvai = {
 
 if (hdrBtn) hdrBtn.addEventListener("click", toggle);
 
+// ─── LOCAL VOICE MODE ────────────────────────────────────────────────────────
+// Free, zero-API-key voice loop using:
+//   STT: Web Speech API (browser-native, no cost)
+//   LLM: Ollama gemma3:4b via main process voice:ask IPC
+//   TTS: macOS `say` via main process voice:speak IPC
+//
+// Activates automatically when ElevenLabs is unavailable but Ollama is running.
+
+const LOCAL = (() => {
+  let recognition = null;
+  let localActive = false;
+  let localStarting = false;
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const conversationHistory = [];
+
+  function setLocalLabel(listening) {
+    if (hdrLabel) hdrLabel.textContent = listening ? "Listening…" : "Voice";
+    if (hdrIcon) hdrIcon.textContent = listening ? "🔴" : "🎙️";
+    if (hdrBtn) {
+      hdrBtn.classList.toggle("bg-red-600", !!listening);
+      hdrBtn.classList.toggle("border-red-500", !!listening);
+      hdrBtn.classList.toggle("bg-neutral-800", !listening);
+    }
+  }
+
+  async function handleTranscript(transcript) {
+    if (!transcript.trim()) return;
+    ui().appendStream?.("user", transcript);
+    ui().setVoiceStatus?.("🤔 Thinking…");
+    setLocalLabel(false);
+
+    conversationHistory.push({ role: "user", content: transcript });
+
+    // Build system prompt from live studio context
+    let systemContent = "You are the CEO of this project. You are concise, strategic, and speak in short sentences suitable for voice conversation. Keep responses under 3 sentences unless asked for more detail.";
+    try {
+      const ctx = await buildStudioContext("voice turn");
+      systemContent += "\n\n" + ctx;
+    } catch { /* context optional */ }
+
+    const messages = [
+      { role: "system", content: systemContent },
+      ...conversationHistory.slice(-8), // keep last 4 turns
+    ];
+
+    try {
+      const r = await window.ceo.voiceAsk(transcript, messages);
+      if (!r || !r.ok) {
+        ui().setVoiceStatus?.(`⚠ ${r ? r.reason : "voice:ask failed"}`);
+        stopLocal();
+        return;
+      }
+
+      const reply = r.text;
+      ui().appendStream?.("agent", reply);
+      conversationHistory.push({ role: "assistant", content: reply });
+
+      // Speak the reply via macOS say
+      ui().setVoiceStatus?.("🔊 Speaking…");
+      try {
+        await window.ceo.voiceSpeak(reply);
+      } catch (e) {
+        console.warn("[local voice] voiceSpeak failed:", e);
+      }
+
+      // Continue listening if still active
+      if (localActive) {
+        ui().setVoiceStatus?.("🎙 Listening… (speak now)");
+        setLocalLabel(true);
+        recognition.start();
+      }
+    } catch (e) {
+      ui().setVoiceStatus?.(`⚠ Error: ${e.message}`);
+      stopLocal();
+    }
+  }
+
+  function startLocal() {
+    if (localActive || localStarting) return;
+    if (!SpeechRecognition) {
+      ui().setVoiceStatus?.("⚠ Web Speech API not supported in this browser.");
+      return;
+    }
+    localStarting = true;
+    localActive = true;
+    conversationHistory.length = 0;
+
+    recognition = new SpeechRecognition();
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.continuous = false; // one utterance at a time — we restart manually
+
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      handleTranscript(transcript).catch((e) => {
+        ui().setVoiceStatus?.(`⚠ ${e.message}`);
+        stopLocal();
+      });
+    };
+
+    recognition.onerror = (event) => {
+      if (event.error === "no-speech") {
+        // Just restart silently
+        if (localActive) {
+          try { recognition.start(); } catch { /* */ }
+        }
+        return;
+      }
+      ui().setVoiceStatus?.(`⚠ Speech error: ${event.error}`);
+      if (event.error === "not-allowed") stopLocal();
+    };
+
+    recognition.onend = () => {
+      // If we ended without a result and still active, keep listening
+      if (localActive && recognition) {
+        try { recognition.start(); } catch { /* restart race */ }
+      }
+    };
+
+    try {
+      recognition.start();
+      setLocalLabel(true);
+      ui().setAgentState?.("listening");
+      ui().setVoiceStatus?.("🎙 Listening… (speak now)");
+      localStarting = false;
+    } catch (e) {
+      ui().setVoiceStatus?.(`⚠ Could not start microphone: ${e.message}`);
+      localActive = false;
+      localStarting = false;
+    }
+  }
+
+  function stopLocal() {
+    localActive = false;
+    localStarting = false;
+    if (recognition) {
+      try { recognition.stop(); } catch { /* */ }
+      recognition = null;
+    }
+    setLocalLabel(false);
+    ui().setAgentState?.("idle");
+    ui().setVoiceStatus?.("Local voice ended.");
+  }
+
+  function toggleLocal() {
+    if (localActive) stopLocal();
+    else startLocal();
+  }
+
+  return { start: startLocal, stop: stopLocal, toggle: toggleLocal, isActive: () => localActive };
+})();
+
+// ─── END LOCAL VOICE MODE ─────────────────────────────────────────────────────
+
 // Probe availability; disable the controls if no key is configured.
 (async () => {
   try {
     const st = await window.ceo.convaiStatus();
     available = !!(st && st.available);
     if (!available) {
+      // Check if local voice is available instead
+      try {
+        const voiceSt = await window.ceo.voiceAvailable();
+        if (voiceSt && (voiceSt.mode === "local" || voiceSt.available)) {
+          // Local mode available — rewire the button to local voice loop
+          if (hdrBtn) hdrBtn.disabled = false;
+          ui().setVoiceStatus?.("🟢 Local voice ready (Ollama + macOS say)");
+          if (hdrBtn) {
+            hdrBtn.removeEventListener("click", toggle);
+            hdrBtn.addEventListener("click", () => LOCAL.toggle());
+          }
+          window.CEOConvai.toggle = LOCAL.toggle;
+          window.CEOConvai.stop = LOCAL.stop;
+          window.CEOConvai.isActive = LOCAL.isActive;
+          return;
+        }
+      } catch { /* voice status optional */ }
       if (hdrBtn) hdrBtn.disabled = true;
-      ui().setVoiceStatus?.(st && st.note ? st.note : "Live voice disabled (no ELEVENLABS_API_KEY).");
+      ui().setVoiceStatus?.(st && st.note ? st.note : "Voice disabled — start Ollama with gemma3:4b or set ELEVENLABS_API_KEY.");
     }
   } catch { /* live voice optional */ }
 })();

@@ -38,6 +38,8 @@ milestones as autonomy runs. One panel, many channels, always live.
 - DM rooms (single member) always answer; bounded agent-to-agent follow-up chains.
 - Human/CEO drop-in: post into a live room mid-conversation to steer it.
 - Board team-log channels: autonomy milestones (`▶ ✓ ✗ ✅ ⛔`) stream into a channel.
+- Board live swarm strip: show active runner/board workers, with terminal
+  click-through for mounted registry agents and task context for direct workers.
 - One-panel channel switcher: CEO, board team-logs, team channels, DMs.
 - Shared context injection (referenced artifacts/files) when posting to a room.
 - gbrain shared-memory capture/recall per turn (degrades gracefully when absent).

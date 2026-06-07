@@ -630,9 +630,13 @@ function parseAgentsMD(agentsPath) {
   try {
     const content = fs.readFileSync(agentsPath, "utf-8");
     const purpose = (content.match(/\*\*Purpose\*\*:\s*(.+?)(?:\n|$)/) || [])[1] || "";
-    return { purpose: purpose.trim(), responsibilities: parseListSection(content, "Responsibilities").concat(parseListSection(content, "Boundaries")) };
+    return {
+      purpose: purpose.trim(),
+      responsibilities: parseListSection(content, "Responsibilities").concat(parseListSection(content, "Boundaries")),
+      priorities: parseListSection(content, "Priorities").concat(parseListSection(content, "Active Epics")),
+    };
   } catch {
-    return { purpose: "", responsibilities: [] };
+    return { purpose: "", responsibilities: [], priorities: [] };
   }
 }
 
@@ -682,6 +686,8 @@ function ingestDomainsFromProject(slug, projectPath, availableBoards = []) {
     }
     if (detected.source === "harness-teams") parsed = parseTeamDefinition(path.join(detected.path, "definition.md"));
     else parsed = parseAgentsMD(path.join(detected.path, "AGENTS.md"));
+    const responsibilities = Array.isArray(parsed.responsibilities) ? parsed.responsibilities : [];
+    const priorities = Array.isArray(parsed.priorities) ? parsed.priorities : [];
     const relativePath = relFromProject(projectPath, detected.path);
     const existing = readBrainDomain(slug, detected.name);
     const definition = normalizeDomainDefinition({
@@ -689,9 +695,9 @@ function ingestDomainsFromProject(slug, projectPath, availableBoards = []) {
       slug: domainSlug(detected.name),
       purpose: parsed.purpose || `Domain ${detected.name} - detected from project structure`,
       overarchingGoal: existing?.overarchingGoal || parsed.currentState || "Define this detected domain's long-running outcome.",
-      boundaries: parsed.responsibilities.length ? parsed.responsibilities : ["Detected domain; ownership needs confirmation"],
-      features: parsed.priorities.length ? parsed.priorities : ["Confirm and refine this detected domain"],
-      priorities: parsed.priorities,
+      boundaries: responsibilities.length ? responsibilities : ["Detected domain; ownership needs confirmation"],
+      features: priorities.length ? priorities : ["Confirm and refine this detected domain"],
+      priorities,
       relativePath,
       sourcePath: detected.path,
       sourceType: detected.source,

@@ -69,7 +69,12 @@ if [[ "$LAUNCHABLE" != "1" ]]; then
     exit 1
 fi
 
-WATCH_CMD="cd $(printf '%q' "$HARNESS_ROOT") && HARNESS_WORKSPACE=$(printf '%q' "${HARNESS_WORKSPACE:-}") ./bin/domain-room watch $(printf '%q' "$CANONICAL_ROOM") $(printf '%q' "$ROOM_SPEAKER") --persona $(printf '%q' "$PERSONA") --interval 12 --heartbeat"
+# NOTE: no --heartbeat. The watcher updates presence (presence/ dir, used by
+# `domain-room who`) every cycle regardless; --heartbeat would ALSO post a
+# "heartbeat at <iso>" line into the human-visible chat.log every cycle, which
+# floods the A2A room feed (~95% noise). Liveness is tracked via presence, not
+# by spamming the durable conversation log.
+WATCH_CMD="cd $(printf '%q' "$HARNESS_ROOT") && HARNESS_WORKSPACE=$(printf '%q' "${HARNESS_WORKSPACE:-}") ./bin/domain-room watch $(printf '%q' "$CANONICAL_ROOM") $(printf '%q' "$ROOM_SPEAKER") --persona $(printf '%q' "$PERSONA") --interval 12"
 
 tmux_session_target() {
     # tmux target matching is prefix-based by default. Use '=' so short names
@@ -126,21 +131,7 @@ fi
 
 if ! GUARDRAIL_OUT="$(python3 "$HARNESS_ROOT/config/cost_limits.py" check "$AGENT_ID" $GUARDRAIL_INTERACTIVE 2>&1)"; then
     echo ">>> Spawn refused by cost guardrail: $GUARDRAIL_OUT" >&2
-    if [[ "$AGENT_ID" =~ ^grok- && "$AGENT_ID" != "grok" ]]; then
-        echo ">>> '$AGENT_ID' is a SEPARATE paid Grok session — the #1 credit-burn vector." >&2
-        echo ">>> To allow it deliberately, re-run with CEO_ALLOW_PAID=1 (interactive) and confirm below." >&2
-    fi
-    # Only humans at a TTY may override; automated callers are hard-blocked.
-    if [[ -t 0 && "$AGENT_ID" =~ ^grok- && "$AGENT_ID" != "grok" ]]; then
-        read -r -p ">>> Type 'yes' to override and proceed anyway (not recommended): " confirm
-        if [[ "$confirm" != "yes" ]]; then
-            echo "Aborted."
-            exit 1
-        fi
-        echo ""
-    else
-        exit 1
-    fi
+    exit 1
 fi
 
 # Record the spawn against the rolling guardrail ledger (best-effort).

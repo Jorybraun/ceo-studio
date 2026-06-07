@@ -111,10 +111,10 @@ try:
     ok("room shows synthesis", "MEETING SYNTHESIS" in log)
     ok("persona brief was injected into member task", "PERSONA BRIEF" in log)
 
-    # 4. Paid provider stays guardrail-gated for automated callers (no spend).
-    from agents import agent_adapter
-    r = agent_adapter.dispatch("devin", "should_refuse", ROOM, "noop", interactive=False)
-    ok("paid devin dispatch refused without CEO_ALLOW_PAID", r.get("refused") is True)
+    # 4. Paid classification alone does not block; caps/kill-switch remain the guardrail.
+    from config import cost_limits
+    allowed, reason = cost_limits.can_spawn("devin:should_not_block", paid=True, running_count=0)
+    ok("paid classification alone does not block A2A use", allowed and reason == "ok")
 
     print(f"\n{passed} A2A meeting checks passed (zero API cost).")
 finally:

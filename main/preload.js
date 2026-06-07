@@ -66,10 +66,11 @@ contextBridge.exposeInMainWorld("ceo", {
   personaFiles: () => ipcRenderer.invoke("personas:files_list"),
   personaRead: (id) => ipcRenderer.invoke("personas:read", id),
   personaSave: (id, content) => ipcRenderer.invoke("personas:save", { id, content }),
-  personaDelete: (id) => ipcRenderer.invoke("personas:delete", id),
-  personaGenerate: (name, brief, save) => ipcRenderer.invoke("personas:generate", { name, brief, save }),
-  listSkills: () => ipcRenderer.invoke("skills:list"),
-  ceoTaskDetail: (slug, id) => ipcRenderer.invoke("hermes:task_detail", slug, id),
+	  personaDelete: (id) => ipcRenderer.invoke("personas:delete", id),
+	  personaGenerate: (name, brief, save) => ipcRenderer.invoke("personas:generate", { name, brief, save }),
+	  listSkills: () => ipcRenderer.invoke("skills:list"),
+	  routeSkills: (info) => ipcRenderer.invoke("skills:route", info),
+	  ceoTaskDetail: (slug, id) => ipcRenderer.invoke("hermes:task_detail", slug, id),
   ceoStats: (slug) => ipcRenderer.invoke("hermes:stats", slug),
   ceoSwarm: (slug) => ipcRenderer.invoke("hermes:swarm", slug),
   ceoRoom: (slug, limit) => ipcRenderer.invoke("hermes:room", slug, limit),
@@ -93,9 +94,18 @@ contextBridge.exposeInMainWorld("ceo", {
   createChildTask: (task) => ipcRenderer.invoke("domain_board:create_child_task", task),
   recordBriefAsset: (asset) => ipcRenderer.invoke("domain_board:record_asset", asset),
   decomposeBrief: (info) => ipcRenderer.invoke("domain_board:decompose_brief", info),
+  // Conversational brief intake — draft the canonical 7-field brief from free text.
+  briefIntakeDraft: (info) => ipcRenderer.invoke("brief_intake:draft", info),
   // New sectional decomposition tools (human + agent usable)
   proposeBriefDecomposition: (info) => ipcRenderer.invoke("domain_board:propose_brief_decomposition", info),
   applyBriefDecomposition: (proposal) => ipcRenderer.invoke("domain_board:apply_brief_decomposition", proposal),
+  briefRunGet: (board, taskId) => ipcRenderer.invoke("brief_runs:get", { board, taskId }),
+  briefRunUpdate: (board, taskId, patch) => ipcRenderer.invoke("brief_runs:update", { board, taskId, patch }),
+  briefRunMeetingStart: (board, taskId, info) => ipcRenderer.invoke("brief_runs:meeting_start", { board, taskId, info }),
+  briefRunMeetingSchedule: (board, taskId, info) => ipcRenderer.invoke("brief_runs:meeting_schedule", { board, taskId, info }),
+  briefRunMeetingStartScheduled: (board, taskId, meetingId) => ipcRenderer.invoke("brief_runs:meeting_start_scheduled", { board, taskId, meetingId }),
+  briefRunMeetingSynthesize: (board, taskId, meetingId) => ipcRenderer.invoke("brief_runs:meeting_synthesize", { board, taskId, meetingId }),
+  briefRunMeetingProposalAction: (info) => ipcRenderer.invoke("brief_runs:meeting_proposal_action", info),
   provenanceGraph: (parentId) => ipcRenderer.invoke("provenance:graph", parentId),
   orchestrationSummary: (info) => ipcRenderer.invoke("orchestration:summary", info),
   orchestrationRoute: (info) => ipcRenderer.invoke("orchestration:route", info),
@@ -110,14 +120,37 @@ contextBridge.exposeInMainWorld("ceo", {
   autonomyStart: (info) => ipcRenderer.invoke("autonomy:start", info),
   autonomyStop: () => ipcRenderer.invoke("autonomy:stop"),
   runnerStatus: () => ipcRenderer.invoke("runner:status"),
+  runnerReport: () => ipcRenderer.invoke("runner:report"),
   runnerConfigure: (patch) => ipcRenderer.invoke("runner:configure", patch),
   runnerRunOnce: (info) => ipcRenderer.invoke("runner:run_once", info),
   runnerStart: (info) => ipcRenderer.invoke("runner:start", info),
   runnerStop: () => ipcRenderer.invoke("runner:stop"),
+  notificationsList: (info) => ipcRenderer.invoke("notifications:list", info),
+  notificationsAck: (id) => ipcRenderer.invoke("notifications:ack", id),
   reportSystemBug: (bug) => ipcRenderer.invoke("self_repair:report_bug", bug),
   consultSelfRepair: (info) => ipcRenderer.invoke("self_repair:consult", info),
   // AGUI: local AG-UI server URL the renderer's HttpAgent connects to.
   aguiUrl: () => ipcRenderer.invoke("agui:url"),
+  sessionsList: () => ipcRenderer.invoke("sessions:list"),
+  sessionsGet: (id) => ipcRenderer.invoke("sessions:get", id),
+  sessionsCreate: (info) => ipcRenderer.invoke("sessions:create", info),
+  sessionsUpdate: (id, patch) => ipcRenderer.invoke("sessions:update", { id, patch }),
+  sessionsSetActive: (id) => ipcRenderer.invoke("sessions:set_active", id),
+  sessionsActive: () => ipcRenderer.invoke("sessions:active"),
+  sessionsSpawnWorker: (info) => ipcRenderer.invoke("sessions:spawn_worker", info),
+  sessionsRoom: (room) => ipcRenderer.invoke("sessions:room", room),
+  sessionsPost: (room, speaker, body) => ipcRenderer.invoke("sessions:post", { room, speaker, body }),
+  sessionsStartRoom: (sessionId, opts = {}) => ipcRenderer.invoke("sessions:start_room", { sessionId, ...opts }),
+  sessionsStopRoom: (sessionId) => ipcRenderer.invoke("sessions:stop_room", { sessionId }),
+  sessionsRoomStatus: (sessionId) => ipcRenderer.invoke("sessions:room_status", { sessionId }),
+  sessionsSetPlan: (id, planDoc) => ipcRenderer.invoke("sessions:set_plan", { id, planDoc }),
+  sessionsApprovePlan: (id) => ipcRenderer.invoke("sessions:approve_plan", id),
+  sessionsRejectPlan: (id, reason) => ipcRenderer.invoke("sessions:reject_plan", { id, reason }),
+  sessionsSetPlannedTeam: (id, team) => ipcRenderer.invoke("sessions:set_planned_team", { id, team }),
+  sessionsSetTaskTree: (id, taskTree) => ipcRenderer.invoke("sessions:set_task_tree", { id, taskTree }),
+  sessionsSetDecomposition: (id, decompositionDoc) => ipcRenderer.invoke("sessions:set_decomposition", { id, decompositionDoc }),
+  sessionsDecomposition: (id) => ipcRenderer.invoke("sessions:decomposition", id),
+  sessionsLaunchTeam: (sessionId) => ipcRenderer.invoke("sessions:launch_team", { sessionId }),
   // Agent registry (single source of truth: agents.json)
   registryList: () => ipcRenderer.invoke("registry:list"),
   registryPersonas: () => ipcRenderer.invoke("registry:personas"),
@@ -128,12 +161,31 @@ contextBridge.exposeInMainWorld("ceo", {
   registryDeleteAgent: (id) => ipcRenderer.invoke("registry:delete_agent", id),
   registrySaveTeam: (name, members) => ipcRenderer.invoke("registry:save_team", { name, members }),
   registryDeleteTeam: (name) => ipcRenderer.invoke("registry:delete_team", name),
-  registryMount: (id) => ipcRenderer.invoke("registry:mount", id),
+  registryMount: (id, opts = {}) => ipcRenderer.invoke("registry:mount", { id, ...opts }),
   registryUnmount: (id) => ipcRenderer.invoke("registry:unmount", id),
   registryAlive: (id) => ipcRenderer.invoke("registry:alive", id),
   registryTerminal: (id) => ipcRenderer.invoke("registry:terminal", id),
   registryTerminalSend: (id, text, window) => ipcRenderer.invoke("registry:terminal_send", { id, text, window }),
   registryMessage: (id, message, speaker) => ipcRenderer.invoke("registry:message", { id, message, speaker }),
+  terminalOpen: (info) => ipcRenderer.invoke("terminal:open", info),
+  terminalInput: (terminalId, data) => ipcRenderer.invoke("terminal:input", { terminalId, data }),
+  terminalResize: (terminalId, cols, rows) => ipcRenderer.invoke("terminal:resize", { terminalId, cols, rows }),
+  terminalClose: (terminalId) => ipcRenderer.invoke("terminal:close", terminalId),
+  onTerminalData: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on("terminal:data", listener);
+    return () => ipcRenderer.removeListener("terminal:data", listener);
+  },
+  onTerminalExit: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on("terminal:exit", listener);
+    return () => ipcRenderer.removeListener("terminal:exit", listener);
+  },
+  onTerminalOpenRequest: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on("terminal:open-request", listener);
+    return () => ipcRenderer.removeListener("terminal:open-request", listener);
+  },
   // Meetings (A2A meeting engine)
   meetingOptions: () => ipcRenderer.invoke("meetings:options"),
   meetingStart: (info) => ipcRenderer.invoke("meetings:start", info),
@@ -143,6 +195,10 @@ contextBridge.exposeInMainWorld("ceo", {
   meetingScheduleUpdate: (id, patch) => ipcRenderer.invoke("meetings:schedule_update", { id, patch }),
   meetingScheduleDelete: (id) => ipcRenderer.invoke("meetings:schedule_delete", id),
   meetingScheduleStart: (id) => ipcRenderer.invoke("meetings:schedule_start", id),
+  standupStatus: () => ipcRenderer.invoke("standups:status"),
+  standupConfigure: (info) => ipcRenderer.invoke("standups:configure", info),
+  standupRunDue: () => ipcRenderer.invoke("standups:run_due"),
+  standupProposalAction: (info) => ipcRenderer.invoke("standups:proposal_action", info),
   // Live room loop — turn a channel into an ongoing A2A conversation.
   roomLoopStart: (info) => ipcRenderer.invoke("meetings:room_loop_start", info),
   roomLoopStop: (room) => ipcRenderer.invoke("meetings:room_loop_stop", room),
@@ -156,6 +212,14 @@ contextBridge.exposeInMainWorld("ceo", {
   voiceAvailable: () => ipcRenderer.invoke("voice:available"),
   voiceSpeak: (text) => ipcRenderer.invoke("voice:speak", text),
   voiceListen: (audioBase64, mime) => ipcRenderer.invoke("voice:listen", { audioBase64, mime }),
+  voiceAsk: (prompt, messages) => ipcRenderer.invoke("voice:ask", { prompt, messages }),
+  // Pilot seat voice chat (multi-agent, Piper TTS). STT in renderer, chat+TTS in main.
+  voiceChatPilot: () => ipcRenderer.invoke("voicechat:pilot"),
+  voiceChatSetPilot: (agentId) => ipcRenderer.invoke("voicechat:setPilot", agentId),
+  voiceChatStatus: () => ipcRenderer.invoke("voicechat:status"),
+  voiceChat: (text, mute) => ipcRenderer.invoke("voicechat:chat", { text, mute }),
+  voiceChatSpeak: (text) => ipcRenderer.invoke("voicechat:speak", text),
+  voiceChatInterrupt: () => ipcRenderer.invoke("voicechat:interrupt"),
   // Live voice agent (ElevenLabs Conversational AI). Main returns a signed URL;
   // the renderer opens the real-time session with the SDK. Key stays in main.
   convaiStatus: () => ipcRenderer.invoke("convai:status"),
