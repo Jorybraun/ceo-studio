@@ -72,6 +72,10 @@ const DEFAULT_POLICY = {
   // being silently orphaned when they cannot fast-forward-merge.
   integrationMode: "merge", // "merge" | "pr"
   model: "swe-1.6",
+  // Force ALL workers onto ONE model regardless of their registry model. Empty
+  // string = use each agent's own model. Set to a promo/cheap model (e.g.
+  // "adaptive-promo") to keep the whole swarm off paid swe-1.6 credits.
+  modelOverride: "",
   // Headcount safety caps. A positive number is a hard ceiling. 0 means
   // "unlimited" and must be opted into EXPLICITLY — it is deliberately NOT the
   // default, because an unconfigured runner defaulting to unlimited concurrency
@@ -169,6 +173,7 @@ function normalizePolicy(input = {}) {
     workerTimeoutMinutes: clampPositive(m.workerTimeoutMinutes, DEFAULT_POLICY.workerTimeoutMinutes),
     devinPermissionMode: String(m.devinPermissionMode || DEFAULT_POLICY.devinPermissionMode),
     model: String(m.model || DEFAULT_POLICY.model),
+    modelOverride: m.modelOverride ? String(m.modelOverride) : "",
     boards: m.boards === "all" || !Array.isArray(m.boards) ? "all" : m.boards.map(String),
     protectedBoards: arr(m.protectedBoards, DEFAULT_POLICY.protectedBoards),
     triageLanes: arr(m.triageLanes, DEFAULT_POLICY.triageLanes),
@@ -1473,10 +1478,13 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
               // Swarm-aware: pass the live roster (incl. this new task) so the
               // worker knows who its siblings are. Append self first so the
               // roster reflects current intent.
-              const swarm = [...workers, { board, taskId: t.id, agentId: agent.id, model: agent.model || policy.model, title: full.title || t.title }];
+              // modelOverride (when set) forces every worker onto one model,
+              // regardless of its registry model — used to route the whole swarm
+              // onto a promo/cheap model so paid swe-1.6 credits aren't burned.
+              const model = policy.modelOverride || agent.model || policy.model;
+              const swarm = [...workers, { board, taskId: t.id, agentId: agent.id, model, title: full.title || t.title }];
               const prompt = buildWorkerPrompt({ task: full, agent, board, projectPath, projectSlug, persona: agent.persona, swarm, branch: branchNameFor(board, t.id), comments });
               const logPath = path.join(workerLogsDir(projectSlug), `${board}-${t.id}-${Date.now()}.log`);
-              const model = agent.model || policy.model;
               const res = deps.spawnWorker({ projectPath, model, prompt, logPath, board, taskId: t.id, agent, permissionMode: policy.devinPermissionMode });
               if (!res || !res.ok) { phases.execute.push({ board, taskId: t.id, error: (res && res.reason) || "spawn failed" }); return; }
               deps.hermes.setTaskStatus({ board, taskId: t.id, status: "running", reason: `dispatched to Devin ${model} via autonomy runner` });

@@ -237,6 +237,16 @@ ok("two-context browser contract requires context execution evidence",
       && r.phases.execute.some((e) => e.taskId === "marked" && e.skipped === "human-required"));
 })();
 
+// 1a.3. modelOverride forces every worker onto one (promo/cheap) model so the
+// swarm does not burn paid swe-1.6 credits
+(() => {
+  const { deps, calls } = makeDeps({ board: { ok: true, columns: { ready: [{ id: "om", title: "Cheap it", assignee: "builder" }] } } });
+  runner.runCycle({ projectSlug: SLUG + "-model-override", projectPath: PROJECT_PATH, force: true, deps,
+    policy: basePolicy({ modelOverride: "adaptive-promo", allowGoalReview: false, allowUnblocker: false, allowTriage: false }) });
+  ok("modelOverride routes the worker onto the promo model (not registry swe-1.6)",
+    calls.spawn.length === 1 && calls.spawn[0].model === "adaptive-promo");
+})();
+
 // 1b. dispatch prompt carries recent Kanban comments/evidence
 (() => {
   const { deps, calls } = makeDeps({
