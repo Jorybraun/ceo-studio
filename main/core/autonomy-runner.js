@@ -98,6 +98,11 @@ const DEFAULT_POLICY = {
   assignLanes: ["todo", "ready", "bug", "review"],
   executeLanes: ["ready"],
   targetTaskIds: [], // optional focus set for a goal-specific runner pass
+  // Tasks that a headless `devin -p` worker can NEVER satisfy (real phone call,
+  // two-way device audio, on-device Siri, manual dogfood, device/browser E2E).
+  // The EXECUTE phase skips these so they never start the failure->repair spiral.
+  // Tasks can also opt in with a `[human-required]` marker in their title/body.
+  humanRequiredTaskIds: [],
   verifyCommands: [["npm", ["run", "check"]], ["npm", ["test"]]],
   staleWorkerSkipReap: false,
 };
@@ -171,6 +176,7 @@ function normalizePolicy(input = {}) {
     assignLanes: arr(m.assignLanes, DEFAULT_POLICY.assignLanes),
     executeLanes: arr(m.executeLanes, DEFAULT_POLICY.executeLanes),
     targetTaskIds: arr(m.targetTaskIds, DEFAULT_POLICY.targetTaskIds),
+    humanRequiredTaskIds: arr(m.humanRequiredTaskIds, DEFAULT_POLICY.humanRequiredTaskIds),
   };
 }
 
@@ -873,6 +879,22 @@ function documentGate(deps, { projectSlug, board, task } = {}) {
   return gate && typeof gate === "object" ? { task: fullTask, ...gate } : gate;
 }
 
+// Human-required gate. Some tasks can NEVER be verified by a headless `devin -p`
+// worker (a real phone call, two-way device audio, on-device Siri/App-Intents,
+// a manual dogfood pass, browser/device E2E). Dispatching a paid worker to them
+// guarantees a failing gate, which then files a repair task, which fails the same
+// way — the self-repair $-spiral. A task is human-required if its id is listed in
+// `policy.humanRequiredTaskIds` or it carries an explicit `[human-required]`
+// marker in its title/body/acceptance. The EXECUTE phase skips these (never
+// dispatches), so they never enter the failure→repair loop.
+const HUMAN_REQUIRED_MARKER = /\[human-required\]/i;
+function isHumanRequired(task, policy) {
+  if (!task) return false;
+  const ids = policy && Array.isArray(policy.humanRequiredTaskIds) ? policy.humanRequiredTaskIds : [];
+  if (ids.includes(String(task.id))) return true;
+  return HUMAN_REQUIRED_MARKER.test(`${task.title || ""}\n${task.body || ""}\n${task.acceptanceCriteria || ""}`);
+}
+
 function blockDirtyBrief(deps, { board, task, gate, phase } = {}) {
   const taskId = task && task.id;
   if (!taskId) return;
@@ -1403,6 +1425,22 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
         for (const lane of policy.executeLanes) {
           for (const t of laneTasks(boardData, lane)) {
             if (!inTargetSet(policy, t)) continue;
+            if (isHumanRequired(t, policy)) {
+              // Never dispatch a paid worker to a task it cannot possibly verify
+              // — that is the head of the self-repair $-spiral. Escalate once
+              // (comment), then keep skipping it cheaply every cycle. Leave it in
+              // its lane (NOT blocked) so the unblocker never picks it up either.
+              const hkey = `${board}:${t.id}`;
+              state.humanRequired = state.humanRequired || {};
+              if (!state.humanRequired[hkey]) {
+                safe("human-required", () => deps.hermes.addComment({ board, taskId: t.id, author: "autonomy-runner/human-gate",
+                  body: "Marked **human-required**: a headless `devin -p` worker cannot verify this (real call / two-way device audio / on-device Siri / manual dogfood / device E2E). Auto-dispatch is DISABLED so it never starts a failure→repair spiral — a human must drive it. Remove it from `policy.humanRequiredTaskIds` or drop the `[human-required]` marker to re-enable automation." }));
+                state.humanRequired[hkey] = { escalatedAt: new Date().toISOString() };
+                saveState(projectSlug, state);
+              }
+              phases.execute.push({ board, taskId: t.id, skipped: "human-required" });
+              continue;
+            }
             if (spawnedThisCycle >= dispatchCap) break;
             if (workers.length >= concCap) break;
             const gate = documentGate(deps, { projectSlug, board, task: t });
@@ -1470,6 +1508,7 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
         for (const lane of policy.executeLanes) {
           for (const t of laneTasks(boardData, lane)) {
             if (!inTargetSet(policy, t)) continue;
+            if (isHumanRequired(t, policy)) { phases.execute.push({ board, taskId: t.id, skipped: "human-required", dryRun: true }); continue; }
             const gate = documentGate(deps, { projectSlug, board, task: t });
             if (gate && gate.ok && gate.allowed === false) {
               phases.execute.push({

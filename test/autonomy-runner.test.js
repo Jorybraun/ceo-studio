@@ -210,6 +210,33 @@ ok("two-context browser contract requires context execution evidence",
   ok("spawn posts a 'started' work-event to the team log", calls.work.some((w) => w.board === "ceo-studio" && w.speaker === "builder" && /started/.test(w.body)));
 })();
 
+// 1a.1. human-required tasks are NEVER dispatched (head off the self-repair spiral)
+(() => {
+  const { deps, calls } = makeDeps({ board: { ok: true, columns: { ready: [
+    { id: "hr-id", title: "Dogfood: make a real phone call", assignee: "builder" },
+    { id: "normal", title: "Add a pure helper function", assignee: "builder" },
+  ] } } });
+  const r = runner.runCycle({ projectSlug: SLUG + "-human-req-id", projectPath: PROJECT_PATH, force: true, deps,
+    policy: basePolicy({ humanRequiredTaskIds: ["hr-id"], allowGoalReview: false, allowUnblocker: false, allowTriage: false }) });
+  ok("human-required (by id) task is not dispatched", !calls.spawn.some((s) => s.taskId === "hr-id"));
+  ok("non-human-required sibling still dispatches", calls.spawn.some((s) => s.taskId === "normal"));
+  ok("human-required task is escalated with a comment", calls.comment.some((c) => c.taskId === "hr-id" && /human-required/i.test(c.body || "")));
+  ok("human-required task is left in lane, NOT auto-blocked (so the unblocker never grabs it)", !calls.setStatus.some((s) => s.taskId === "hr-id" && s.status === "blocked"));
+  ok("run record marks it skipped:human-required", r.phases.execute.some((e) => e.taskId === "hr-id" && e.skipped === "human-required"));
+})();
+
+// 1a.2. the [human-required] title marker gates a task too (no policy id needed)
+(() => {
+  const { deps, calls } = makeDeps({ board: { ok: true, columns: { ready: [
+    { id: "marked", title: "[human-required] Two-way ElevenLabs voice", assignee: "builder" },
+  ] } } });
+  const r = runner.runCycle({ projectSlug: SLUG + "-human-req-marker", projectPath: PROJECT_PATH, force: true, deps,
+    policy: basePolicy({ allowGoalReview: false, allowUnblocker: false, allowTriage: false }) });
+  ok("[human-required] title marker blocks dispatch",
+    !calls.spawn.some((s) => s.taskId === "marked")
+      && r.phases.execute.some((e) => e.taskId === "marked" && e.skipped === "human-required"));
+})();
+
 // 1b. dispatch prompt carries recent Kanban comments/evidence
 (() => {
   const { deps, calls } = makeDeps({
