@@ -64,6 +64,13 @@ const DEFAULT_POLICY = {
   allowAssign: true, // ASSIGN phase
   execute: true, // EXECUTE phase (spawn real Devin workers). User chose live, capped.
   allowReviewGate: true, // REVIEW phase (test gate -> Done / self-repair)
+  // How a green review gate LANDS work. "merge" = legacy local fast-forward
+  // merge into the main checkout (no review surface; a diverged branch is left
+  // orphaned). "pr" = the merge-manager: push the verified branch + open a
+  // GitHub PR via `gh`, and only promote the task to Done once that PR actually
+  // merges. PR mode gives a human/CI review surface and stops branches from
+  // being silently orphaned when they cannot fast-forward-merge.
+  integrationMode: "merge", // "merge" | "pr"
   model: "swe-1.6",
   // Headcount safety caps. A positive number is a hard ceiling. 0 means
   // "unlimited" and must be opted into EXPLICITLY — it is deliberately NOT the
@@ -145,6 +152,7 @@ function normalizePolicy(input = {}) {
     allowAssign: m.allowAssign !== false,
     execute: m.execute !== false,
     allowReviewGate: m.allowReviewGate !== false,
+    integrationMode: m.integrationMode === "pr" ? "pr" : "merge",
     protectDecomposeOnProtected: m.protectDecomposeOnProtected !== false,
     intervalMinutes: clampPositive(m.intervalMinutes, DEFAULT_POLICY.intervalMinutes),
     maxDispatchPerCycle: Math.max(0, Number(m.maxDispatchPerCycle) || 0),
@@ -579,6 +587,94 @@ function defaultCleanupWorktree({ projectPath, worktree }) {
   catch (e) { return { ok: false, reason: String(e.message || e).slice(0, 200) }; }
 }
 
+// ---------------------------------------------------------------------------
+// Merge-manager (integrationMode: "pr")
+//
+// Instead of a local fast-forward merge, a green review gate can push the
+// verified worker branch and open a GitHub PR via `gh`. This gives a human/CI
+// review surface and never silently orphans a branch that cannot ff-merge.
+// ---------------------------------------------------------------------------
+
+function _gh(cwd, args, timeout = 60000) {
+  return execFileSync("gh", args, { cwd, encoding: "utf8", timeout, stdio: ["ignore", "pipe", "pipe"] });
+}
+
+/** Commits the worker branch is ahead of the main checkout's HEAD (0 = no work). */
+function defaultBranchAhead({ projectPath, branch } = {}) {
+  if (!branch) return 0;
+  try { return Number(String(_git(projectPath, ["rev-list", "--count", `HEAD..${branch}`])).trim() || "0"); }
+  catch { return 0; }
+}
+
+/** Name of the main checkout's current branch — the PR base. */
+function defaultBaseBranch(projectPath) {
+  try { return String(_git(projectPath, ["rev-parse", "--abbrev-ref", "HEAD"])).trim() || "main"; }
+  catch { return "main"; }
+}
+
+/** Push a verified worker branch to origin. force-with-lease is used only as a
+ *  rebase fallback and only ever on the throwaway auto/* branch, never main. */
+function defaultPushReviewBranch({ projectPath, worktree, branch } = {}) {
+  if (!branch) return { ok: false, reason: "no branch" };
+  const cwd = worktree || projectPath;
+  try {
+    _git(cwd, ["push", "-u", "origin", branch], 120000);
+    return { ok: true, forced: false };
+  } catch (e) {
+    try {
+      _git(cwd, ["push", "--force-with-lease", "-u", "origin", branch], 120000);
+      return { ok: true, forced: true };
+    } catch (e2) {
+      return { ok: false, reason: String((e2.stderr || e2.message || e2)).slice(0, 300) };
+    }
+  }
+}
+
+/** State of the PR for a head branch: "open" | "closed" | "merged" (or null). */
+function defaultPullRequestStatus({ projectPath, branch } = {}) {
+  if (!branch) return { ok: false, state: null };
+  try {
+    const out = _gh(projectPath, ["pr", "view", branch, "--json", "state,url,number,mergedAt"]);
+    const data = JSON.parse(String(out).trim() || "{}");
+    const state = data.mergedAt ? "merged" : String(data.state || "").toLowerCase();
+    return { ok: true, state, url: data.url || null, number: data.number || null };
+  } catch (e) {
+    // `gh pr view` exits non-zero when there is no PR for the branch.
+    return { ok: false, state: null, reason: String((e.stderr || e.message || e)).slice(0, 200) };
+  }
+}
+
+/** Open (or reuse) a PR for a verified worker branch. Idempotent: an existing
+ *  open PR for the same head branch is returned instead of opening a duplicate. */
+function defaultOpenPullRequest({ projectPath, worktree, branch, base, title, body } = {}) {
+  if (!branch) return { ok: false, reason: "no branch" };
+  const cwd = worktree || projectPath;
+  const baseBranch = base || defaultBaseBranch(projectPath);
+  try {
+    const existing = _gh(projectPath, ["pr", "list", "--head", branch, "--state", "open", "--json", "url,number", "--limit", "1"]);
+    const rows = JSON.parse(String(existing).trim() || "[]");
+    if (Array.isArray(rows) && rows.length) return { ok: true, url: rows[0].url, number: rows[0].number, created: false };
+  } catch { /* no existing PR (or gh unavailable) — fall through to create */ }
+  try {
+    const out = _gh(cwd, ["pr", "create", "--base", baseBranch, "--head", branch, "--title", String(title || branch), "--body", String(body || "")], 120000);
+    const url = String(out).trim().split(/\r?\n/).filter(Boolean).pop() || null;
+    return { ok: true, url, created: true };
+  } catch (e) {
+    return { ok: false, reason: String((e.stderr || e.message || e)).slice(0, 400) };
+  }
+}
+
+/** Body for an auto-opened review PR: task context + the captured gate evidence. */
+function pullRequestBody(task, evidence) {
+  return [
+    task && task.body ? task.body : "(no task body)",
+    task && task.acceptanceCriteria ? `\n## Acceptance criteria\n${task.acceptanceCriteria}` : "",
+    "\n## Autonomy review gate",
+    evidence || "(no evidence captured)",
+    "\nOpened automatically by the CEO Studio autonomy runner (merge-manager). Merging is gated on review + CI; do not auto-merge without a green gate.",
+  ].filter(Boolean).join("\n");
+}
+
 /**
  * Post a milestone work-event into a board's team-log channel (the room a
  * channel maps to). Best-effort and side-effect-only: the team log is a
@@ -607,6 +703,10 @@ const REAL_DEPS = {
   resolveBaselineRef: defaultResolveBaselineRef,
   prepareReviewBranch: defaultPrepareReviewBranch,
   mergeBranch: defaultMergeBranch,
+  branchAhead: defaultBranchAhead,
+  pushReviewBranch: defaultPushReviewBranch,
+  openPullRequest: defaultOpenPullRequest,
+  pullRequestStatus: defaultPullRequestStatus,
   cleanupWorktree: defaultCleanupWorktree,
   postWork: defaultPostWork,
 };
@@ -1408,6 +1508,36 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
           safe("review", () => {
             const verifyCwd = (reviewInfo && reviewInfo.worktree) || projectPath;
             if (policy.dryRun) { phases.review.push({ board: b, taskId: t.id, dryRun: true, worktree: verifyCwd }); return; }
+            // Merge-manager (PR mode): if a PR was already opened for this task,
+            // do NOT re-verify — poll the PR and promote to Done only once it has
+            // actually merged (or block it if a human closed it unmerged).
+            if (policy.integrationMode === "pr" && state.pullRequests && state.pullRequests[key]) {
+              const pr = state.pullRequests[key];
+              const prState = (deps.pullRequestStatus ? deps.pullRequestStatus({ projectPath, branch: pr.branch }) : { state: null }) || { state: null };
+              if (prState.state === "merged") {
+                deps.hermes.addComment({ board: b, taskId: t.id, author: "autonomy-runner/merge-manager", body: `PR ${pr.url} merged. Promoting task to Done.` });
+                deps.hermes.setTaskStatus({ board: b, taskId: t.id, status: "done", reason: `merged via ${pr.url}` });
+                if (reviewInfo && reviewInfo.worktree) safe("cleanup", () => deps.cleanupWorktree({ projectPath, worktree: reviewInfo.worktree }));
+                delete state.reviews[key];
+                delete state.pullRequests[key];
+                if (state.integrationRepairs) delete state.integrationRepairs[key];
+                saveState(projectSlug, state);
+                logWork(deps, projectPath, b, "merge-manager", `✅ \`${b}/${t.id}\` merged via ${pr.url} — Done`);
+                phases.review.push({ board: b, taskId: t.id, outcome: "done-via-pr-merge", pr: pr.url });
+                return;
+              }
+              if (prState.state === "closed") {
+                deps.hermes.addComment({ board: b, taskId: t.id, author: "autonomy-runner/merge-manager", body: `PR ${pr.url} was closed without merging; leaving task blocked for a human decision.` });
+                deps.hermes.setTaskStatus({ board: b, taskId: t.id, status: "blocked", reason: `PR ${pr.url} closed unmerged` });
+                delete state.pullRequests[key];
+                saveState(projectSlug, state);
+                phases.review.push({ board: b, taskId: t.id, outcome: "pr-closed-unmerged", pr: pr.url });
+                return;
+              }
+              // Still open (or status unknown) — under review on GitHub this cycle.
+              phases.review.push({ board: b, taskId: t.id, outcome: "pr-open", pr: pr.url });
+              return;
+            }
             const linkedRepair = (state.integrationRepairs && state.integrationRepairs[key])
               || (state.completionRepairs && state.completionRepairs[key]);
             if (linkedRepair && linkedRepair.repairTaskId && deps.hermes.getTask) {
@@ -1541,9 +1671,45 @@ function runCycle({ projectSlug, projectPath, force = false, now = new Date(), d
               }
               return;
             }
-            // Verified. Merge the worker's branch into main (ff-only) if present.
+            // Verified. Land the worker's branch (if any) per integrationMode.
             let mergeNote = "";
             if (reviewInfo && reviewInfo.branch) {
+              if (policy.integrationMode === "pr") {
+                // Merge-manager: a verified branch is pushed + opened as a PR;
+                // promotion to Done happens when that PR merges (polled above).
+                const ahead = deps.branchAhead ? deps.branchAhead({ projectPath, branch: reviewInfo.branch }) : 1;
+                if (!ahead) {
+                  deps.hermes.addComment({ board: b, taskId: t.id, author: "autonomy-runner/merge-manager", body: `Worker on branch \`${reviewInfo.branch}\` produced NO commits — no real change was made, so this is NOT Done. Sending back to blocked for re-scoping or a human decision.` });
+                  deps.hermes.setTaskStatus({ board: b, taskId: t.id, status: "blocked", reason: "worker produced no changes" });
+                  safe("cleanup", () => deps.cleanupWorktree({ projectPath, worktree: reviewInfo.worktree }));
+                  delete state.reviews[key];
+                  phases.review.push({ board: b, taskId: t.id, outcome: "blocked-no-changes" });
+                  return;
+                }
+                const push = deps.pushReviewBranch({ projectPath, worktree: reviewInfo.worktree, branch: reviewInfo.branch });
+                if (!push || push.ok === false) {
+                  deps.hermes.addComment({ board: b, taskId: t.id, author: "autonomy-runner/merge-manager", body: `Test gate PASSED on \`${reviewInfo.branch}\`, but pushing it to open a PR failed:\n> ${push && push.reason || "unknown push failure"}\n\nLeaving in review for a human/orchestrator decision.` });
+                  phases.review.push({ board: b, taskId: t.id, outcome: "pr-push-failed", branch: reviewInfo.branch });
+                  return;
+                }
+                const opened = deps.openPullRequest({ projectPath, worktree: reviewInfo.worktree, branch: reviewInfo.branch, title: t.title, body: pullRequestBody(t, evidence) });
+                if (!opened || opened.ok === false || !opened.url) {
+                  deps.hermes.addComment({ board: b, taskId: t.id, author: "autonomy-runner/merge-manager", body: `Test gate PASSED and \`${reviewInfo.branch}\` was pushed, but opening a PR failed:\n> ${opened && opened.reason || "no PR url returned"}\n\nLeaving in review for a human/orchestrator decision.` });
+                  phases.review.push({ board: b, taskId: t.id, outcome: "pr-open-failed", branch: reviewInfo.branch });
+                  return;
+                }
+                state.pullRequests = state.pullRequests || {};
+                state.pullRequests[key] = { branch: reviewInfo.branch, url: opened.url, number: opened.number || null, openedAt: new Date().toISOString() };
+                if (state.integrationRepairs) delete state.integrationRepairs[key];
+                saveState(projectSlug, state);
+                deps.hermes.addComment({ board: b, taskId: t.id, author: "autonomy-runner/merge-manager", body: `Test gate PASSED. Opened pull request for review + merge: ${opened.url}\n\nThe task is promoted to Done automatically once this PR merges.\n${evidence}` });
+                // The branch is safely on origin; reclaim the local worktree.
+                safe("cleanup", () => deps.cleanupWorktree({ projectPath, worktree: reviewInfo.worktree }));
+                delete state.reviews[key];
+                logWork(deps, projectPath, b, "merge-manager", `🔀 \`${b}/${t.id}\` passed the gate — opened PR ${opened.url} for merge`);
+                phases.review.push({ board: b, taskId: t.id, outcome: "pr-opened", branch: reviewInfo.branch, pr: opened.url });
+                return;
+              }
               const merge = deps.mergeBranch({ projectPath, branch: reviewInfo.branch });
               if (merge.ok && !merge.merged) {
                 // The worker produced no commits — it did not actually do the

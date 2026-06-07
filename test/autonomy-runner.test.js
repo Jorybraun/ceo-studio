@@ -642,6 +642,89 @@ ok("two-context browser contract requires context execution evidence",
   ok("review self-repair includes failed branch evidence", /auto\/pipe-os-t-branch/.test(filed.output || "") && /pipe-os-t-branch/.test(filed.output || ""));
 })();
 
+// 3c.1. merge-manager (integrationMode:"pr") — a green gate PUSHES the verified
+// branch and OPENS a PR instead of a local merge, records it, and does NOT mark
+// the task Done (Done waits for the PR to actually merge).
+(() => {
+  const slug = SLUG + "-pr-open";
+  const stateFile = path.join(process.env.CEO_STUDIO_HOME, slug, "brain", "autonomy", "runner", "state.json");
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  fs.writeFileSync(stateFile, JSON.stringify({
+    reviews: { "ceo-studio:pr-task": { worktree: "/tmp/wt/pr-task", branch: "auto/ceo-studio-pr-task", agentId: "builder" } },
+  }));
+  const { deps, calls } = makeDeps({ board: { ok: true, columns: { review: [{ id: "pr-task", title: "Shippable feature" }] } } });
+  let pushed = null, opened = null;
+  deps.prepareReviewBranch = () => ({ ok: true, rebased: true, baselineRef: "base" });
+  deps.branchAhead = () => 2;
+  deps.pushReviewBranch = (a) => { pushed = a; return { ok: true }; };
+  deps.openPullRequest = (a) => { opened = a; return { ok: true, url: "https://github.com/x/y/pull/7", number: 7, created: true }; };
+  deps.cleanupWorktree = () => ({ ok: true });
+  const result = runner.runCycle({
+    projectSlug: slug, projectPath: PROJECT_PATH, force: true, deps,
+    policy: basePolicy({ execute: false, integrationMode: "pr", allowGoalReview: false, allowUnblocker: false, allowTriage: false, allowStaleRunningCleanup: false }),
+  });
+  const saved = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  ok("pr-mode: normalized policy carries integrationMode 'pr'", result.policy.integrationMode === "pr");
+  ok("pr-mode: green gate pushes the verified branch", pushed && pushed.branch === "auto/ceo-studio-pr-task");
+  ok("pr-mode: green gate opens a PR for that branch",
+    opened && opened.branch === "auto/ceo-studio-pr-task"
+      && result.phases.review.some((x) => x.taskId === "pr-task" && x.outcome === "pr-opened" && x.pr === "https://github.com/x/y/pull/7"));
+  ok("pr-mode: opening a PR does NOT mark the task Done", !calls.setStatus.some((s) => s.taskId === "pr-task" && s.status === "done"));
+  ok("pr-mode: the opened PR is persisted in state for later polling",
+    saved.pullRequests && saved.pullRequests["ceo-studio:pr-task"] && saved.pullRequests["ceo-studio:pr-task"].url === "https://github.com/x/y/pull/7");
+  ok("pr-mode: a Kanban comment links the PR for review", calls.comment.some((c) => c.taskId === "pr-task" && /pull\/7/.test(c.body || "")));
+})();
+
+// 3c.2. merge-manager — once the recorded PR MERGES, the next cycle promotes the
+// task to Done without re-running the (paid) gate.
+(() => {
+  const slug = SLUG + "-pr-merged";
+  const stateFile = path.join(process.env.CEO_STUDIO_HOME, slug, "brain", "autonomy", "runner", "state.json");
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  fs.writeFileSync(stateFile, JSON.stringify({
+    pullRequests: { "ceo-studio:pr-task": { branch: "auto/ceo-studio-pr-task", url: "https://github.com/x/y/pull/7", number: 7 } },
+  }));
+  const { deps, calls } = makeDeps({ board: { ok: true, columns: { review: [{ id: "pr-task", title: "Shippable feature" }] } } });
+  deps.pullRequestStatus = () => ({ ok: true, state: "merged", url: "https://github.com/x/y/pull/7" });
+  deps.cleanupWorktree = () => ({ ok: true });
+  const result = runner.runCycle({
+    projectSlug: slug, projectPath: PROJECT_PATH, force: true, deps,
+    policy: basePolicy({ execute: false, integrationMode: "pr", allowGoalReview: false, allowUnblocker: false, allowTriage: false, allowStaleRunningCleanup: false }),
+  });
+  const saved = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  ok("pr-mode: a merged PR promotes the task to Done",
+    calls.setStatus.some((s) => s.taskId === "pr-task" && s.status === "done")
+      && result.phases.review.some((x) => x.taskId === "pr-task" && x.outcome === "done-via-pr-merge"));
+  ok("pr-mode: the gate is NOT re-run while a PR is outstanding", calls.verify === 0);
+  ok("pr-mode: the merged PR record is cleared from state", !(saved.pullRequests && saved.pullRequests["ceo-studio:pr-task"]));
+})();
+
+// 3c.3. merge-manager — a worker that produced NO commits is never pushed, never
+// PR'd, and never Done (matches the legacy no-changes guard).
+(() => {
+  const slug = SLUG + "-pr-empty";
+  const stateFile = path.join(process.env.CEO_STUDIO_HOME, slug, "brain", "autonomy", "runner", "state.json");
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  fs.writeFileSync(stateFile, JSON.stringify({
+    reviews: { "ceo-studio:empty-task": { worktree: "/tmp/wt/empty", branch: "auto/ceo-studio-empty-task", agentId: "builder" } },
+  }));
+  const { deps, calls } = makeDeps({ board: { ok: true, columns: { review: [{ id: "empty-task", title: "No-op" }] } } });
+  let opened = false;
+  deps.prepareReviewBranch = () => ({ ok: true, rebased: false, baselineRef: "base" });
+  deps.branchAhead = () => 0;
+  deps.openPullRequest = () => { opened = true; return { ok: true, url: "x" }; };
+  deps.cleanupWorktree = () => ({ ok: true });
+  const result = runner.runCycle({
+    projectSlug: slug, projectPath: PROJECT_PATH, force: true, deps,
+    policy: basePolicy({ execute: false, integrationMode: "pr", allowGoalReview: false, allowUnblocker: false, allowTriage: false, allowStaleRunningCleanup: false }),
+  });
+  ok("pr-mode: a no-commit branch is blocked, never PR'd or Done",
+    !opened
+      && calls.setStatus.some((s) => s.taskId === "empty-task" && s.status === "blocked")
+      && !calls.setStatus.some((s) => s.taskId === "empty-task" && s.status === "done")
+      && result.phases.review.some((x) => x.taskId === "empty-task" && x.outcome === "blocked-no-changes"));
+})();
+
 // 3d. verification uses the base project's script contract
 (() => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "verify-base-"));
