@@ -4,22 +4,22 @@ herder-activate
 
 Minimal herder-native tool to fulfill ACTIVATE_AGENT requests.
 
-This is the receiver side for the swarm-control skill.
-
-Usage (manual for now, later called by a watcher):
-  ./bin/herder-activate --persona architect --name grok-builder --domain discovery
-
-Or it can eventually watch the room for structured ACTIVATE_AGENT messages
-and act on them automatically.
+This can be run in one-shot mode (manual activation) or in a long-running
+control loop that watches a domain room for structured ACTIVATE_AGENT messages
+and activates agents automatically.
 
 It uses the central registry when possible and falls back to explicit flags.
 """
+
+from __future__ import annotations
 
 import argparse
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
+from typing import Any
 
 HARNESS_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(HARNESS_ROOT))
@@ -30,72 +30,151 @@ except ImportError:
     registry = None
 
 
+def _room_paths(domain: str) -> tuple[Path, Path]:
+    room_dir = HARNESS_ROOT / "brain" / "rooms" / domain
+    return room_dir / "chat.log", room_dir / "presence"
+
+
+def _load_last_offset(state_file: Path) -> int:
+    try:
+        return int(state_file.read_text().strip()) if state_file.exists() else 0
+    except Exception:
+        return 0
+
+
+def _save_last_offset(state_file: Path, offset: int) -> None:
+    state_file.write_text(str(offset))
+
+
+def _extract_activation_payload(content: str) -> dict[str, Any] | None:
+    if "[ACTIVATE_AGENT]" not in content:
+        return None
+    json_part = content.split("[ACTIVATE_AGENT]", 1)[1].strip()
+    if not json_part:
+        return None
+    try:
+        return json.loads(json_part)
+    except json.JSONDecodeError:
+        return None
+
+
+def _resolve_request(args: argparse.Namespace, payload: dict[str, Any] | None) -> tuple[str | None, str | None, str, str | None]:
+    persona = args.persona
+    name = args.name
+    domain = args.domain
+    request_id = None
+
+    if payload:
+        persona = payload.get("persona") or persona
+        name = payload.get("preferred_speaker") or payload.get("speaker_name") or payload.get("agent_id") or name
+        domain = payload.get("domain") or payload.get("room") or domain
+        request_id = payload.get("request_id")
+        if not persona and name and registry:
+            agent_info = registry.get_agent(name)
+            if agent_info:
+                persona = agent_info.get("persona") or persona
+    return persona, name, domain, request_id
+
+
+def _launch_agent(name: str, persona: str, domain: str, dry_run: bool) -> int:
+    cmd = [str(HARNESS_ROOT / "bin" / "launch-agent"), "--name", name, "--persona", persona, "--domain", domain]
+    print("=== herder-activate ===")
+    print(f"Activating persona: {persona}")
+    print(f"Agent name:       {name}")
+    print(f"Domain:           {domain}")
+    if registry:
+        agent_info = registry.get_agent(name)
+        if agent_info:
+            print(f"Registry hit:     yes (role={agent_info.get('role')})")
+    print(f"Command:          {' '.join(cmd)}")
+    print()
+    if dry_run:
+        print("[DRY RUN] Not actually launching.")
+        return 0
+    return subprocess.run(cmd).returncode
+
+
+def _post_activation_event(domain: str, speaker: str, request_id: str | None, agent_name: str) -> None:
+    payload = {"type": "AGENT_ACTIVATED", "request_id": request_id, "agent_id": agent_name, "room": domain}
+    msg = json.dumps(payload, separators=(",", ":"))
+    subprocess.run([str(HARNESS_ROOT / "bin" / "domain-room"), "post", domain, speaker, msg], check=False, capture_output=True)
+
+
+def _listen(domain: str, speaker: str, interval: float, dry_run: bool) -> int:
+    chat_log, presence_dir = _room_paths(domain)
+    presence_dir.mkdir(parents=True, exist_ok=True)
+    state_file = presence_dir / f".last_offset.herder-activate.{speaker.replace(' ', '_')}"
+    last_offset = _load_last_offset(state_file)
+
+    print(f"[herder-activate] Listening on room '{domain}' as '{speaker}'")
+    print(f"[herder-activate] Log: {chat_log}")
+
+    while True:
+        if chat_log.exists():
+            if chat_log.stat().st_size < last_offset:
+                last_offset = 0
+            with open(chat_log, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(last_offset)
+                lines = f.readlines()
+                new_offset = f.tell()
+            for raw_line in lines:
+                line = raw_line.rstrip("\n")
+                if not line or line.startswith("#"):
+                    continue
+                payload = _extract_activation_payload(line)
+                if not payload:
+                    continue
+                persona, name, req_domain, request_id = _resolve_request(argparse.Namespace(persona=None, name=None, domain=domain), payload)
+                if not persona or not name:
+                    print(f"[herder-activate] Skipping invalid request: {line}")
+                    continue
+                rc = _launch_agent(name, persona, req_domain, dry_run=dry_run)
+                if rc == 0 and not dry_run:
+                    _post_activation_event(req_domain, speaker, request_id, name)
+                elif rc != 0:
+                    print(f"[herder-activate] launch failed for {name} (rc={rc})", file=sys.stderr)
+            if new_offset != last_offset:
+                _save_last_offset(state_file, new_offset)
+                last_offset = new_offset
+        time.sleep(interval)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fulfill ACTIVATE_AGENT requests through the herder")
     parser.add_argument("--persona", help="Persona to activate (e.g. architect, DEEP_RESEARCHER)")
     parser.add_argument("--name", help="Stable agent name (e.g. grok-builder). Will be used for tmux session.")
     parser.add_argument("--domain", default="discovery", help="Domain room")
-    parser.add_argument("--from-message", help="Path to a file containing a raw ACTIVATE_AGENT message (for future watcher use)")
+    parser.add_argument("--from-message", help="Path to a file containing a raw ACTIVATE_AGENT message")
+    parser.add_argument("--listen", action="store_true", help="Run as a control loop and watch the room for ACTIVATE_AGENT messages")
+    parser.add_argument("--speaker", default="herder-agent-manager", help="Speaker name to use when posting lifecycle events")
+    parser.add_argument("--interval", type=float, default=2.0, help="Polling interval for --listen (seconds)")
     parser.add_argument("--dry-run", action="store_true", help="Print what would happen instead of actually launching")
 
     args = parser.parse_args()
 
-    persona = args.persona
-    name = args.name
-    domain = args.domain
-
-    # Support being driven from a structured ACTIVATE_AGENT message (the orchestrator posts this)
+    payload = None
     if args.from_message:
         try:
-            with open(args.from_message) as f:
-                content = f.read()
-            # Very simple extraction for now — look for JSON after [ACTIVATE_AGENT]
-            if "[ACTIVATE_AGENT]" in content:
-                json_part = content.split("[ACTIVATE_AGENT]", 1)[1].strip()
-                data = json.loads(json_part)
-                persona = data.get("persona") or persona
-                name = data.get("preferred_speaker") or name
-                domain = data.get("domain") or domain
-                print(f"[herder-activate] Parsed request from message: persona={persona}, name={name}")
+            content = Path(args.from_message).read_text(encoding="utf-8")
+            payload = _extract_activation_payload(content) or json.loads(content)
+            if isinstance(payload, dict):
+                print(f"[herder-activate] Parsed request from message: persona={payload.get('persona')}, name={payload.get('preferred_speaker') or payload.get('speaker_name')}")
         except Exception as e:
             print(f"[herder-activate] Failed to parse from message: {e}")
 
+    if args.listen:
+        return _listen(args.domain, args.speaker, args.interval, args.dry_run)
+
+    persona, name, domain, request_id = _resolve_request(args, payload)
     if not persona or not name:
         print("Error: --persona and --name are required (or provide --from-message with a valid ACTIVATE_AGENT json).")
         parser.print_usage()
         sys.exit(1)
 
-    # Try registry for richer info if available
-    agent_info = None
-    if registry:
-        agent_info = registry.get_agent(name)
-        if agent_info and not persona:
-            persona = agent_info.get("persona")
-
-    cmd = [
-        str(HARNESS_ROOT / "bin" / "launch-agent"),
-        "--name", name,
-        "--persona", persona,
-        "--domain", domain,
-    ]
-
-    print("=== herder-activate ===")
-    print(f"Activating persona: {persona}")
-    print(f"Agent name:       {name}")
-    print(f"Domain:           {domain}")
-    if agent_info:
-        print(f"Registry hit:     yes (role={agent_info.get('role')})")
-    print(f"Command:          {' '.join(cmd)}")
-    print()
-
-    if args.dry_run:
-        print("[DRY RUN] Not actually launching.")
-        return
-
-    # Execute the launch
-    # We run it and let it do its thing (it will create tmux windows etc.)
-    result = subprocess.run(cmd)
-    sys.exit(result.returncode)
+    rc = _launch_agent(name, persona, domain, args.dry_run)
+    if rc == 0 and request_id and not args.dry_run:
+        _post_activation_event(domain, args.speaker, request_id, name)
+    sys.exit(rc)
 
 
 if __name__ == "__main__":

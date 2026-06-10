@@ -19,6 +19,7 @@ const os = require("os");
 const path = require("path");
 const fs = require("fs");
 const { execFileSync, spawn } = require("child_process");
+const org = require("./orchestration-org");
 
 function home() {
   return process.env.HERMES_HOME || path.join(os.homedir(), ".hermes");
@@ -78,6 +79,21 @@ function _alive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
 }
 
+function _sleep(ms) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch { /* ignore */ }
+}
+
+function _gatewayServiceStatus() {
+  const r = _run(["gateway", "status"], 8000);
+  if (!r.ok) return { ok: false, up: false, reason: r.reason };
+  const out = String(r.out || "");
+  const loaded = /Gateway service is loaded/i.test(out);
+  const pid = (out.match(/"?PID"?\s*=\s*(\d+)/) || out.match(/\bPID\s+(\d+)/i) || [])[1];
+  return { ok: true, up: loaded, loaded, pid: pid ? Number(pid) : null, out };
+}
+
 // ---------------------------------------------------------------------------
 // CEO (gateway) lifecycle
 // ---------------------------------------------------------------------------
@@ -93,14 +109,29 @@ function ceoStatus() {
   } catch { /* no state file yet */ }
 
   const pid = state && state.pid;
-  const up = _alive(pid) && (!state.gateway_state || state.gateway_state === "running");
+  let up = _alive(pid) && (!state.gateway_state || state.gateway_state === "running");
   const platforms = {};
   if (state && state.platforms) {
     for (const [k, v] of Object.entries(state.platforms)) {
       platforms[k] = v && v.state ? v.state : String(v);
     }
   }
-  return { ok: true, installed: true, up: !!up, pid: pid || null, platforms, profile: profile() };
+  let service = null;
+  if (!up) {
+    service = _gatewayServiceStatus();
+    up = !!(service && service.up);
+  }
+  return {
+    ok: true,
+    installed: true,
+    up: !!up,
+    pid: (up && service && service.pid) || pid || null,
+    platforms,
+    profile: profile(),
+    gatewayState: state && state.gateway_state || null,
+    serviceLoaded: service ? service.loaded : undefined,
+    serviceReason: service && !service.ok ? service.reason : undefined,
+  };
 }
 
 /**
@@ -111,17 +142,14 @@ function ensureUp() {
   const status = ceoStatus();
   if (!status.installed) return status;
   if (status.up) return status;
-  try {
-    const child = spawn(bin(), ["gateway", "start", "--accept-hooks"], {
-      detached: true,
-      stdio: "ignore",
-      env: process.env,
-    });
-    child.unref();
-    return { ...ceoStatus(), starting: true };
-  } catch (e) {
-    return { ok: false, up: false, installed: true, reason: `Failed to start CEO: ${e.message}` };
+  const started = gatewayStart();
+  if (!started.ok) return { ...ceoStatus(), ok: false, reason: started.reason };
+  for (let i = 0; i < 20; i++) {
+    const next = ceoStatus();
+    if (next.up) return { ...next, started: true };
+    _sleep(250);
   }
+  return { ...ceoStatus(), starting: true, reason: "Hermes gateway start returned, but CEO status has not reported online yet." };
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +213,7 @@ function getBoard(slug) {
      ORDER BY priority DESC, created_at DESC;`
   );
   const columns = {};
+  for (const lane of Object.keys(org.DEFAULT_LANE_POLICIES || {})) columns[lane] = [];
   for (const t of rows) {
     t.workerAlive = _alive(t.worker_pid);
     (columns[t.status] = columns[t.status] || []).push(t);
@@ -275,6 +304,32 @@ function _run(args, timeout = 15000, profileId = profile()) {
     return { ok: true, out: execFileSync(bin(), [..._profileArgs(profileId), ...args], { encoding: "utf-8", timeout, maxBuffer: 4 * 1024 * 1024 }) };
   } catch (e) {
     return { ok: false, reason: String((e.stderr || e.message || "")).slice(0, 300) };
+  }
+}
+
+function _sqlString(v) {
+  return `'${String(v == null ? "" : v).replace(/'/g, "''")}'`;
+}
+
+function _setStatusDirect(slug, taskId, status, reason = "CEO Studio custom lane") {
+  const db = boardDb(slug);
+  const id = String(taskId || "").trim();
+  const next = String(status || "").trim().toLowerCase();
+  if (!fs.existsSync(db)) return { ok: false, reason: "board database not found" };
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) return { ok: false, reason: "invalid task id" };
+  if (!/^[a-z0-9_-]+$/.test(next)) return { ok: false, reason: "invalid status" };
+  const payload = JSON.stringify({ status: next, reason });
+  const sql = [
+    "BEGIN;",
+    `UPDATE tasks SET status = ${_sqlString(next)}, claim_lock = NULL, claim_expires = NULL, worker_pid = NULL WHERE id = ${_sqlString(id)};`,
+    `INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (${_sqlString(id)}, NULL, 'status', ${_sqlString(payload)}, strftime('%s','now'));`,
+    "COMMIT;",
+  ].join("\n");
+  try {
+    execFileSync("sqlite3", [db, sql], { encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024 });
+    return { ok: true, status: next };
+  } catch (e) {
+    return { ok: false, reason: String((e.stderr || e.message || "status update failed")).slice(0, 300) };
   }
 }
 
@@ -417,11 +472,10 @@ function setPersonality({ personality, profileId = profile() } = {}) {
 
 /** Start the CEO gateway (detached so it outlives this call). */
 function gatewayStart() {
-  try {
-    const c = spawn(bin(), ["gateway", "start", "--accept-hooks"], { detached: true, stdio: "ignore", env: process.env });
-    c.unref();
-    return { ok: true };
-  } catch (e) { return { ok: false, reason: e.message }; }
+  if (!installed()) return { ok: false, reason: "Hermes not installed" };
+  const r = _run(["gateway", "start", "--accept-hooks"], 30000);
+  if (!r.ok) return r;
+  return { ok: true, out: r.out || "", status: ceoStatus() };
 }
 
 /** Stop the CEO gateway. */
@@ -461,18 +515,32 @@ function addTask({ board, status, title, body, assignee, persona }) {
   try {
     const args = ["kanban", ...(board ? ["--board", board] : []), "create", title];
     const finalBody = body || (persona ? `**Persona:** ${persona}` : "");
+    const requestedStatus = String(status || "").trim().toLowerCase();
     if (finalBody) args.push("--body", finalBody);
     if (assignee) args.push("--assignee", assignee);
-    if (status === "triage" || status === "planning") args.push("--triage");
-    if (status === "blocked" || status === "running") args.push("--initial-status", status);
+    if (requestedStatus === "triage" || requestedStatus === "planning" || requestedStatus === "bug") args.push("--triage");
+    if (requestedStatus === "blocked" || requestedStatus === "running") args.push("--initial-status", requestedStatus);
 
     const result = _run(args, 30000);
     if (!result.ok) return { ok: false, reason: result.reason };
+    const taskId = _extractTaskId(result.out || "");
+    let statusUpdate = null;
+    if (requestedStatus === "bug") {
+      statusUpdate = _setStatusDirect(board, taskId, requestedStatus, "CEO Studio bug lane");
+    }
 
-    return { ok: true, message: "Task created successfully" };
+    return { ok: true, message: "Task created successfully", out: result.out || "", taskId, status: requestedStatus || null, statusUpdate };
   } catch (e) {
     return { ok: false, reason: `Failed to create task: ${e.message}` };
   }
+}
+
+function _extractTaskId(output) {
+  const s = String(output || "");
+  const direct = s.match(/\b(t_[a-f0-9]{6,}|[A-Z]+-\d+)\b/i);
+  if (direct) return direct[1];
+  const labeled = s.match(/(?:task|id)\s*[:#]?\s*([A-Za-z0-9_-]{4,})/i);
+  return labeled ? labeled[1] : null;
 }
 
 function _kanban(board, args, timeout = 30000) {
@@ -518,6 +586,19 @@ function dispatch({ board, max = 1, dryRun = false } = {}) {
   return _kanban(board || currentBoard(), args, 60000);
 }
 
+/**
+ * Set a task's lane directly (running/review/etc.) and emit a status event.
+ * The autonomy runner uses this to drive the board lifecycle when it executes
+ * work itself (via the registry's Devin provider) rather than relying on the
+ * Hermes profile-worker dispatcher. Reuses the same safe DB writer as bug
+ * creation, so it works even when the LLM provider is out of credits.
+ */
+function setTaskStatus({ board, taskId, status, reason } = {}) {
+  if (!taskId) return { ok: false, reason: "task id required" };
+  if (!status) return { ok: false, reason: "status required" };
+  return _setStatusDirect(board || currentBoard(), taskId, status, reason || "autonomy runner lane update");
+}
+
 function taskLog({ board, taskId } = {}) {
   if (!taskId) return { ok: false, reason: "task id required" };
   const r = _kanban(board || currentBoard(), ["log", taskId], 15000);
@@ -532,19 +613,23 @@ function addComment({ board, taskId, body, author = "CEO Studio" }) {
   if (!board) return { ok: false, reason: "No board specified" };
   if (!taskId) return { ok: false, reason: "Task id is required" };
   if (!body) return { ok: false, reason: "Comment body is required" };
-  const args = ["kanban", "comment", "--board", board, "--author", author, taskId, body];
-  return _run(args, 30000);
+  // --board is a parent option of `kanban` and must come BEFORE the action,
+  // so route through _kanban (which prepends it) rather than placing it after
+  // `comment` (Hermes rejects that with "unrecognized arguments: --board").
+  return _kanban(board, ["comment", "--author", author, taskId, body], 30000);
 }
 
-/** One `hermes chat -q` invocation. Resolves with {ok, reply, sessionId, raw, sessionMiss, reason}. */
-function _runChat(msg, resume, timeoutMs) {
+/** One `hermes chat -q` invocation. Resolves with {ok, reply, sessionId, raw, sessionMiss, reason}.
+ * `cwd` (optional) runs the CLI in the CEO agent's workdir so the cockpit chat
+ * shares a working directory with the mounted CEO terminal + harness adapter. */
+function _runChat(msg, resume, timeoutMs, cwd) {
   return new Promise((resolve) => {
     const prof = profile();
     const args = [...(prof ? ["-p", prof] : []), "chat", "-q", msg, "-Q", "--yolo", "--accept-hooks"];
     if (resume) args.push("--resume", resume);
     let out = "", err = "", done = false, child;
     try {
-      child = spawn(bin(), args, { env: process.env });
+      child = spawn(bin(), args, { env: process.env, ...(cwd ? { cwd } : {}) });
     } catch (e) {
       return resolve({ ok: false, reason: `Failed to reach CEO: ${e.message}` });
     }
@@ -636,6 +721,91 @@ async function askStream(message, { timeoutMs = 180000, onDelta } = {}) {
   return { ok: true, reply: res.reply, session: _sessionId };
 }
 
+// ---------------------------------------------------------------------------
+// The CEO as a unified, mounted agent
+//
+// The CEO is registered in the harness registry as the `ceo` agent (provider
+// hermes, launch_mode hermes_profile, room discovery — see
+// runtime/harness/agents/agents.json). That makes it mountable + viewable as a
+// tmux terminal exactly like any other agent. To make the cockpit chat box "the
+// same thing" as that mounted session, askCeo() runs the Hermes relay in the
+// CEO agent's per-(room,agent) workdir and persists the rolling session id to
+// the SAME state file the harness agent_adapter uses
+// (<workspace>/brain/rooms/discovery/agents/ceo.json). So whether you talk to
+// the CEO from the chat box, dispatch to it via `bin/agent` (provider hermes,
+// agent ceo), or view its mounted terminal, they converge on one durable Hermes
+// session. Still pure Hermes/OAuth — no API key, degrades gracefully.
+// ---------------------------------------------------------------------------
+const CEO_AGENT_ID = "ceo";
+const CEO_ROOM = "discovery";
+
+function _ceoAgentsBase(projectPath) {
+  const base = projectPath || process.env.HARNESS_WORKSPACE
+    || path.join(__dirname, "..", "..", "runtime", "harness");
+  return path.join(base, "brain", "rooms", CEO_ROOM, "agents");
+}
+function _ceoWorkdir(projectPath) {
+  return path.join(_ceoAgentsBase(projectPath), CEO_AGENT_ID);
+}
+function _ceoStatePath(projectPath) {
+  return path.join(_ceoAgentsBase(projectPath), `${CEO_AGENT_ID}.json`);
+}
+/** The persisted Hermes session id shared with the harness agent_adapter. */
+function _loadCeoSession(projectPath) {
+  try {
+    const s = JSON.parse(fs.readFileSync(_ceoStatePath(projectPath), "utf-8"));
+    const sid = s && s.session_id;
+    // Ignore the adapter's cwd-only placeholder; only real ids can --resume.
+    return sid && !String(sid).startsWith("hermes-cwd:") ? sid : null;
+  } catch { return null; }
+}
+/** Persist the rolling CEO session id in the adapter-compatible state shape. */
+function _saveCeoSession(projectPath, sessionId) {
+  if (!sessionId) return;
+  try {
+    const p = _ceoStatePath(projectPath);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    let prev = {};
+    try { prev = JSON.parse(fs.readFileSync(p, "utf-8")); } catch { /* fresh */ }
+    fs.writeFileSync(p, JSON.stringify({
+      agent: CEO_AGENT_ID, room: CEO_ROOM, provider: "hermes",
+      model: prev.model || null, session_id: sessionId,
+      created_at: prev.created_at || Date.now() / 1000,
+    }, null, 2));
+  } catch { /* best-effort durability; chat still works in-memory */ }
+}
+
+/**
+ * Relay a chat turn to the mounted CEO Hermes session. Same OAuth-funded brain
+ * as ask(), but anchored to the `ceo` registry agent: runs in its workdir and
+ * resumes the durable session id shared with the mounted terminal + harness
+ * adapter. Preserves graceful degradation (returns {ok:false, reason} when
+ * Hermes is absent) and the no-API-key rule (default Hermes profile = OAuth).
+ */
+async function askCeo(message, { timeoutMs = 180000, projectPath = null } = {}) {
+  if (!installed()) return { ok: false, reason: "Hermes CLI not found" };
+  let msg = String(message || "").trim();
+  if (!msg) return { ok: false, reason: "Empty message" };
+  if (_focusedTask) {
+    msg = `[Context: We're discussing task "${_focusedTask.taskTitle}" (ID: ${_focusedTask.taskId}, status: ${_focusedTask.taskStatus}, board: ${_focusedTask.board})]\n\n${msg}`;
+  }
+  const wd = _ceoWorkdir(projectPath);
+  try { fs.mkdirSync(wd, { recursive: true }); } catch { /* fall back to no cwd */ }
+  // Resume the durable CEO session: in-memory rolling id first (shared with the
+  // voice/AGUI faces), else the id persisted alongside the mounted agent.
+  let sid = _sessionId || _loadCeoSession(projectPath);
+  let res = await _runChat(msg, sid, timeoutMs, wd);
+  if (sid && res.sessionMiss) {
+    sid = null;
+    res = await _runChat(msg, null, timeoutMs, wd);
+  }
+  const newSid = res.sessionId || sid;
+  if (res.sessionId) _sessionId = res.sessionId; // keep continuity even on error
+  _saveCeoSession(projectPath, newSid);
+  if (!res.ok) return { ok: false, reason: _friendly(res.reason), raw: res.reason, partial: res.partial };
+  return { ok: true, reply: res.reply, session: newSid };
+}
+
 /**
  * Relay a message to the live Hermes CEO and return its reply. Keeps a single
  * rolling session so context persists. This is what the voice agent calls —
@@ -691,6 +861,6 @@ module.exports = {
   listBoards, currentBoard, filterBoardsForDomain, getBoard, getTask, getStats, getSwarm, getRoom,
   getConfig, setModel, listProfiles, setProfile, gatewayStart, gatewayStop,
   setPersonality,
-  focusTask, addTask, assignTask, taskAction, dispatch, taskLog, assignees, addComment,
-  ask, askStream,
+  focusTask, addTask, assignTask, taskAction, dispatch, setTaskStatus, taskLog, assignees, addComment,
+  ask, askCeo, askStream,
 };

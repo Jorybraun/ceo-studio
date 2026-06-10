@@ -21,6 +21,7 @@ process.env.CEO_STUDIO_HOME = HOME;
 delete process.env.ELEVENLABS_API_KEY;
 
 const voice = require("../main/core/voice");
+const convai = require("../main/core/convai");
 const { parseEnv, loadEnv } = require("../main/core/env");
 const { CostMeter, estimateVoiceUsd } = require("../main/core/cost");
 
@@ -35,6 +36,15 @@ ok("voice unavailable without key", voice.available() === false);
 const st = voice.status();
 ok("status reports unavailable + note", st.available === false && typeof st.note === "string");
 ok("status never leaks the key", !("apiKey" in st));
+const convaiStatus = convai.status();
+ok("live voice exposes brief/bug tools", convaiStatus.tools.includes("create_brief") && convaiStatus.tools.includes("create_bug"));
+ok("live voice exposes blocked analyzer", convaiStatus.tools.includes("analyze_blocked_work"));
+ok("live voice exposes provenance tools", convaiStatus.tools.includes("create_child_task") && convaiStatus.tools.includes("record_brief_asset") && convaiStatus.tools.includes("show_provenance"));
+ok("live voice exposes goal tools", convaiStatus.tools.includes("list_goals") && convaiStatus.tools.includes("set_goal") && convaiStatus.tools.includes("link_work_to_goal") && convaiStatus.tools.includes("review_goals"));
+ok("live voice exposes autonomy policy tools", convaiStatus.tools.includes("autonomy_status") && convaiStatus.tools.includes("configure_autonomy") && convaiStatus.tools.includes("run_autonomy_cycle") && convaiStatus.tools.includes("start_autonomy") && convaiStatus.tools.includes("stop_autonomy"));
+ok("live voice exposes self-repair bug tool", convaiStatus.tools.includes("report_system_bug"));
+ok("live voice exposes self-repair consult tool", convaiStatus.tools.includes("ask_self_repair"));
+ok("live voice exposes orchestration org tools", convaiStatus.tools.includes("show_orchestration_org") && convaiStatus.tools.includes("route_work"));
 
 // --- env loader ---
 const parsed = parseEnv('# comment\nFOO=bar\nQUOTED="hi there"\nEMPTY=\nBAD LINE\n');

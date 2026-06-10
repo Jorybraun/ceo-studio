@@ -47,13 +47,21 @@ const ok = (n, c) => { if (!c) { console.error("FAIL", n); process.exitCode = 1;
 
 (async () => {
   const expected = ["projects:list", "projects:add", "project:open", "domain:set",
-    "domain:define", "domain:get_all",
+    "domain:define", "domain:get_all", "domain:create_handoff", "domain:list_handoffs",
+    "domain:create_agenda_item", "domain:propose_agenda_from_handoff", "domain:save_meeting_artifact",
     "brain:context", "cost:status", "cost:kill", "cost:resume", "agent:ask",
     "gbrain:status", "gbrain:query", "gbrain:ingest",
     "voice:available", "voice:speak", "voice:listen",
     "convai:status", "convai:start",
     "docs:list", "docs:tree", "docs:read",
     "jobs:create_ticket_pack", "jobs:get", "jobs:list", "jobs:apply_ticket_comment",
+    "domain_board:create_brief", "domain_board:create_bug", "domain_board:decompose_brief",
+    "domain_board:propose_brief_decomposition", "domain_board:apply_brief_decomposition",
+    "domain_board:create_child_task", "domain_board:record_asset", "provenance:graph",
+    "goals:list", "goals:upsert", "goals:link_work", "goals:review",
+    "autonomy:analyze_blocked",
+    "autonomy:status", "autonomy:configure", "autonomy:run_cycle", "autonomy:start", "autonomy:stop",
+    "self_repair:report_bug", "self_repair:consult",
     "swarm:request"];
   ok("all IPC handlers registered", expected.every((c) => typeof handlers[c] === "function"));
 
@@ -68,7 +76,10 @@ const ok = (n, c) => { if (!c) { console.error("FAIL", n); process.exitCode = 1;
   ok("cost:status live after open", status0 && status0.maxSessionUsd > 0);
 
   const gbStatus = await handlers["gbrain:status"]();
-  ok("gbrain:status reports unavailable when unconfigured", gbStatus && gbStatus.available === false);
+  // gbrain availability is environment-dependent (a real Postgres/PGLite brain
+  // may be reachable). The contract is that status() always returns a
+  // well-formed result with a boolean `available` — never crashes, never lies.
+  ok("gbrain:status reports a well-formed availability", gbStatus && gbStatus.ok === true && typeof gbStatus.available === "boolean");
 
   const reply = await handlers["agent:ask"](null, "what is the strategy?");
   ok("agent:ask returns text + cost", typeof reply.text === "string" && !!reply.cost);
@@ -99,17 +110,42 @@ const ok = (n, c) => { if (!c) { console.error("FAIL", n); process.exitCode = 1;
   const domain = await handlers["domain:define"](null, {
     name: "Ops",
     purpose: "Operational planning",
+    overarchingGoal: "Keep operations work visible and handed off.",
+    boundaries: ["Operations intake", "Follow-up tracking"],
+    features: ["Handoff capture", "Agenda triage"],
+    kanbanBoard: "ops-board",
     createScaffold: true,
     relativePath: "domains/ops",
   });
-  ok("domain:define creates a scaffolded domain", domain && domain.ok === true && fs.existsSync(path.join(sampleProject, "domains", "ops", "AGENTS.md")));
+  ok("domain:define creates a scaffolded domain", domain && domain.ok === true && fs.existsSync(path.join(sampleProject, "domains", "ops", "definition.md")));
+  const handoffs = await handlers["domain:list_handoffs"](null, "Ops");
+  ok("domain:list_handoffs sees creation handoff", handoffs && handoffs.ok === true && handoffs.handoffs.length >= 1);
+  const proposal = await handlers["domain:propose_agenda_from_handoff"](null, { domain: "Ops" });
+  ok("domain:propose_agenda_from_handoff returns proposals only", proposal && proposal.ok === true && proposal.proposals.every((p) => p.status === "proposed"));
+  const agenda = await handlers["domain:create_agenda_item"](null, { domain: "Ops", item: proposal.proposals[0] });
+  ok("domain:create_agenda_item persists proposal", agenda && agenda.ok === true && /proposed/i.test(agenda.agendaItem.status));
+  const meeting = await handlers["domain:save_meeting_artifact"](null, {
+    domain: "Ops",
+    room: "ops-dogfood",
+    agenda: "Plan Ops lifecycle follow-up",
+    participants: ["agenda-agent"],
+    expectedOutcome: "Saved artifact",
+    requirements: "Meeting synthesis",
+  });
+  ok("domain:save_meeting_artifact writes domain agenda output", meeting && meeting.ok === true && fs.existsSync(path.join(sampleProject, meeting.artifact.path)));
   const swarm = await handlers["swarm:request"](null, "research the market");
   ok("swarm:request responds honestly (not enabled)", swarm && swarm.ok === true && swarm.enabled === false);
+  const thinBrief = await handlers["domain_board:create_brief"](null, { title: "Thin", domain: "Ops" });
+  ok("domain_board:create_brief enforces template", thinBrief && thinBrief.ok === false && Array.isArray(thinBrief.missing));
+  ok("domain_board:create_brief prefers mapped domain board", /Board: ops-board/.test(thinBrief.template || ""));
+  const thinBug = await handlers["domain_board:create_bug"](null, { title: "Bug", domain: "Ops" });
+  ok("domain_board:create_bug enforces repro fields", thinBug && thinBug.ok === false && Array.isArray(thinBug.missing));
 
   await handlers["cost:kill"]();
   const killedReply = await handlers["agent:ask"](null, "again");
   ok("agent halts after kill switch", killedReply.halted === true);
 
+  require("../main/core/agui-server").stop();
   Module._load = origLoad;
   console.log(`\n${passed} boot checks passed.`);
 })();

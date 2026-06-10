@@ -60,6 +60,14 @@ MAX_SPAWNS_PER_HOUR = _int_env("CEO_MAX_SPAWNS_PER_HOUR", 12)
 # automated/non-interactive spawning. Set CEO_ALLOW_PAID=1 to permit them.
 PAID_AGENTS_ENABLED = os.environ.get("CEO_ALLOW_PAID", "0") == "1"
 
+# Agent tmux sessions follow the registry naming convention `pipe-<id>` (see
+# agents/registry.py and main/core/mount.js). ONLY these count toward the
+# concurrency cap — unrelated tmux sessions (a developer's own shells, scratch
+# windows like `agent-chat`) must never consume the agent budget, or legitimate
+# mounts get falsely denied with "max concurrent agents reached". Set the prefix
+# to "" to count every tmux session (legacy behavior).
+AGENT_SESSION_PREFIX = os.environ.get("CEO_AGENT_SESSION_PREFIX", "pipe-")
+
 # Agent ids that start with one of these prefixes are treated as paid/separate
 # API sessions (the #1 credit-burn risk). The bare "grok" primary session is
 # explicitly allowed (it is the shared main session, not a separate consumer).
@@ -140,7 +148,12 @@ def record_spawn(agent_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 def count_running_agents() -> int:
-    """Best-effort count of live agent tmux sessions. Returns 0 if tmux absent."""
+    """Best-effort count of live *agent* tmux sessions (those named `pipe-*`).
+
+    Returns 0 if tmux is absent. Sessions that don't match AGENT_SESSION_PREFIX
+    (scratch shells, infra windows) are ignored so they never wrongly consume
+    the concurrency budget and block legitimate mounts.
+    """
     if os.environ.get("CEO_GUARDRAIL_DISABLE_TMUX") == "1":
         return 0
     try:
@@ -150,7 +163,9 @@ def count_running_agents() -> int:
         )
         if out.returncode != 0:
             return 0
-        return len([ln for ln in out.stdout.splitlines() if ln.strip()])
+        prefix = AGENT_SESSION_PREFIX
+        return len([ln for ln in out.stdout.splitlines()
+                    if ln.strip() and (not prefix or ln.strip().startswith(prefix))])
     except Exception:
         return 0
 

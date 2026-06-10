@@ -62,6 +62,29 @@ def test_per_cycle_cap(cl, monkeypatch):
     assert "per-cycle" in reason
 
 
+def test_count_running_agents_only_counts_pipe_sessions(cl, monkeypatch):
+    """Only `pipe-*` agent sessions count; scratch/infra tmux sessions must not.
+
+    Regression: counting EVERY tmux session let unrelated shells (e.g.
+    `agent-chat`, `agent-orchestration`) consume the concurrency budget, so
+    mounting a real agent was falsely denied with "max concurrent agents
+    reached". See main/core/mount.js.
+    """
+    sessions = "agent-chat\nagent-orchestration\npipe-ba\npipe-discover-pm\npipe-pm\n"
+
+    class _Fake:
+        returncode = 0
+        stdout = sessions
+
+    monkeypatch.delenv("CEO_GUARDRAIL_DISABLE_TMUX", raising=False)
+    monkeypatch.setattr(cl.subprocess, "run", lambda *a, **k: _Fake())
+    # 5 live tmux sessions, but only 3 are agents (pipe-*).
+    assert cl.count_running_agents() == 3
+    # Legacy behavior (count all) is still available via empty prefix.
+    monkeypatch.setattr(cl, "AGENT_SESSION_PREFIX", "")
+    assert cl.count_running_agents() == 5
+
+
 def test_concurrency_cap(cl, monkeypatch):
     monkeypatch.setattr(cl, "MAX_CONCURRENT_AGENTS", 3)
     assert cl.can_spawn("agent-a", running_count=2)[0] is True

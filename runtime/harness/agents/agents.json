@@ -1,0 +1,298 @@
+{
+  "_comment": "Declarative agent registry. Add an agent = add an entry here (config, not code). 'provider' is any registered harness provider (echo|codex|hermes|grok|claude|pi|devin|command). 'persona' resolves via agents/personas.py. 'dispatch_profile' is the spawnable Hermes worker profile the kanban dispatcher would use; the CEO Studio autonomy runner instead executes 'devin' agents directly via the Devin CLI (model field, e.g. swe-1.6), because Hermes has no Devin model provider. Execution + repair roles run on Devin swe-1.6 so the app can dogfood itself. Critical System Agents (domain-architect/agenda-agent/ba-document-guard) stay on their design-placeholder providers. Projects can override via their own agents.json or $CEO_AGENTS_CONFIG.",
+  "agents": [
+    {
+      "id": "ceo",
+      "name": "CEO",
+      "provider": "hermes",
+      "launch_mode": "hermes_profile",
+      "profile": "",
+      "room": "discovery",
+      "tmux_session": "pipe-ceo",
+      "persona": "",
+      "capabilities": [
+        "strategy",
+        "conversation",
+        "orchestration",
+        "kanban"
+      ],
+      "description": "The conversational CEO — the DEFAULT Hermes agent (OAuth/funded; there is NO API key and none is required). A mounted Hermes session (launch_mode hermes_profile, empty profile = default Hermes), viewable like any other agent. It owns the brain/memory/soul (~/.hermes/SOUL.md); CEO Studio is a face + cockpit on top of it. The cockpit chat (IPC agent:ask -> main/core/hermes.js) and the harness agent_adapter (provider hermes, agent 'ceo', room 'discovery') converge on the SAME persisted Hermes session, so the CEO is one durable session whether you chat, view its terminal, or dispatch to it."
+    },
+    {
+      "id": "ba",
+      "name": "ba",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
+      "persona": "ba",
+      "capabilities": [
+        "requirements",
+        "user-journeys",
+        "decomposition"
+      ],
+      "tmux_window": "watcher"
+    },
+    {
+      "id": "architect",
+      "name": "architect",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
+      "persona": "architect",
+      "capabilities": [
+        "adr",
+        "data-model",
+        "interfaces"
+      ],
+      "tmux_window": "watcher"
+    },
+    {
+      "id": "pm",
+      "name": "pm",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
+      "persona": "pm",
+      "capabilities": [
+        "roadmap",
+        "epics",
+        "prioritization"
+      ],
+      "tmux_session": "pipe-pm"
+    },
+    {
+      "id": "planner",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
+      "persona": "planner",
+      "capabilities": [
+        "task-planning",
+        "specs"
+      ]
+    },
+    {
+      "id": "builder",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
+      "persona": "builder",
+      "capabilities": [
+        "implementation",
+        "verification",
+        "patches"
+      ]
+    },
+    {
+      "id": "researcher",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
+      "persona": "DEEP_RESEARCHER",
+      "capabilities": [
+        "research",
+        "evidence",
+        "uncertainty"
+      ]
+    },
+    {
+      "id": "designer",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
+      "persona": "SENIOR_DESIGNER_UX",
+      "capabilities": [
+        "ux",
+        "mocks"
+      ]
+    },
+    {
+      "id": "facilitator",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
+      "persona": "swarm-facilitator",
+      "capabilities": [
+        "coordination",
+        "synthesis"
+      ]
+    },
+    {
+      "id": "docs-steward",
+      "name": "docs-steward",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
+      "persona": "docs-steward",
+      "capabilities": [
+        "documentation",
+        "docs-drift",
+        "handoff-review",
+        "registry-audit"
+      ],
+      "description": "Reviews code/agent changes before handoff and updates authoritative docs so future agents inherit the current operating model.",
+      "tmux_session": "pipe-docs-steward"
+    },
+    {
+      "id": "self-repair-engineer",
+      "name": "self-repair-engineer",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
+      "persona": "self-repair-engineer",
+      "room": "self-repair",
+      "capabilities": [
+        "diagnostics",
+        "self-repair",
+        "test-verification",
+        "git-commit",
+        "docs-updates",
+        "bug-evidence"
+      ],
+      "description": "Diagnoses CEO Studio defects and improvement opportunities, implements verified repairs, logs evidence, updates docs when behavior changes, and commits all file changes."
+    },
+    {
+      "id": "domain-factory-orchestrator",
+      "name": "Domain Factory Orchestrator",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "dispatch_profile": "devin",
+      "persona": "domain-factory-orchestrator",
+      "room": "domain-factory",
+      "capabilities": [
+        "agenda-to-work-package",
+        "domain-audit",
+        "blocked-work-recovery",
+        "peer-review-routing",
+        "validation-gates",
+        "docs-and-testing-coordination",
+        "ceo-briefing"
+      ],
+      "description": "Coordinates the domain-owned software factory loop. Converts approved Agenda Items into Work Packages, audits domains on schedule, enforces completion packets, review/test/docs gates, and escalates only vision/decision issues to the CEO."
+    },
+    {
+      "id": "codex-factory-strategist",
+      "name": "Codex Factory Strategist",
+      "provider": "codex",
+      "model": "gpt-5.5",
+      "persona": "domain-factory-orchestrator",
+      "capabilities": [
+        "software-factory-design",
+        "ceo-operating-model",
+        "domain-runtime-architecture",
+        "implementation-planning",
+        "risk-review"
+      ],
+      "description": "Codex-backed strategy agent for designing the CEO Studio domain factory, CEO governance layer, audit cadence, and implementation plan."
+    },
+    {
+      "id": "devin-opus-factory-reviewer",
+      "name": "Devin Opus Factory Reviewer",
+      "provider": "devin",
+      "model": "claude-opus-4.8",
+      "dispatch_profile": "devin",
+      "persona": "domain-factory-orchestrator",
+      "capabilities": [
+        "software-factory-design",
+        "peer-review-design",
+        "autonomous-execution-systems",
+        "testing-and-validation",
+        "delivery-risk-analysis"
+      ],
+      "description": "Devin Opus reviewer for challenging and improving the autonomous domain factory and CEO project-management operating model. If Devin rejects claude-opus-4.8, use the nearest supported Opus model and record the downgrade."
+    },
+    {
+      "id": "dogfood-tester",
+      "name": "dogfood-tester",
+      "provider": "devin",
+      "model": "swe-1.6",
+      "persona": "ba",
+      "capabilities": [
+        "testing",
+        "dogfood"
+      ],
+      "description": "Test agent created during dogfood session",
+      "memory_key": "agent:dogfood-tester",
+      "tmux_session": "pipe-dogfood-tester"
+    },
+    {
+      "id": "domain-architect",
+      "name": "Domain Architect",
+      "provider": "grok",
+      "persona": "domain-architect",
+      "capabilities": [
+        "domain-definition",
+        "interview",
+        "entity-detection",
+        "handoff-creation"
+      ],
+      "description": "Critical System Agent (design placeholder from June 2026 domain lifecycle discussion): Guides structured conversational interviews for new domain creation. Maintains live AGUI outline in left panel. Produces synthesized definition + raw artifacts + explicit handoff to Agenda Agent. Two-layer model (immutable core + editable persona). See domains/domain-lifecycle/docs/design/ and docs/personas/domain-architect.md (inside the Domain Lifecycle domain)"
+    },
+    {
+      "id": "agenda-agent",
+      "name": "Agenda Agent",
+      "provider": "grok",
+      "persona": "agenda-agent",
+      "capabilities": [
+        "handoff-triage",
+        "agenda-item-creation",
+        "routing",
+        "human-in-loop-judgment"
+      ],
+      "description": "Critical System Agent (design placeholder): Receives handoffs (esp. from Domain Architect), performs triage, creates actionable Agenda Items, routes work, surfaces needs for human attention. See domains/domain-lifecycle/docs/design/ and docs/personas/agenda-agent.md (inside the Domain Lifecycle domain)"
+    },
+    {
+      "id": "ba-document-guard",
+      "name": "BA Document Guard",
+      "provider": "hermes",
+      "persona": "ba-document-guard",
+      "capabilities": [
+        "document-review",
+        "conflict-detection",
+        "dirty-clean-state",
+        "work-blocking",
+        "doc-hygiene"
+      ],
+      "description": "Critical System Agent (design placeholder, domain-scoped): Per-domain guardian of documentation quality. Enforces Dirty/Clean states on all documents, detects contradictions, blocks work on dirty docs. Two-layer model. See domains/domain-lifecycle/docs/design/ and docs/personas/ba-document-guard.md (inside the Domain Lifecycle domain)"
+    }
+  ],
+  "teams": {
+    "discovery-planning": [
+      "ba",
+      "architect",
+      "pm",
+      "researcher",
+      "designer"
+    ],
+    "execution-builders": [
+      "builder",
+      "architect",
+      "planner"
+    ],
+    "review-guild": [
+      "pm",
+      "architect",
+      "facilitator"
+    ],
+    "documentation-stewards": [
+      "docs-steward",
+      "pm",
+      "architect"
+    ],
+    "self-repair": [
+      "self-repair-engineer",
+      "docs-steward",
+      "architect"
+    ],
+    "domain-factory-operations": [
+      "domain-factory-orchestrator",
+      "codex-factory-strategist",
+      "devin-opus-factory-reviewer",
+      "agenda-agent",
+      "ba-document-guard",
+      "docs-steward",
+      "dogfood-tester",
+      "self-repair-engineer"
+    ]
+  }
+}

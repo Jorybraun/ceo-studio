@@ -52,6 +52,91 @@ function flattenTree(nodes, depth = 0, out = []) {
   return out;
 }
 
+// Build a rich snapshot of the live Studio state so the agent starts every turn
+// already knowing WHERE we are (project/domain/file), WHO is on the team, the
+// board state, and recent decisions. Sent as a non-spoken contextual update on
+// connect and whenever the user changes domain/project/file — so the agent is
+// never "blind" and rarely needs to ask "which project/domain are we on?".
+async function buildStudioContext(reason = "") {
+  const u = ui();
+  const ctx = (u.getContext && u.getContext()) || {};
+  const lines = ["=== CEO STUDIO LIVE CONTEXT ==="];
+  if (reason) lines.push(`(update reason: ${reason})`);
+
+  const proj = ctx.project;
+  lines.push(`Project: ${proj ? `${proj.name}${proj.slug ? ` [${proj.slug}]` : ""}` : "none open"}`);
+  lines.push(`Active domain: ${ctx.domain || "All"}`);
+  if (ctx.selectedFile && ctx.selectedFile.path) lines.push(`Open file: ${ctx.selectedFile.path}`);
+  if (ctx.focusedTask && ctx.focusedTask.taskId) {
+    lines.push(`Focused task: ${ctx.focusedTask.taskTitle || ctx.focusedTask.taskId} [${ctx.focusedTask.taskId}] (${ctx.focusedTask.board || "board"} / ${ctx.focusedTask.taskStatus || "task"})`);
+  }
+  if (ctx.panel && (ctx.panel.mode || ctx.panel.focusTitle || ctx.panel.title)) {
+    lines.push(`Panel: ${ctx.panel.mode || ""}${ctx.panel.focusTitle ? ` — ${ctx.panel.focusTitle}` : ""}${ctx.panel.title ? ` (${ctx.panel.title})` : ""}`.trim());
+  }
+
+  // Team roster (agents + teams) from the registry — single source of truth.
+  try {
+    const reg = window.ceo.registryList ? await window.ceo.registryList() : null;
+    const agents = (reg && reg.agents) || [];
+    const teams = (reg && reg.teams) || [];
+    if (agents.length) {
+      lines.push("", `Team roster (${agents.length} agents):`);
+      for (const a of agents.slice(0, 25)) {
+        const brain = a.provider ? `${a.provider}${a.model ? `/${a.model}` : ""}` : "vertex";
+        lines.push(`- ${a.name || a.id} (${a.persona || "no persona"}, ${brain})${a.tmux_session ? " — MOUNTED/live" : ""}`);
+      }
+    } else {
+      lines.push("", "Team roster: no agents defined yet.");
+    }
+    if (teams.length) {
+      lines.push("Teams:");
+      for (const t of teams.slice(0, 12)) lines.push(`- ${t.name}: ${(t.members || []).join(", ") || "no members"}`);
+    }
+  } catch { /* roster optional */ }
+
+  // Kanban board snapshot (tickets per lane) for the active board.
+  try {
+    const slug = await currentBoardSlug();
+    const board = slug && window.ceo.ceoBoard ? await window.ceo.ceoBoard(slug) : null;
+    if (board && board.ok && board.columns) {
+      lines.push("", `Board "${slug}" — tickets by lane:`);
+      for (const [status, tasks] of Object.entries(board.columns)) {
+        const list = (tasks || []).slice(0, 8).map((t) => `${t.id} ${t.title}${t.assignee ? ` [@${t.assignee}]` : ""}`);
+        lines.push(`  ${status} (${(tasks || []).length}): ${list.join("; ") || "—"}`);
+      }
+    }
+  } catch { /* board optional */ }
+
+  // Recent brain memory (decisions + contradictions) for the active domain.
+  try {
+    const r = window.ceo.getBrainContext ? await window.ceo.getBrainContext(ctx.domain) : null;
+    const bc = r && r.ok && r.context;
+    if (bc) {
+      const decs = (bc.recentDecisions || []).slice(0, 4);
+      const cons = (bc.recentContradictions || []).slice(0, 4);
+      if (decs.length) { lines.push("", "Recent decisions:"); decs.forEach((d) => lines.push(`- ${d.title}: ${d.summary || ""}`)); }
+      if (cons.length) { lines.push("Open contradictions:"); cons.forEach((c) => lines.push(`- ${c.title}: ${c.summary || ""}`)); }
+    }
+  } catch { /* brain optional */ }
+
+  lines.push("", "Use this context directly; only call tools to go deeper or to act.");
+  return lines.join("\n");
+}
+
+let lastContextSig = "";
+// Send the live snapshot to the running agent (best-effort, non-spoken).
+async function pushContext(reason = "") {
+  if (!active || !conversation || typeof conversation.sendContextualUpdate !== "function") return;
+  let text;
+  try { text = await buildStudioContext(reason); } catch { return; }
+  // De-dupe identical snapshots (change events can fire in bursts); always send
+  // on session start so the first turn is fully informed.
+  const sig = text.replace(/\(update reason:.*\)\n/, "");
+  if (sig === lastContextSig && !String(reason).includes("start")) return;
+  lastContextSig = sig;
+  try { await conversation.sendContextualUpdate(text); } catch { /* best-effort */ }
+}
+
 // Client tools the live agent can invoke mid-conversation. Names MUST match
 // the tool definitions in main/core/convai.js (TOOLS). Each returns a STRING
 // that ElevenLabs appends to the agent's context (expects_response: true).
@@ -213,6 +298,95 @@ const clientTools = {
     }
     ui().appendStream?.("agent", r.reply);
     return r.reply;
+  },
+  // --- Team communication: talk to the agent team (registry + A2A meetings) ---
+  async list_agents() {
+    const reg = await window.ceo.registryList();
+    const agents = (reg && reg.agents) || [];
+    const teams = (reg && reg.teams) || [];
+    if (!agents.length) return "No agents are defined yet. Ask me to create one or use the Team panel.";
+    const roster = agents.map((a) => {
+      const brain = a.provider ? `${a.provider}${a.model ? `/${a.model}` : ""}` : "vertex";
+      return `- ${a.name || a.id} (id: ${a.id}; ${a.persona || "no persona"}; ${brain})${a.tmux_session ? " — MOUNTED/live" : " — not mounted"}`;
+    }).join("\n");
+    const teamLines = teams.length
+      ? "\n\nTeams:\n" + teams.map((t) => `- ${t.name}: ${(t.members || []).join(", ") || "no members"}`).join("\n")
+      : "";
+    return `Team roster (${agents.length}):\n${roster}${teamLines}`;
+  },
+  async message_agent({ agent, message } = {}) {
+    if (!agent || !message) return "Provide both agent (id or name) and message.";
+    const reg = await window.ceo.registryList();
+    const a = ((reg && reg.agents) || []).find((x) => x.id === agent || x.name === agent);
+    if (!a) return `No agent "${agent}" in the registry. Call list_agents to see who's available.`;
+    const r = await window.ceo.registryMessage(a.id, message, "CEO");
+    if (!r || !r.ok) return `Could not post to ${a.name || a.id}'s room: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `→ ${a.name || a.id} (room ${r.room}): ${message.slice(0, 70)}`);
+    const brainless = !a.provider || a.provider === "echo";
+    if (brainless) {
+      return `Posted to ${a.name || a.id}'s room "${r.room}" as CEO. Heads up: ${a.name || a.id} runs the "echo" provider (no real brain), so it won't reply on its own — convene a meeting with start_meeting to get a substantive response.`;
+    }
+    return `Posted to ${a.name || a.id}'s room "${r.room}" as CEO. ${a.tmux_session ? "It is live and will pick it up." : "Mount it (mount_agent) so it can see and act on the message."}`;
+  },
+  async start_meeting({ room, agenda, criteria, members, team } = {}) {
+    if (!agenda) return "An agenda is required to convene the team.";
+    if (!team && !members) return "Specify a team name or comma-separated agent ids (members). Call list_agents to see options.";
+    const r = await window.ceo.meetingStart({
+      room: room || `meeting-${Date.now()}`,
+      agenda,
+      criteria: criteria || "",
+      members: Array.isArray(members) ? members.join(",") : members,
+      team,
+    });
+    if (!r || !r.ok) return `Could not start the meeting: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `🪑 Meeting "${r.room}": ${agenda.slice(0, 80)}`);
+    return `Convened the team in room "${r.room}" on: ${agenda}. It runs in the background — call read_room with room "${r.room}" to follow the discussion and collect the resulting requirements.`;
+  },
+  async read_room({ room } = {}) {
+    if (!room) return "Provide the room name returned by start_meeting.";
+    const r = await window.ceo.meetingRoom(room);
+    if (!r || !r.ok) return `Could not read room "${room}": ${r ? r.reason : "unknown"}`;
+    const feed = (r.feed || []).slice(-20).map((e) => `[${e.speaker}] ${e.body}`).join("\n\n");
+    const reqs = r.requirements ? `\n\n--- Requirements ---\n${r.requirements.slice(0, 4000)}` : "";
+    return `Room "${room}" (${r.running ? "in progress" : "complete"}):\n\n${feed || "No messages yet."}${reqs}`;
+  },
+  // --- Render / navigation control: drive the Studio UI directly ---
+  async open_view({ view } = {}) {
+    const allowed = ["domain", "board", "tasks", "teams", "channels", "meetings"];
+    const v = String(view || "").toLowerCase();
+    if (!allowed.includes(v)) return `Unknown view "${view}". Choose one of: ${allowed.join(", ")}.`;
+    await ui().openView?.(v);
+    ui().appendStream?.("sys", `🧭 Opened ${v} view`);
+    return `Opened the ${v} view.`;
+  },
+  async open_agent_detail({ agent } = {}) {
+    if (!agent) return "Provide the agent id or name.";
+    const ok = await ui().openAgentDetail?.(agent);
+    if (ok === false) return `No agent "${agent}". Call list_agents first.`;
+    ui().appendStream?.("sys", `👤 Opened agent ${agent}`);
+    return `Opened ${agent}'s detail (left) and its live terminal/logs surface (right).`;
+  },
+  async mount_agent({ agent } = {}) {
+    if (!agent) return "Provide the agent id or name.";
+    const reg = await window.ceo.registryList();
+    const a = ((reg && reg.agents) || []).find((x) => x.id === agent || x.name === agent);
+    if (!a) return `No agent "${agent}".`;
+    const r = await window.ceo.registryMount(a.id);
+    if (!r || !r.ok) return `Could not mount ${a.name || a.id}: ${r ? r.reason : "unknown"}`;
+    ui().refreshTeam?.();
+    ui().appendStream?.("sys", `▶ Mounted ${a.name || a.id}`);
+    return `Mounted ${a.name || a.id}; its live session is starting${r.room ? ` (room "${r.room}")` : ""}.`;
+  },
+  async unmount_agent({ agent } = {}) {
+    if (!agent) return "Provide the agent id or name.";
+    const reg = await window.ceo.registryList();
+    const a = ((reg && reg.agents) || []).find((x) => x.id === agent || x.name === agent);
+    if (!a) return `No agent "${agent}".`;
+    const r = await window.ceo.registryUnmount(a.id);
+    if (!r || !r.ok) return `Could not unmount ${a.name || a.id}: ${r ? r.reason : "unknown"}`;
+    ui().refreshTeam?.();
+    ui().appendStream?.("sys", `⏹ Unmounted ${a.name || a.id}`);
+    return `Unmounted ${a.name || a.id}.`;
   },
   async list_documents() {
     const docs = await window.ceo.docsList();
@@ -427,6 +601,422 @@ const clientTools = {
     ui().appendStream?.("sys", `✅ Task created: ${title}`);
     return `Created task "${title}"${assignee ? ` assigned to ${assignee}` : ""}${persona ? ` with persona ${persona}` : ""}.`;
   },
+  async create_brief({
+    board,
+    title,
+    goal,
+    domain,
+    currentRenderedState,
+    problemMismatch,
+    constraints,
+    acceptanceCriteria,
+    nextAction,
+    owner,
+    persona,
+    reference,
+    goalId,
+  } = {}) {
+    const slug = await currentBoardSlug(board);
+    const activeDomain = domain || ui().getContext?.().domain || "All";
+    const r = await window.ceo.createBrief({
+      board: slug,
+      title,
+      goal,
+      domain: activeDomain,
+      currentRenderedState,
+      problemMismatch,
+      constraints,
+      acceptanceCriteria,
+      nextAction,
+      owner,
+      persona,
+      reference,
+      goalId,
+      requestedBy: "voice-agent",
+    });
+    if (!r || !r.ok) {
+      if (r && r.template) ui().showPanel?.("Brief draft needs missing fields", r.template);
+      return `Brief was not created: ${r ? r.reason : "unknown"}.`;
+    }
+    ui().showPanel?.(title || "Brief", r.body);
+    ui().appendStream?.("sys", `Created brief on ${r.board}${r.task && r.task.taskId ? `: ${r.task.taskId}` : ""}`);
+    return `Created brief "${title}" on ${r.board}${r.task && r.task.taskId ? ` as ${r.task.taskId}` : ""}.`;
+  },
+  async create_bug({
+    board,
+    title,
+    domain,
+    observedBehavior,
+    expectedBehavior,
+    reproductionSteps,
+    severity,
+    impact,
+    evidence,
+    acceptanceCriteria,
+    owner,
+    persona,
+    goalId,
+  } = {}) {
+    const slug = await currentBoardSlug(board);
+    const activeDomain = domain || ui().getContext?.().domain || "All";
+    const r = await window.ceo.createBug({
+      board: slug,
+      title,
+      domain: activeDomain,
+      observedBehavior,
+      expectedBehavior,
+      reproductionSteps,
+      severity,
+      impact,
+      evidence,
+      acceptanceCriteria,
+      owner,
+      persona,
+      goalId,
+      requestedBy: "voice-agent",
+    });
+    if (!r || !r.ok) {
+      if (r && r.template) ui().showPanel?.("Bug draft needs missing fields", r.template);
+      return `Bug was not created: ${r ? r.reason : "unknown"}.`;
+    }
+    ui().showPanel?.(title || "Bug", r.body);
+    ui().appendStream?.("sys", `Created bug on ${r.board}${r.task && r.task.taskId ? `: ${r.task.taskId}` : ""}`);
+    return `Created bug "${title}" on ${r.board}${r.task && r.task.taskId ? ` as ${r.task.taskId}` : ""}.`;
+  },
+  async decompose_brief({ board, taskId } = {}) {
+    if (!taskId) return "No brief task id provided.";
+    const slug = await currentBoardSlug(board);
+    const r = await window.ceo.decomposeBrief({ board: slug, taskId });
+    if (!r || !r.ok) return `Could not decompose brief ${taskId}: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `Requested decomposition for ${taskId}`);
+    return `Requested Hermes decomposition for brief ${taskId}.`;
+  },
+  async create_child_task({
+    board,
+    domain,
+    parentKind = "brief",
+    parentId,
+    title,
+    outcome,
+    acceptanceCriteria,
+    verification,
+    workspace,
+    owner,
+    persona,
+    status,
+    goalId,
+  } = {}) {
+    if (!parentId || !title) return "Parent id and title are required.";
+    const slug = await currentBoardSlug(board);
+    const r = await window.ceo.createChildTask({
+      board: slug,
+      domain: domain || ui().getContext?.().domain,
+      parentKind,
+      parentId,
+      title,
+      outcome,
+      acceptanceCriteria,
+      verification,
+      workspace,
+      owner,
+      persona,
+      status,
+      goalId,
+      requestedBy: "voice-agent",
+    });
+    if (!r || !r.ok) return `Could not create child task: ${r ? r.reason : "unknown"}`;
+    ui().showPanel?.(title, r.body);
+    ui().appendStream?.("sys", `Created linked child task${r.task && r.task.taskId ? ` ${r.task.taskId}` : ""} for ${parentId}`);
+    return `Created child task "${title}" linked to ${parentKind} ${parentId}${r.task && r.task.taskId ? ` as ${r.task.taskId}` : ""}.`;
+  },
+  async list_goals({ layer, status = "active", domain } = {}) {
+    const r = await window.ceo.listGoals({
+      layer,
+      status,
+      domain: domain || ui().getContext?.().domain,
+    });
+    if (!r || !r.ok) return `Could not list goals: ${r ? r.reason : "unknown"}`;
+    const goals = r.goals || [];
+    const lines = goals.map((g) => `- ${g.id} [${g.layer}/${g.status}] ${g.title}${g.domain ? ` (${g.domain})` : ""}`).join("\n") || "- none";
+    return `Goals:\n${lines}`;
+  },
+  async set_goal({ id, layer, title, outcome, domain, status, horizonStart, horizonEnd, roadmapRef, parentGoalId, successCriteria } = {}) {
+    const r = await window.ceo.upsertGoal({
+      id,
+      layer,
+      title,
+      outcome,
+      domain: domain || ui().getContext?.().domain || "All",
+      status,
+      horizonStart,
+      horizonEnd,
+      roadmapRef,
+      parentGoalId,
+      successCriteria,
+    });
+    if (!r || !r.ok) return `Could not save goal: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `Saved ${r.goal.layer} goal: ${r.goal.title}`);
+    return `Saved goal ${r.goal.id}: [${r.goal.layer}] ${r.goal.title}.`;
+  },
+  async link_work_to_goal({ goalId, workKind = "task", workId, board, title, relationship = "supports" } = {}) {
+    if (!goalId || !workId) return "Goal id and work id are required.";
+    const r = await window.ceo.linkWorkToGoal({ goalId, workKind, workId, board, title, relationship });
+    if (!r || !r.ok) return `Could not link work to goal: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `Linked ${workKind} ${workId} to goal ${goalId}`);
+    return `Linked ${workKind} ${workId} to goal ${goalId}.`;
+  },
+  async review_goals({ board, layer, domain, dryRun = false } = {}) {
+    const slug = board || await currentBoardSlug();
+    const r = await window.ceo.reviewGoals({
+      board: slug,
+      layer,
+      domain: domain || ui().getContext?.().domain,
+      dryRun: !!dryRun,
+    });
+    if (!r || !r.ok) return `Could not review goals: ${r ? r.reason : "unknown"}`;
+    if (r.review && r.review.markdown) ui().showPanel?.(`Goal review: ${r.review.layer}`, r.review.markdown);
+    ui().appendStream?.("sys", `Goal review ${r.review && r.review.id ? r.review.id : ""}${r.artifactId ? ` saved as ${r.artifactId}` : ""}`);
+    return [
+      `Reviewed ${r.review.goalReviews.length} goal(s) for ${r.review.layer}.`,
+      `Orphaned blocked: ${r.review.orphanedBlocked.length}.`,
+      `Unaligned active: ${r.review.unalignedActive.length}.`,
+      r.artifactId ? `Saved artifact: ${r.artifactId}.` : "Dry run only.",
+    ].join(" ");
+  },
+  async record_brief_asset({ parentKind = "brief", parentId, assetKind, assetId, title, path, summary } = {}) {
+    if (!parentId) return "Parent id is required.";
+    const r = await window.ceo.recordBriefAsset({
+      parentKind,
+      parentId,
+      assetKind,
+      assetId,
+      title,
+      path,
+      summary,
+      requestedBy: "voice-agent",
+    });
+    if (!r || !r.ok) return `Could not record asset provenance: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `Recorded asset provenance for ${parentId}`);
+    return `Recorded asset "${title || path || assetId}" under ${parentKind} ${parentId}.`;
+  },
+  async show_provenance({ parentId } = {}) {
+    if (!parentId) return "Parent id is required.";
+    const r = await window.ceo.provenanceGraph(parentId);
+    if (!r || !r.ok) return `Could not read provenance: ${r ? r.reason : "unknown"}`;
+    const children = (r.children || []).map((c) => `- ${c.kind}:${c.id}${c.title ? ` — ${c.title}` : ""}`).join("\n") || "- none";
+    const assets = (r.assets || []).map((a) => `- ${a.kind}:${a.id}${a.path ? ` (${a.path})` : ""}${a.title ? ` — ${a.title}` : ""}`).join("\n") || "- none";
+    const md = [`# Provenance: ${parentId}`, "", "## Child Work", children, "", "## Assets", assets].join("\n");
+    ui().showPanel?.(`Provenance: ${parentId}`, md);
+    return md;
+  },
+  async show_orchestration_org({ domain } = {}) {
+    const activeDomain = domain || ui().getContext?.().domain || "All";
+    const r = await window.ceo.orchestrationSummary({ domain: activeDomain });
+    if (!r || !r.ok) return `Could not read orchestration org: ${r ? r.reason : "unknown"}`;
+    const lanes = (r.lanes || []).map((lane) => [
+      `### ${lane.lane}`,
+      `- Team: ${lane.team || "unassigned"}${lane.missingTeam ? " (missing)" : ""}`,
+      `- Workflow: ${lane.workflow || "unassigned"}`,
+      `- Queue role: ${lane.queueRole || "unassigned"}`,
+      `- Default personas: ${(lane.defaultPersonas || []).join(", ") || "unassigned"}`,
+      `- Members: ${(lane.members || []).join(", ") || "none"}`,
+      `- Escalation: ${lane.escalationTarget || "none"}`,
+      lane.guidance ? `- Guidance: ${lane.guidance}` : "",
+      (lane.missingAgents || []).length ? `- Missing agents: ${lane.missingAgents.join(", ")}` : "",
+    ].filter(Boolean).join("\n")).join("\n\n");
+    const issues = (r.issues || []).length ? ["", "## Issues", ...(r.issues || []).map((x) => `- ${x}`)].join("\n") : "";
+    const md = [`# Orchestration Org: ${activeDomain}`, "", lanes || "_No lane policies._", issues].join("\n");
+    ui().showPanel?.("Orchestration Org", md);
+    return md;
+  },
+  async route_work({ domain, status, kind = "task" } = {}) {
+    const activeDomain = domain || ui().getContext?.().domain || "All";
+    const r = await window.ceo.orchestrationRoute({ domain: activeDomain, status, kind });
+    if (!r || !r.ok) return `Could not route work: ${r ? r.reason : "unknown"}`;
+    return [
+      `Route for ${kind || "task"} in ${activeDomain}:`,
+      `- Lane: ${r.lane}`,
+      `- Team: ${r.team || "unassigned"}${r.missingTeam ? " (missing)" : ""}`,
+      `- Workflow: ${r.workflow || "unassigned"}`,
+      `- Default personas: ${(r.defaultPersonas || []).join(", ") || "unassigned"}`,
+      `- Suggested assignee: ${r.assignee || "unassigned"}`,
+      `- Escalation target: ${r.escalationTarget || "none"}`,
+      (r.missingAgents || []).length ? `- Missing agents: ${r.missingAgents.join(", ")}` : "",
+    ].filter(Boolean).join("\n");
+  },
+  async analyze_blocked_work({ board, domain, dryRun = false, limit } = {}) {
+    const slug = board || await currentBoardSlug();
+    const r = await window.ceo.analyzeBlocked({
+      board: slug,
+      domain: domain || ui().getContext?.().domain,
+      dryRun: !!dryRun,
+      limit,
+    });
+    if (!r || !r.ok) return `Could not analyze blocked work: ${r ? r.reason : "unknown"}`;
+    const lines = (r.results || []).slice(0, 8).map((item) => {
+      if (item.skipped) return `- ${item.taskId}: skipped (${item.reason})`;
+      return `- ${item.taskId}: ${item.escalationTarget} escalation, comment ${item.comment}${item.brainArtifactId ? `, memory ${item.brainArtifactId}` : ""}`;
+    });
+    ui().appendStream?.("sys", `Blocked analysis: ${r.analyzed} analyzed, ${r.skipped} skipped`);
+    return [
+      `Blocked analysis for ${r.board}: ${r.blocked} blocked, ${r.analyzed} analyzed, ${r.skipped} skipped${r.dryRun ? " (dry run)" : ""}.`,
+      lines.join("\n"),
+    ].filter(Boolean).join("\n");
+  },
+  async autonomy_status() {
+    const r = await window.ceo.autonomyStatus();
+    if (!r || !r.ok) return `Could not read autonomy status: ${r ? r.reason : "unknown"}`;
+    const p = r.policy || {};
+    return [
+      `Autonomy is ${r.running ? "running" : "stopped"}; policy is ${p.enabled ? "enabled" : "disabled"} in ${p.mode || "propose"} mode.`,
+      `Interval: ${p.intervalMinutes} min; cooldown: ${p.cooldownMinutes} min.`,
+      `Reviews: ${(p.reviewLayers || []).join(", ") || "none"}; blocked analysis: ${p.analyzeBlocked ? "on" : "off"}.`,
+      `Automatic work creation: ${p.allowCreateWork ? "policy flag enabled, still requires planner/CEO action" : "disabled"}.`,
+      r.state && r.state.lastRunAt ? `Last run: ${r.state.lastRunAt}.` : "No run recorded yet.",
+    ].join("\n");
+  },
+  async configure_autonomy({
+    enabled,
+    intervalMinutes,
+    cooldownMinutes,
+    reviewLayers,
+    writeReviews,
+    analyzeBlocked,
+    allowBoardComments,
+    allowCreateWork,
+    maxBlockedPerRun,
+  } = {}) {
+    const patch = {};
+    for (const [k, v] of Object.entries({ enabled, intervalMinutes, cooldownMinutes, writeReviews, analyzeBlocked, allowBoardComments, allowCreateWork, maxBlockedPerRun })) {
+      if (v !== undefined) patch[k] = v;
+    }
+    if (reviewLayers !== undefined) patch.reviewLayers = Array.isArray(reviewLayers)
+      ? reviewLayers
+      : String(reviewLayers || "").split(",").map((x) => x.trim()).filter(Boolean);
+    const r = await window.ceo.autonomyConfigure(patch);
+    if (!r || !r.ok) return `Could not configure autonomy: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `Autonomy policy updated (${r.policy.mode})`);
+    return `Autonomy policy updated. Enabled: ${r.policy.enabled}. Mode: ${r.policy.mode}. Running: ${r.running ? "yes" : "no"}.`;
+  },
+  async run_autonomy_cycle({ board, domain, force = true } = {}) {
+    const slug = board || await currentBoardSlug();
+    const r = await window.ceo.autonomyRunCycle({
+      board: slug,
+      domain: domain || ui().getContext?.().domain,
+      force: !!force,
+    });
+    if (!r || !r.ok) return `Could not run autonomy cycle: ${r ? r.reason : "unknown"}`;
+    if (r.skipped) return `Autonomy cycle skipped: ${r.reason}.`;
+    ui().appendStream?.("sys", `Autonomy cycle: ${r.proposedActions.length} proposal(s)`);
+    return [
+      `Autonomy cycle complete in ${r.mode} mode.`,
+      `Reviews: ${(r.reviews || []).filter((x) => x && x.ok).length}.`,
+      `Blocked: ${r.blocked && r.blocked.ok ? `${r.blocked.analyzed} analyzed, ${r.blocked.skipped} skipped` : "not run"}.`,
+      `Proposed actions: ${(r.proposedActions || []).length}.`,
+      r.creationPolicy,
+    ].join(" ");
+  },
+  async start_autonomy({ intervalMinutes, board } = {}) {
+    const r = await window.ceo.autonomyStart({
+      board,
+      policy: intervalMinutes ? { intervalMinutes } : {},
+    });
+    if (!r || !r.ok) return `Could not start autonomy: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", `Autonomy started (${r.policy.intervalMinutes} min interval)`);
+    return `Started autonomy cycle. Interval: ${r.policy.intervalMinutes} minutes. Mode: ${r.policy.mode}.`;
+  },
+  async stop_autonomy() {
+    const r = await window.ceo.autonomyStop();
+    if (!r || !r.ok) return `Could not stop autonomy: ${r ? r.reason : "unknown"}`;
+    ui().appendStream?.("sys", "Autonomy stopped");
+    return "Stopped scheduled autonomy.";
+  },
+  async report_system_bug({
+    board,
+    domain,
+    title,
+    source,
+    observedBehavior,
+    expectedBehavior,
+    reproductionSteps,
+    severity,
+    impact,
+    evidence,
+    evidencePath,
+    output,
+    goalId,
+    createRepairTask = true,
+  } = {}) {
+    if (!source || !observedBehavior) return "Source and observed behavior are required.";
+    const r = await window.ceo.reportSystemBug({
+      board,
+      domain: domain || ui().getContext?.().domain || "Engineering",
+      title,
+      source,
+      observedBehavior,
+      expectedBehavior,
+      reproductionSteps,
+      severity,
+      impact,
+      evidence,
+      evidencePath,
+      output,
+      goalId,
+      createRepairTask,
+      requestedBy: "voice-agent",
+    });
+    if (!r || !r.ok) return `Could not report system bug: ${r ? r.reason : "unknown"}`;
+    const bugId = r.bug && r.bug.task && r.bug.task.taskId;
+    const repairId = r.repairTask && r.repairTask.task && r.repairTask.task.taskId;
+    ui().appendStream?.("sys", `Reported system bug${bugId ? ` ${bugId}` : ""}${repairId ? ` with repair ${repairId}` : ""}`);
+    return `Reported system bug${bugId ? ` ${bugId}` : ""}${repairId ? ` and linked repair task ${repairId}` : ""}.`;
+  },
+  async ask_self_repair({
+    board,
+    domain,
+    title,
+    request,
+    source,
+    observedBehavior,
+    expectedBehavior,
+    reproductionSteps,
+    severity,
+    impact,
+    evidence,
+    evidencePath,
+    output,
+    goalId,
+    createRepairTask = true,
+    autoMount = true,
+  } = {}) {
+    if (!request && !observedBehavior) return "A self-repair request or observed behavior is required.";
+    const r = await window.ceo.consultSelfRepair({
+      board,
+      domain: domain || ui().getContext?.().domain || "Engineering",
+      title,
+      request,
+      source,
+      observedBehavior,
+      expectedBehavior,
+      reproductionSteps,
+      severity,
+      impact,
+      evidence,
+      evidencePath,
+      output,
+      goalId,
+      createRepairTask,
+      autoMount,
+      requestedBy: "voice-agent",
+    });
+    if (!r || !r.ok) return `Could not ask self-repair: ${r ? r.reason : "unknown"}`;
+    const bugId = r.bug && r.bug.task && r.bug.task.taskId;
+    const repairId = r.repairTask && r.repairTask.task && r.repairTask.task.taskId;
+    ui().appendStream?.("sys", `Asked self-repair${bugId ? ` via ${bugId}` : ""}${repairId ? ` / ${repairId}` : ""} in room ${r.room || "self-repair"}`);
+    const mountStatus = r.mount && r.mount.ok === false ? ` Mount failed: ${r.mount.reason || "unknown"}.` : "";
+    const postStatus = r.post && r.post.ok === false ? ` Handoff post failed: ${r.post.reason || "unknown"}.` : "";
+    return `Asked self-repair engineer to diagnose and repair this.${bugId ? ` Bug: ${bugId}.` : ""}${repairId ? ` Repair task: ${repairId}.` : ""} Room: ${r.room || "self-repair"}.${mountStatus}${postStatus}`;
+  },
   async list_personas() {
     const r = await window.ceo.listPersonas();
     if (!r || !r.ok) return `Could not list personas: ${r ? r.reason : "unknown"}`;
@@ -605,6 +1195,9 @@ async function start() {
         ui().setAgentState?.("listening");
         ui().appendStream?.("sys", `Live voice connected (auto-ends in ${maxMinutes} min).`);
         armGuardrails(maxMinutes);
+        // Brief the agent on the live Studio state before the first real turn.
+        lastContextSig = "";
+        pushContext("session start");
       },
       onDisconnect: () => { cleanup("disconnected"); },
       onError: (msg) => {
@@ -667,8 +1260,12 @@ function cleanup(reason) {
 
 function toggle() { if (active) stop("ended by user"); else start(); }
 
-// Expose to app.js (kill switch / cost guardrail call stop()).
-window.CEOConvai = { toggle, stop, isActive: () => active };
+// Expose to app.js (kill switch / cost guardrail call stop(); UI change hooks
+// call syncContext() so the live agent always knows the current project/domain).
+window.CEOConvai = {
+  toggle, stop, isActive: () => active,
+  syncContext: (reason) => pushContext(reason || "ui change"),
+};
 
 if (hdrBtn) hdrBtn.addEventListener("click", toggle);
 

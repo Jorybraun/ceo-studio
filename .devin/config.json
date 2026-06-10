@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "gbrain": {
+      "command": "./runtime/harness/bin/gbrain-mcp",
+      "transport": "stdio"
+    }
+  },
+  "permissions": {
+    "allow": [
+      "mcp__gbrain__query",
+      "mcp__gbrain__search",
+      "mcp__gbrain__get_page",
+      "mcp__gbrain__list_pages",
+      "mcp__gbrain__get_stats",
+      "mcp__gbrain__get_backlinks",
+      "mcp__gbrain__traverse_graph"
+    ]
+  }
+}

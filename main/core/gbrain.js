@@ -2,10 +2,16 @@
 /**
  * GBrain bridge.
  *
- * GBrain's `serve --http` mode is an MCP server, not a small REST API. CEO
- * Studio needs narrow app tools, so use the local `gbrain` CLI directly.
+ * Uses the same local gbrain CLI and env setup as the Hermes MCP server
+ * (see ~/.gbrain/serve-mcp.sh). This makes CEO Studio's gbrain usage
+ * consistent with the rest of the system.
+ *
+ * No separate HTTP server is needed for the bridge; the CLI + MCP stdio
+ * is the canonical way.
  */
 const { spawn } = require("child_process");
+const fs = require("fs");
+const path = require("path");
 
 function cfg(env = process.env) {
   return {
@@ -18,13 +24,42 @@ function configured() {
   return true;
 }
 
+function prepareEnv(baseEnv = process.env) {
+  const env = { ...baseEnv };
+
+  // Add bun to PATH (critical for finding gbrain)
+  env.PATH = `${process.env.HOME}/.bun/bin:${env.PATH || ""}`;
+
+  // Unset DATABASE_URL to avoid conflicts (same as serve-mcp.sh)
+  delete env.DATABASE_URL;
+
+  // Load Google embedding key from PIPE-OS .env (for vector search)
+  try {
+    const pipeEnvPath = path.join(process.env.HOME, "Code", "PIPE", "PIPE-OS", ".env");
+    if (fs.existsSync(pipeEnvPath)) {
+      const envContent = fs.readFileSync(pipeEnvPath, "utf-8");
+      const match = envContent.match(/^VERTEX_API_KEY=(.+)$/m);
+      if (match) {
+        const key = match[1].trim().replace(/"/g, "");
+        env.GOOGLE_GENERATIVE_AI_API_KEY = key;
+      }
+    }
+  } catch (e) {
+    // non-fatal
+  }
+
+  return env;
+}
+
 function _run(args, { input, env = process.env, timeoutMs } = {}) {
-  const c = cfg(env);
+  const preparedEnv = prepareEnv(env);
+  const c = cfg(preparedEnv);
+
   return new Promise((resolve) => {
     let out = "", err = "", done = false;
     let child;
     try {
-      child = spawn(c.bin, args, { env });
+      child = spawn(c.bin, args, { env: preparedEnv });
     } catch (e) {
       return resolve({ ok: false, reason: `failed to start gbrain: ${e.message}` });
     }
@@ -98,4 +133,41 @@ async function ingest({ title, content, project, domain, metadata } = {}, env = 
   return { ok: true, result: parsed, endpoint: "gbrain capture", slug };
 }
 
-module.exports = { cfg, configured, status, query, ingest };
+// Relative path (POSIX, repo-root anchored) to the committed gbrain MCP
+// launcher. Devin reads mcpServers from .devin/config.json and runs the command
+// from the repo root, so a relative command resolves correctly.
+const PROJECT_MCP_REL = "runtime/harness/bin/gbrain-mcp";
+
+/**
+ * Ensure the project's .devin/config.json wires the gbrain MCP server so every
+ * Devin agent working in this repo auto-connects to the shared project brain
+ * (no per-agent setup). Idempotent + non-destructive: only adds the `gbrain`
+ * entry when missing and preserves any existing config. Only wires when the
+ * project actually ships the launcher, so we never point Devin at a missing
+ * command in unrelated projects opened by the cockpit.
+ */
+function ensureProjectWiring(projectPath) {
+  if (!projectPath) return { ok: false, reason: "no project path" };
+  const launcher = path.join(projectPath, PROJECT_MCP_REL.split("/").join(path.sep));
+  if (!fs.existsSync(launcher)) {
+    return { ok: true, wired: false, reason: "project has no gbrain-mcp launcher" };
+  }
+  const cfgDir = path.join(projectPath, ".devin");
+  const cfgPath = path.join(cfgDir, "config.json");
+  let cfg = {};
+  try {
+    if (fs.existsSync(cfgPath)) cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8")) || {};
+  } catch { cfg = {}; }
+  cfg.mcpServers = cfg.mcpServers || {};
+  if (cfg.mcpServers.gbrain) return { ok: true, wired: true, alreadyPresent: true };
+  cfg.mcpServers.gbrain = { command: `./${PROJECT_MCP_REL}`, transport: "stdio" };
+  try {
+    fs.mkdirSync(cfgDir, { recursive: true });
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+    return { ok: true, wired: true, created: true };
+  } catch (e) {
+    return { ok: false, reason: e.message };
+  }
+}
+
+module.exports = { cfg, configured, prepareEnv, status, query, ingest, ensureProjectWiring, PROJECT_MCP_REL };

@@ -14,11 +14,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
 import sys
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
+
+# Make the harness root importable so `from agents import agent_config` works
+# regardless of how this module is invoked (as a script via launch-agent, or
+# imported). agent_config in turn does `from config import paths`.
+_HARNESS_ROOT = Path(__file__).resolve().parent.parent
+if str(_HARNESS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_HARNESS_ROOT))
 
 # ---------------------------------------------------------------------------
 # Models / Runtimes
@@ -205,6 +214,106 @@ AGENTS: dict[str, dict[str, Any]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Declarative agents (agents.json) — the cockpit's writable source of truth.
+# We merge these in so an agent created in the UI is a first-class citizen for
+# launch-agent / herder / domain-room, without hand-editing this file.
+# ---------------------------------------------------------------------------
+
+# provider -> (launch_mode, command run in the tmux main window). New CLI-backed
+# providers slot in here by name; the generic "command" provider takes its
+# command from the agent's own `command` field (see below).
+_PROVIDER_LAUNCH = {
+    "grok": ("external", "grok"),
+    "devin": ("external", "devin"),
+    "claude": ("external", "claude"),
+    "echo": ("watcher_only", ""),
+}
+
+
+def _launch_for(provider: str, spec: dict) -> tuple[str, str]:
+    """Resolve (launch_mode, tmux command) for an agent's provider.
+
+    The generic "command" provider runs the agent's declared `command`
+    template; known CLI providers use the static map; anything else is tried as
+    an external command of its own name so a new backend works without editing
+    this file."""
+    model = str(spec.get("model") or "").strip()
+    if provider == "command":
+        return "external", str(spec.get("command") or "").strip()
+    if provider == "devin":
+        return "external", "devin" + (f" --model {shlex.quote(model)}" if model else "")
+    if provider == "claude":
+        return "external", "claude" + (f" --model {shlex.quote(model)}" if model else "")
+    return _PROVIDER_LAUNCH.get(provider, ("external", provider))
+
+
+def _declarative_agents() -> dict[str, dict[str, Any]]:
+    """Agents declared in agents.json, mapped into registry entry shape."""
+    try:
+        from agents import agent_config
+    except Exception:
+        try:
+            import agent_config  # when imported from within the agents/ dir
+        except Exception:
+            return {}
+    try:
+        cfg = agent_config.load_config()
+    except Exception:
+        return {}
+
+    out: dict[str, dict[str, Any]] = {}
+    for aid, spec in (cfg.get("agents") or {}).items():
+        provider = str(spec.get("provider") or "echo")
+        room = str(spec.get("room") or "discovery")
+        profile = str(spec.get("profile") or "").strip()
+        explicit_mode = str(spec.get("launch_mode") or "").strip()
+        if explicit_mode in VALID_LAUNCH_MODES:
+            # The agent declares its own launch mode (e.g. the conversational
+            # CEO: hermes_profile with an empty profile = default Hermes/OAuth).
+            mode = explicit_mode
+            if mode == "hermes_profile":
+                command = "hermes" + (f" --profile {shlex.quote(profile)}" if profile else "")
+            elif mode == "external":
+                _, command = _launch_for(provider, spec)
+            else:
+                command = ""
+        else:
+            mode, command = _launch_for(provider, spec)
+        out[aid] = {
+            "id": aid,
+            "display_name": spec.get("name") or aid,
+            "role": spec.get("description") or f"{provider} agent",
+            "persona": spec.get("persona") or "",
+            "canonical_room": room,
+            "default_room": room,
+            "tmux_session": spec.get("tmux_session") or f"pipe-{aid}",
+            "tmux_window": spec.get("tmux_window") or "main",
+            "watcher_window": "watcher",
+            "launch_mode": mode,
+            "profile": profile,
+            "command": command,
+            "capabilities": list(spec.get("capabilities") or []),
+            "mission": spec.get("description") or "",
+            "provider": provider,
+            "model": spec.get("model"),
+            "memory_key": spec.get("memory_key"),
+            "source": "agents.json",
+        }
+    return out
+
+
+def _all_agents() -> dict[str, dict[str, Any]]:
+    """Built-in AGENTS merged with declarative agents.json entries.
+
+    Built-ins win on id conflicts so existing system agents keep their exact
+    behavior; new UI-created agents are added on top.
+    """
+    merged = _declarative_agents()
+    merged.update(AGENTS)
+    return merged
+
+
 def _slug(value: str) -> str:
     value = value.strip().lstrip("@").lower()
     value = re.sub(r"[\s_]+", "-", value)
@@ -227,7 +336,14 @@ def _normalise_agent(key: str, data: dict[str, Any]) -> dict[str, Any]:
     tmux_session = str(agent.get("tmux_session") or f"pipe-{agent_id}")
     tmux_window = str(agent.get("tmux_window") or "main")
     watcher_window = str(agent.get("watcher_window") or "watcher")
-    profile = str(agent.get("profile") or (agent_id if launch_mode == "hermes_profile" else ""))
+    # Preserve an explicitly-provided profile, even when it is the empty string
+    # (empty + hermes_profile = the DEFAULT Hermes profile, i.e. the
+    # conversational CEO). Only fall back to the agent id when no profile key was
+    # set at all, so built-in hermes_profile agents keep their implicit profile.
+    if agent.get("profile") is None:
+        profile = agent_id if launch_mode == "hermes_profile" else ""
+    else:
+        profile = str(agent.get("profile"))
     command = str(agent.get("command") or "")
     capabilities = list(agent.get("capabilities") or [])
     health_policy = dict(agent.get("health_policy") or DEFAULT_HEALTH_POLICY)
@@ -274,7 +390,7 @@ def resolve_agent_id(name: str) -> str | None:
     if not query:
         return None
 
-    for key, data in AGENTS.items():
+    for key, data in _all_agents().items():
         agent = _normalise_agent(key, data)
         if query in {_slug(alias) for alias in _aliases_for(key, agent)}:
             return agent["id"]
@@ -286,7 +402,7 @@ def get_agent(name: str) -> dict[str, Any] | None:
     agent_id = resolve_agent_id(name)
     if not agent_id:
         return None
-    for key, data in AGENTS.items():
+    for key, data in _all_agents().items():
         agent = _normalise_agent(key, data)
         if agent["id"] == agent_id:
             return agent
@@ -306,13 +422,13 @@ def get_default_room(name: str) -> str:
 
 
 def list_agents() -> list[str]:
-    return [_normalise_agent(key, value)["id"] for key, value in AGENTS.items()]
+    return [_normalise_agent(key, value)["id"] for key, value in _all_agents().items()]
 
 
 def agents_for_room(room: str) -> dict[str, dict[str, Any]]:
     return {
         _normalise_agent(k, v)["id"]: _normalise_agent(k, v)
-        for k, v in AGENTS.items()
+        for k, v in _all_agents().items()
         if _normalise_agent(k, v).get("canonical_room") == room
     }
 

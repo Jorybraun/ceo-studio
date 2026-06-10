@@ -14,5 +14,29 @@ renderer/agui/client.bundle.js
 # Transient agent handoff briefs
 .voice-brief.md
 
+# Isolated git worktrees for autonomy-runner Devin workers (never commit)
+.worktrees/
+
 # Local Hermes runtime state / agent task briefs (never commit)
 .hermes/
+
+# Python virtualenvs (e.g. harness a2a-sdk venv)
+.venv/
+**/__pycache__/
+
+# Harness room data (durable chat logs / per-room state)
+runtime/harness/brain/rooms/
+
+# Project brain room data (durable chat logs / per-room state)
+brain/rooms/
+
+# Dogfood / self-QA CDP run artifacts (screenshots, console logs, reports)
+dogfood-output/
+
+# Harness runtime session / guardrail ledger state
+runtime/harness/agent-tmux/
+runtime/harness/sessions/
+sessions/
+
+# Editor workspace state
+.obsidian/

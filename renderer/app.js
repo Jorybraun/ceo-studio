@@ -78,10 +78,64 @@ let selectedFile = null;
 let filePaneOpen = false;
 let panelFullscreen = false;
 let focusedTask = null;
+let ceoContextTray = [];
+let domainArchitectSession = null;
 
 function setPanelTitle(text) {
   const title = $("#panel-title");
   if (title) title.textContent = text || "Panel";
+}
+
+function renderArchitectureOverview() {
+  const ui = {
+    title: "Current architecture",
+    components: [
+      {
+        type: "card",
+        title: "PIPE Discovery Micro-App: current code path",
+        body: "The main process owns project state, domain scope, the project brain, Hermes relay, GBrain, jobs, voice, and all IPC. The renderer is a thin cockpit; preload exposes the only safe API surface.",
+      },
+      {
+        type: "mermaid",
+        diagram: [
+          "flowchart TB",
+          "  U[User / Operator] --> R[Renderer UI\nrenderer/app.js + dashboard.js]",
+          "  R --> P[Preload bridge\nwindow.ceo IPC API]",
+          "  P --> M[Main process\nmain/index.js]",
+          "  M --> S[Session state\nproject / domain / cost / provider / agent]",
+          "  M --> D[Domain store\nmain/core/domains.js]",
+          "  M --> B[Project brain\nmain/core/brain.js]",
+          "  M --> G[GBrain bridge\nmain/core/gbrain.js + gbrain CLI]",
+          "  M --> H[Hermes CEO relay\nmain/core/hermes.js]",
+          "  M --> J[Job queue + ticket packs\nmain/core/jobs.js + ticket-planner.js]",
+          "  M --> V[Voice / ConvAI\nmain/core/voice.js + convai.js]",
+          "  M --> A[AGUI server\nmain/core/agui-server.js]",
+          "  A --> R",
+          "  B --> T[Docs / artifacts index]",
+          "  D --> T",
+          "  H --> K[Kanban / swarm / room]\n",
+          "  P --> C[Renderer panel renderers\nmarked + mermaid + registry]",
+          "  C --> L[Left panel\n#panel1]",
+        ].join("\n"),
+      },
+      {
+        type: "list",
+        ordered: false,
+        items: [
+          "Renderer is thin and never touches Node directly.",
+          "Main is the authority for state, file access, and live CEO operations.",
+          "Project brain and GBrain are separate knowledge paths; Hermes is the conversational CEO.",
+          "The left panel can render markdown, cards, and Mermaid diagrams through AGUI or direct panel rendering.",
+        ],
+      },
+    ],
+  };
+  if (window.CEOAgui && window.CEOAgui.showAgui) window.CEOAgui.showAgui(ui);
+  else {
+    setPanelTitle(ui.title);
+    const fallback = [`# ${ui.title}`, "", "```mermaid", ui.components[1].diagram, "```"].join("\n");
+    panelContent().innerHTML = window.marked ? window.marked.parse(fallback) : fallback;
+  }
 }
 
 function setStudioFocus(title, subtitle, mode = "Studio") {
@@ -211,6 +265,7 @@ async function showFile(path) {
   window.ceoUI.showPanel(path, r.text);
   setFilePaneOpen(false);
   setVoiceStatus(`Showing ${path}`);
+  window.CEOConvai?.syncContext?.(`opened file ${path}`);
 }
 
 function renderTaskMarkdown({ board, task, comments = [] }) {
@@ -259,7 +314,86 @@ function assigneeName(a) {
   return typeof a === "string" ? a : (a.profile || a.name || a.assignee || a.id || "");
 }
 
-function renderTaskHtml({ board, task, comments = [], assignees = [], log = "" }) {
+function safeIpc(call, fallback = null) {
+  try { return Promise.resolve(call()).catch(() => fallback); }
+  catch { return Promise.resolve(fallback); }
+}
+
+function taskGoalLinks(goalsRes, taskId) {
+  const goals = (goalsRes && goalsRes.goals) || [];
+  return goals.filter((goal) =>
+    (goal.links || []).some((link) => String(link.workId || "") === String(taskId || "")));
+}
+
+function renderTaskContextPanel({ task, provenance, goalsRes, autonomyRes }) {
+  const taskId = task && task.id;
+  const events = (provenance && provenance.events) || [];
+  const children = events.filter((event) => event.parent && String(event.parent.id || "") === String(taskId || "") && event.child).map((event) => event.child);
+  const parents = events.filter((event) => event.child && String(event.child.id || "") === String(taskId || "") && event.parent).map((event) => ({
+    ...event.parent,
+    relationship: event.metadata && event.metadata.relationship,
+  }));
+  const assets = events.filter((event) => event.parent && String(event.parent.id || "") === String(taskId || "") && event.asset).map((event) => event.asset);
+  const linkedGoals = taskGoalLinks(goalsRes, taskId);
+  const autonomyOk = autonomyRes && autonomyRes.ok;
+  const policy = (autonomyOk && autonomyRes.policy) || {};
+  const state = (autonomyOk && autonomyRes.state) || {};
+  const lastRun = state.lastRunAt ? new Date(state.lastRunAt).toLocaleString() : "never";
+  const goalsHtml = linkedGoals.length
+    ? linkedGoals.slice(0, 4).map((goal) => `<div class="rounded-lg border border-neutral-800 bg-neutral-950/50 p-2">
+        <div class="text-[10px] uppercase tracking-wider text-neutral-600">${esc(goal.layer || "goal")} · ${esc(goal.status || "active")}</div>
+        <div class="mt-1 text-sm leading-snug text-neutral-200">${esc(goal.title || goal.id)}</div>
+        ${goal.outcome ? `<div class="mt-1 line-clamp-2 text-xs leading-5 text-neutral-500">${esc(goal.outcome)}</div>` : ""}
+      </div>`).join("")
+    : `<div class="text-xs text-neutral-600">No goal link recorded for this task.</div>`;
+  const parentHtml = parents.length
+    ? parents.slice(0, 5).map((parent) => `<div class="flex items-start gap-2 text-xs">
+        <span class="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500/70"></span>
+        <span class="min-w-0"><span class="font-mono text-neutral-400">${esc(parent.id)}</span>${parent.title ? ` <span class="text-neutral-500">${esc(parent.title)}</span>` : ""}${parent.relationship ? ` <span class="text-neutral-700">${esc(parent.relationship)}</span>` : ""}</span>
+      </div>`).join("")
+    : `<div class="text-xs text-neutral-600">No parent brief recorded.</div>`;
+  const childHtml = children.length
+    ? children.slice(0, 5).map((child) => `<div class="flex items-start gap-2 text-xs">
+        <span class="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-500/70"></span>
+        <span class="min-w-0"><span class="font-mono text-neutral-400">${esc(child.id)}</span>${child.title ? ` <span class="text-neutral-500">${esc(child.title)}</span>` : ""}</span>
+      </div>`).join("")
+    : `<div class="text-xs text-neutral-600">No child work recorded.</div>`;
+  const assetHtml = assets.length
+    ? assets.slice(0, 5).map((asset) => `<div class="flex items-start gap-2 text-xs">
+        <span class="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500/70"></span>
+        <span class="min-w-0"><span class="text-neutral-300">${esc(asset.title || asset.id)}</span>${asset.path ? ` <span class="break-all font-mono text-neutral-600">${esc(asset.path)}</span>` : ""}</span>
+      </div>`).join("")
+    : `<div class="text-xs text-neutral-600">No assets recorded.</div>`;
+  return `<div class="rounded-2xl border border-neutral-800 bg-neutral-950/45 p-4">
+    <div class="text-[10px] uppercase tracking-wider text-neutral-600">Planning Context</div>
+    <div class="mt-3 space-y-3">
+      <div>
+        <div class="mb-2 text-[10px] uppercase tracking-wider text-neutral-700">Goal alignment</div>
+        <div class="space-y-2">${goalsHtml}</div>
+      </div>
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-1">
+        <div>
+          <div class="mb-2 text-[10px] uppercase tracking-wider text-neutral-700">Parent brief</div>
+          <div class="space-y-1.5">${parentHtml}</div>
+        </div>
+        <div>
+          <div class="mb-2 text-[10px] uppercase tracking-wider text-neutral-700">Child work</div>
+          <div class="space-y-1.5">${childHtml}</div>
+        </div>
+        <div>
+          <div class="mb-2 text-[10px] uppercase tracking-wider text-neutral-700">Assets</div>
+          <div class="space-y-1.5">${assetHtml}</div>
+        </div>
+      </div>
+      <div class="rounded-lg border border-neutral-800 bg-neutral-950/55 p-2 text-xs leading-5 text-neutral-500">
+        Autonomy: <span class="${autonomyRes && autonomyRes.running ? "text-emerald-300" : "text-neutral-300"}">${autonomyRes && autonomyRes.running ? "running" : "stopped"}</span>
+        ${autonomyOk ? ` · ${esc(policy.mode || "propose")} · interval ${esc(policy.intervalMinutes || 60)}m · last ${esc(lastRun)}` : ` · ${esc((autonomyRes && autonomyRes.reason) || "unavailable")}`}
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderTaskHtml({ board, task, comments = [], assignees = [], log = "", provenance = null, goalsRes = null, autonomyRes = null }) {
   const status = task.status || task.state || "";
   const currentAssignee = task.assignee || "";
   const options = [
@@ -309,6 +443,7 @@ function renderTaskHtml({ board, task, comments = [], assignees = [], log = "" }
           <div class="text-[10px] uppercase tracking-wider text-neutral-600">Brief</div>
           <div class="mt-3 whitespace-pre-wrap text-sm leading-6 text-neutral-300">${esc(body)}</div>
         </div>
+        ${renderTaskContextPanel({ task, provenance, goalsRes, autonomyRes })}
       </aside>
       <section class="space-y-3">
         <div class="rounded-2xl border border-neutral-800 bg-neutral-950/45 p-4">
@@ -332,14 +467,18 @@ async function openTaskInStudio({ board, taskId, taskTitle, taskStatus } = {}) {
   focusedTask = { board, taskId, taskTitle, taskStatus };
   setAgentState("thinking");
   setStudioFocus(taskTitle || taskId, `${board || "board"} / ${taskStatus || "task"} / planning focus`, "Planning");
+  window.CEOConvai?.syncContext?.(`task → ${board || "board"} / ${taskId}`);
   setPanelTitle("Planning Brief");
   panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading task context...</div>';
   try {
     if (window.ceo.ceoFocusTask) await window.ceo.ceoFocusTask({ ...focusedTask });
-    const [r, assigneesRes, logRes] = await Promise.all([
+    const [r, assigneesRes, logRes, provenanceRes, goalsRes, autonomyRes] = await Promise.all([
       window.ceo.ceoTaskDetail ? window.ceo.ceoTaskDetail(board, taskId) : null,
-      window.ceo.ceoAssignees ? window.ceo.ceoAssignees(board) : null,
-      window.ceo.ceoTaskLog ? window.ceo.ceoTaskLog({ board, taskId }) : null,
+      window.ceo.ceoAssignees ? safeIpc(() => window.ceo.ceoAssignees(board)) : null,
+      window.ceo.ceoTaskLog ? safeIpc(() => window.ceo.ceoTaskLog({ board, taskId })) : null,
+      window.ceo.provenanceGraph ? safeIpc(() => window.ceo.provenanceGraph()) : null,
+      window.ceo.listGoals ? safeIpc(() => window.ceo.listGoals({ domain: currentDomain })) : null,
+      window.ceo.autonomyStatus ? safeIpc(() => window.ceo.autonomyStatus()) : null,
     ]);
     if (!r || !r.ok) {
       const md = [
@@ -358,6 +497,9 @@ async function openTaskInStudio({ board, taskId, taskTitle, taskStatus } = {}) {
         comments: r.comments || [],
         assignees: (assigneesRes && assigneesRes.assignees) || [],
         log: (logRes && logRes.ok && logRes.out) || "",
+        provenance: provenanceRes && provenanceRes.ok ? provenanceRes : null,
+        goalsRes: goalsRes && goalsRes.ok ? goalsRes : null,
+        autonomyRes,
       });
     }
     appendStream("sys", `Planning focus loaded: ${taskTitle || taskId}. Ask the CEO for a domain plan, acceptance criteria, risks, or the right agent team.`);
@@ -392,6 +534,236 @@ function taskCardHtml(boardSlug, status, task) {
   </button>`;
 }
 
+function domainMiniList(items, emptyText, formatter) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2 text-xs text-neutral-600">${esc(emptyText)}</div>`;
+  return `<div class="space-y-2">${list.slice(0, 8).map(formatter).join("")}</div>`;
+}
+
+function domainArtifactRows(items, emptyText) {
+  return domainMiniList(items, emptyText, (item) => `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2">
+    <div class="flex items-start gap-2">
+      <div class="min-w-0 flex-1">
+        <div class="truncate text-xs font-medium text-neutral-300">${esc(item.title || item.name || item.path)}</div>
+        <div class="mt-0.5 truncate font-mono text-[10px] text-neutral-600">${esc(item.path || "")}</div>
+      </div>
+      ${item.path ? `<button class="domain-context-add shrink-0 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-[10px] text-neutral-300 hover:bg-neutral-800" data-context-kind="artifact" data-context-title="${esc(item.title || item.name || item.path)}" data-context-path="${esc(item.path)}">Context</button>` : ""}
+    </div>
+  </div>`);
+}
+
+function domainAgendaRows(items) {
+  return domainMiniList(items, "No captured Agenda Items yet.", (item) => `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2">
+    <div class="flex items-start gap-2">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2">
+          <span class="rounded border border-cyan-500/25 bg-cyan-950/25 px-1.5 py-0.5 text-[10px] text-cyan-300">${esc(item.type || "feature")}</span>
+          <span class="min-w-0 truncate text-xs font-medium text-neutral-300">${esc(item.title)}</span>
+        </div>
+        <div class="mt-1 text-[10px] uppercase tracking-wider text-neutral-600">${esc(item.status || "proposed")} &middot; human approval required</div>
+      </div>
+      <button class="domain-context-add shrink-0 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-[10px] text-neutral-300 hover:bg-neutral-800" data-context-kind="agenda" data-context-title="${esc(item.title)}" data-context-path="${esc(`domains/${slugifyName(currentDomain)}/captured-agenda-items.md`)}">Context</button>
+    </div>
+  </div>`);
+}
+
+function domainHandoffRows(items) {
+  return domainMiniList(items, "No handoffs captured yet.", (item) => `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2">
+    <div class="flex items-start gap-2">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2">
+          <span class="rounded border border-amber-500/25 bg-amber-950/20 px-1.5 py-0.5 text-[10px] text-amber-300">${esc(item.status || "pending")}</span>
+          <span class="min-w-0 truncate text-xs font-medium text-neutral-300">${esc(item.title)}</span>
+        </div>
+        <div class="mt-1 truncate font-mono text-[10px] text-neutral-600">${esc(item.path || item.id || "")}</div>
+      </div>
+      ${item.path ? `<button class="domain-context-add shrink-0 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-[10px] text-neutral-300 hover:bg-neutral-800" data-context-kind="handoff" data-context-title="${esc(item.title)}" data-context-path="${esc(item.path)}">Context</button>` : ""}
+    </div>
+  </div>`);
+}
+
+function domainLifecycleSection(title, body, actionHtml = "") {
+  return `<section class="rounded-2xl border border-neutral-800 bg-neutral-950/35 p-4">
+    <div class="mb-3 flex items-center gap-2">
+      <h2 class="text-sm font-semibold text-neutral-200">${esc(title)}</h2>
+      ${actionHtml ? `<div class="ml-auto">${actionHtml}</div>` : ""}
+    </div>
+    ${body}
+  </section>`;
+}
+
+function contextKey(item) {
+  return `${item.kind || "artifact"}:${item.path || item.title}`;
+}
+
+function renderCeoContextTray() {
+  const rows = ceoContextTray.length
+    ? ceoContextTray.map((item) => `<div class="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950/50 px-3 py-2">
+        <span class="rounded border border-cyan-500/20 bg-cyan-950/20 px-1.5 py-0.5 text-[10px] text-cyan-300">${esc(item.kind || "artifact")}</span>
+        <span class="min-w-0 flex-1 truncate text-xs text-neutral-300">${esc(item.title || item.path)}</span>
+        <span class="hidden max-w-[280px] truncate font-mono text-[10px] text-neutral-600 md:block">${esc(item.path || "")}</span>
+        <button class="domain-context-remove rounded-md px-2 py-1 text-[10px] text-neutral-500 hover:bg-neutral-900 hover:text-neutral-200" data-context-key="${esc(contextKey(item))}">Remove</button>
+      </div>`).join("")
+    : `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2 text-xs text-neutral-600">No CEO context selected. Add domain artifacts from the sections below.</div>`;
+  return `<section class="rounded-2xl border border-cyan-500/25 bg-cyan-950/10 p-4">
+    <div class="mb-3 flex flex-wrap items-center gap-2">
+      <h2 class="text-sm font-semibold text-neutral-100">CEO Context</h2>
+      <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] text-neutral-500">${ceoContextTray.length} selected</span>
+      <div class="ml-auto flex gap-2">
+        <button id="domain-context-clear" ${ceoContextTray.length ? "" : "disabled"} class="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800 disabled:opacity-40">Clear</button>
+        <button id="domain-context-ask" ${ceoContextTray.length ? "" : "disabled"} class="rounded-md bg-cyan-600 px-3 py-1 text-xs font-medium text-white hover:bg-cyan-500 disabled:opacity-40">Ask CEO</button>
+      </div>
+    </div>
+    <div class="space-y-2">${rows}</div>
+  </section>`;
+}
+
+function memberSummary(agent) {
+  if (!agent) return "missing";
+  const caps = (agent.capabilities || []).slice(0, 3).join(", ");
+  return [agent.provider || "unknown", agent.persona || "no persona", caps].filter(Boolean).join(" / ");
+}
+
+function teamContextText(team, agentsById, lanes) {
+  const members = (team.members || []).map((id) => {
+    const agent = agentsById.get(id);
+    return `- ${id}: ${memberSummary(agent)}`;
+  }).join("\n") || "- No members";
+  const owned = lanes.filter((lane) => lane.team === team.name);
+  const laneText = owned.length
+    ? owned.map((lane) => `- ${lane.lane}: ${lane.queueRole || "no queue role"} / ${lane.workflow || "no workflow"}`).join("\n")
+    : "- No lanes route to this team";
+  return [
+    `Team: ${team.name}`,
+    "",
+    "Members:",
+    members,
+    "",
+    "Routed Lanes:",
+    laneText,
+  ].join("\n");
+}
+
+function renderTeamsDomainIntelligence({ registry = {}, orchestration = {} } = {}) {
+  const agents = registry.agents || [];
+  const teams = registry.teams || [];
+  const lanes = orchestration.lanes || [];
+  const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
+  const laneTeams = new Set(lanes.map((lane) => lane.team).filter(Boolean));
+  const registryTeamNames = new Set(teams.map((team) => team.name));
+  const missingTeams = [...laneTeams].filter((name) => !registryTeamNames.has(name));
+  const unusedTeams = teams.filter((team) => !laneTeams.has(team.name));
+  const cards = teams.length ? teams.map((team) => {
+    const ownedLanes = lanes.filter((lane) => lane.team === team.name);
+    const missingMembers = (team.members || []).filter((id) => !agentsById.has(id));
+    const capabilitySet = new Set();
+    for (const id of team.members || []) {
+      const agent = agentsById.get(id);
+      for (const cap of agent?.capabilities || []) capabilitySet.add(cap);
+    }
+    const context = teamContextText(team, agentsById, lanes);
+    const memberRows = (team.members || []).map((id) => {
+      const agent = agentsById.get(id);
+      return `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2">
+        <div class="flex items-center gap-2">
+          <span class="min-w-0 flex-1 truncate text-xs font-medium text-neutral-200">${esc(agent?.name || id)}</span>
+          <span class="rounded border ${agent ? "border-neutral-700 text-neutral-400" : "border-red-500/30 text-red-300"} px-1.5 py-0.5 text-[10px]">${esc(agent ? agent.provider || "unknown" : "missing")}</span>
+        </div>
+        <div class="mt-1 truncate text-[10px] text-neutral-600">${esc([agent?.persona, ...(agent?.capabilities || []).slice(0, 3)].filter(Boolean).join(" / ") || "No persona or capabilities")}</div>
+      </div>`;
+    }).join("") || `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2 text-xs text-neutral-600">No members yet.</div>`;
+    return `<section class="rounded-2xl border border-neutral-800 bg-neutral-950/35 p-4">
+      <div class="mb-3 flex items-start gap-2">
+        <div class="min-w-0 flex-1">
+          <h3 class="truncate text-sm font-semibold text-neutral-100">${esc(team.name)}</h3>
+          <div class="mt-1 text-[10px] uppercase tracking-wider text-neutral-600">${(team.members || []).length} members · ${ownedLanes.length} routed lanes · ${capabilitySet.size} capabilities</div>
+        </div>
+        <button class="domain-context-add rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-[10px] text-neutral-300 hover:bg-neutral-800"
+          data-context-kind="team"
+          data-context-title="${esc(`Team: ${team.name}`)}"
+          data-context-text="${esc(context)}">Context</button>
+      </div>
+      <div class="mb-3 flex flex-wrap gap-1.5">${ownedLanes.length ? ownedLanes.map((lane) => `<span class="rounded border border-cyan-500/20 bg-cyan-950/15 px-2 py-0.5 text-[10px] text-cyan-200">${esc(lane.lane)}</span>`).join("") : `<span class="rounded border border-amber-500/25 bg-amber-950/15 px-2 py-0.5 text-[10px] text-amber-300">not routed</span>`}</div>
+      <div class="space-y-2">${memberRows}</div>
+      ${missingMembers.length ? `<div class="mt-3 rounded-lg border border-red-500/25 bg-red-950/10 px-3 py-2 text-xs text-red-200">Missing agents: ${esc(missingMembers.join(", "))}</div>` : ""}
+    </section>`;
+  }).join("") : `<div class="rounded-xl border border-neutral-800 bg-neutral-950/45 p-4 text-sm text-neutral-500">No registry teams found.</div>`;
+  const gapRows = [
+    ...missingTeams.map((name) => `Orchestration references missing team: ${name}`),
+    ...unusedTeams.map((team) => `Team has no routed lane yet: ${team.name}`),
+    ...teams.flatMap((team) => (team.members || []).filter((id) => !agentsById.has(id)).map((id) => `${team.name} references missing agent: ${id}`)),
+  ];
+  return `<section class="rounded-2xl border border-emerald-500/20 bg-emerald-950/10 p-4">
+    <div class="mb-3 flex flex-wrap items-center gap-2">
+      <h2 class="text-sm font-semibold text-neutral-100">Team Intelligence</h2>
+      <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] text-neutral-500">${teams.length} teams</span>
+      <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] text-neutral-500">${agents.length} agents</span>
+      <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] text-neutral-500">${lanes.length} lane policies</span>
+    </div>
+    <div class="grid grid-cols-1 gap-3 xl:grid-cols-2">${cards}</div>
+    <div class="mt-4 rounded-xl border border-neutral-800 bg-neutral-950/45 p-3">
+      <div class="text-[10px] uppercase tracking-wider text-neutral-600">Gaps / Ambiguity</div>
+      <div class="mt-2 space-y-1 text-xs text-neutral-400">${gapRows.length ? gapRows.map((gap) => `<div>${esc(gap)}</div>`).join("") : `<div class="text-neutral-600">No missing teams or members detected. Scope is still not first-class; teams are project-level registry entries today.</div>`}</div>
+    </div>
+  </section>`;
+}
+
+async function addDomainContextFromButton(btn) {
+  const item = {
+    kind: btn.dataset.contextKind || "artifact",
+    title: btn.dataset.contextTitle || btn.dataset.contextPath || "Selected context",
+    path: btn.dataset.contextPath || "",
+    text: btn.dataset.contextText || "",
+    domain: currentDomain,
+  };
+  if (!item.path && !item.title) return;
+  const key = contextKey(item);
+  if (!ceoContextTray.some((x) => contextKey(x) === key)) ceoContextTray.push(item);
+  setVoiceStatus(`Added CEO context: ${item.title}`);
+  await renderStudioBoard(currentDomain);
+}
+
+async function removeDomainContext(key) {
+  ceoContextTray = ceoContextTray.filter((item) => contextKey(item) !== key);
+  await renderStudioBoard(currentDomain);
+}
+
+async function readContextItem(item) {
+  if (item.text) return item;
+  if (!item.path || !window.ceo.docsRead) {
+    return { ...item, text: "" };
+  }
+  try {
+    const r = await window.ceo.docsRead(item.path);
+    return { ...item, text: r && r.ok ? String(r.text || "").slice(0, 6000) : `Could not read ${item.path}: ${r ? r.reason : "unknown"}` };
+  } catch (e) {
+    return { ...item, text: `Could not read ${item.path}: ${e.message}` };
+  }
+}
+
+async function askCeoAboutContext() {
+  if (!ceoContextTray.length) return;
+  setVoiceStatus("Reading selected domain context...");
+  const loaded = await Promise.all(ceoContextTray.map(readContextItem));
+  const prompt = [
+    `Use the selected ${currentDomain} domain artifacts below as the primary context.`,
+    "Tell me what is useful, what is missing, and what the next concrete step should be.",
+    "Keep actions proposal-only unless I explicitly approve creating Kanban work or dispatching agents.",
+    "",
+    ...loaded.map((item, idx) => [
+      `## Context ${idx + 1}: ${item.title}`,
+      `Kind: ${item.kind}`,
+      `Path: ${item.path || "inline"}`,
+      "",
+      item.text || "(no file content available)",
+      "",
+    ].join("\n")),
+  ].join("\n");
+  setVoiceStatus("Asking CEO with selected context...");
+  await runTurn(prompt);
+  setVoiceStatus("CEO context sent.");
+}
+
 async function renderStudioBoard(domain = currentDomain) {
   if (!currentProject) {
     renderPanel1Context(null, null);
@@ -408,10 +780,25 @@ async function renderStudioBoard(domain = currentDomain) {
     const data = boardSlug && window.ceo.ceoBoard ? await window.ceo.ceoBoard(boardSlug) : null;
     const domainRes = domain && domain !== "All" && window.ceo.getDomain ? await window.ceo.getDomain(domain) : null;
     const domainDef = domainRes && domainRes.ok ? domainRes.domain : null;
+    const isTeamsDomain = domainDef && (domainDef.slug === "teams" || String(domainDef.name || "").toLowerCase() === "teams");
+    let teamsDomainHtml = "";
+    if (isTeamsDomain) {
+      let registry = {};
+      let orchestration = {};
+      try {
+        [registry, orchestration] = await Promise.all([
+          window.ceo.registryList ? window.ceo.registryList() : null,
+          window.ceo.orchestrationSummary ? window.ceo.orchestrationSummary({ domain }) : null,
+        ]);
+      } catch {
+        registry = {};
+        orchestration = {};
+      }
+      teamsDomainHtml = renderTeamsDomainIntelligence({ registry: registry || {}, orchestration: orchestration || {} });
+    }
     const cols = (data && data.ok && data.columns) || {};
-    const ordered = ["planning", "triage", "todo", "ready", "running", "blocked", "review", "done"]
-      .filter((s) => Object.prototype.hasOwnProperty.call(cols, s))
-      .concat(Object.keys(cols).filter((s) => !["planning", "triage", "todo", "ready", "running", "blocked", "review", "done"].includes(s)));
+    const baseOrder = ["planning", "triage", "bug", "todo", "ready", "running", "blocked", "review", "done"];
+    const ordered = baseOrder.concat(Object.keys(cols).filter((s) => !baseOrder.includes(s)));
     const lanes = ordered.length ? ordered.map((status) => {
       const tasks = cols[status] || [];
       return `<section class="min-w-[240px] flex-1 rounded-2xl border border-neutral-800 bg-neutral-950/35">
@@ -427,7 +814,29 @@ async function renderStudioBoard(domain = currentDomain) {
     const domainPurpose = domainDef?.purpose || "This domain has not been defined yet. Use + -> New domain, or ask the voice CEO to define its purpose, goal, and team.";
     const domainGoal = domainDef?.overarchingGoal || domainDef?.currentState || "";
     const team = (domainDef?.coreAgents || []).filter(Boolean);
-    const responsibilities = (domainDef?.responsibilities || []).filter(Boolean);
+    const responsibilities = (domainDef?.boundaries || domainDef?.responsibilities || []).filter(Boolean);
+    const features = (domainDef?.features || domainDef?.activeEpics || []).filter(Boolean);
+    const relationships = (domainDef?.relationships || domainDef?.interfaces || []).filter(Boolean);
+    const artifacts = domainDef?.artifacts || {};
+    const handoffs = artifacts.handoffs || [];
+    const agendaItems = domainDef?.agendaItems || [];
+    const docs = [...(artifacts.featureDocs || []), ...(artifacts.designDocs || [])];
+    const personas = artifacts.personaDocs || [];
+    const showLifecycle = domain && domain !== "All" && domainDef;
+    const lifecycleHtml = showLifecycle ? `<div class="grid grid-cols-1 gap-3 xl:grid-cols-2">
+      ${domainLifecycleSection("Definition", `<div class="space-y-3 text-sm text-neutral-400">
+        <p class="leading-6">${esc(domainPurpose)}</p>
+        ${domainGoal ? `<p class="leading-6"><span class="text-neutral-500">Goal:</span> ${esc(domainGoal)}</p>` : `<div class="text-xs text-neutral-600">No long-term goal captured.</div>`}
+        <div>${domainArtifactRows([{ title: "definition.md", path: domainDef.artifactPaths?.definition || "" }], "definition.md is missing.")}</div>
+      </div>`)}
+      ${domainLifecycleSection("Captured Agenda Items", domainAgendaRows(agendaItems), `<button id="domain-propose-agenda" class="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-800">Triage handoffs</button>`)}
+      ${domainLifecycleSection("Handoffs", domainHandoffRows(handoffs), `<button id="domain-create-handoff" class="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-800">New handoff</button>`)}
+      ${domainLifecycleSection("Plans", domainArtifactRows(artifacts.plans, "No plans captured yet."))}
+      ${domainLifecycleSection("Requirements", domainArtifactRows(artifacts.requirements, "No requirements captured yet."))}
+      ${domainLifecycleSection("Agendas / Meetings", domainArtifactRows(artifacts.agendas, "No meeting outputs captured yet."), `<button id="domain-first-meeting" class="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-800">Dogfood meeting</button>`)}
+      ${domainLifecycleSection("Docs", domainArtifactRows(docs, "No feature or design docs captured yet."))}
+      ${domainLifecycleSection("Personas", domainArtifactRows(personas, "No domain persona docs captured yet."))}
+    </div>` : "";
 
     panelContent().innerHTML = `<div class="space-y-5">
       <div class="rounded-3xl border border-neutral-800 bg-[radial-gradient(circle_at_top_left,rgba(6,182,212,0.16),transparent_34%),linear-gradient(135deg,rgba(23,23,23,0.9),rgba(10,10,10,0.95))] p-5">
@@ -438,6 +847,8 @@ async function renderStudioBoard(domain = currentDomain) {
             <p class="mt-2 max-w-3xl text-sm leading-6 text-neutral-400">${esc(domain && domain !== "All" ? domainPurpose : "Project-wide planning across all domains. Pick a domain when you want its goal, team, and task board.")}</p>
             ${domainGoal ? `<p class="mt-2 max-w-3xl text-sm leading-6 text-cyan-100/80"><span class="text-neutral-500">Goal:</span> ${esc(domainGoal)}</p>` : ""}
             ${responsibilities.length ? `<div class="mt-3 flex flex-wrap gap-2">${responsibilities.slice(0, 5).map((r) => `<span class="rounded-full border border-neutral-800 bg-black/30 px-2 py-1 text-[11px] text-neutral-300">${esc(r)}</span>`).join("")}</div>` : ""}
+            ${features.length ? `<div class="mt-2 flex flex-wrap gap-2">${features.slice(0, 5).map((r) => `<span class="rounded-full border border-cyan-500/20 bg-cyan-950/15 px-2 py-1 text-[11px] text-cyan-200/90">${esc(r)}</span>`).join("")}</div>` : ""}
+            ${relationships.length ? `<div class="mt-2 text-xs text-neutral-500">Relationships: ${esc(relationships.join(", "))}</div>` : ""}
           </div>
           <button id="studio-add-task" data-board="${esc(boardSlug || "")}" class="rounded-xl bg-cyan-600 px-4 py-2 text-sm font-semibold text-white shadow-[0_0_28px_rgba(8,145,178,0.25)] transition hover:bg-cyan-500">Add task</button>
         </div>
@@ -448,11 +859,97 @@ async function renderStudioBoard(domain = currentDomain) {
           <div class="rounded-xl border border-neutral-800 bg-black/25 p-3"><div class="text-[10px] uppercase tracking-wider text-neutral-600">Team</div><div class="mt-1 truncate text-xs text-neutral-300">${esc(team.length ? team.join(", ") : "not assigned")}</div></div>
         </div>
       </div>
-      <div class="flex gap-3 overflow-x-auto pb-2">${lanes}</div>
+      ${showLifecycle ? renderCeoContextTray() : ""}
+      ${teamsDomainHtml}
+      ${lifecycleHtml}
+      <section class="rounded-2xl border border-neutral-800 bg-neutral-950/35 p-4">
+        <div class="mb-3 flex items-center gap-2">
+          <h2 class="text-sm font-semibold text-neutral-200">Board / Work</h2>
+          <span class="ml-auto font-mono text-[10px] text-neutral-600">${esc(boardSlug || "no board")}</span>
+        </div>
+        <div class="flex gap-3 overflow-x-auto pb-2">${lanes}</div>
+      </section>
     </div>`;
   } catch (e) {
     window.ceoUI.showPanel("Domain", `Could not load domain board: ${e.message}`);
   }
+}
+
+async function createDomainHandoffFromView() {
+  if (!currentProject || !currentDomain || currentDomain === "All" || !window.ceo.createDomainHandoff) return;
+  const title = prompt("Handoff title:", `${currentDomain} handoff`);
+  if (!title || !title.trim()) return;
+  const r = await window.ceo.createDomainHandoff({
+    domain: currentDomain,
+    title: title.trim(),
+    status: "pending",
+    userConfirmation: true,
+    sourceLinks: [`domains/${slugifyName(currentDomain)}/definition.md`, `domains/${slugifyName(currentDomain)}/captured-agenda-items.md`],
+    capturedEntities: ["Domain package confirmed by human"],
+    suggestedAgendaItems: [
+      { type: "handoff-triage", title: `Triage ${title.trim()}`, priority: "high" },
+      { type: "documentation", title: `Check docs handoff for ${currentDomain}`, priority: "normal" },
+    ],
+    body: "Manual handoff created from the domain cockpit. Agenda Agent should acknowledge and propose next Agenda Items only.",
+  });
+  setVoiceStatus(r && r.ok ? "Handoff captured." : `Handoff failed: ${r ? r.reason : "unknown"}`);
+  await renderStudioBoard(currentDomain);
+}
+
+async function triageDomainHandoffFromView() {
+  if (!currentProject || !currentDomain || currentDomain === "All" || !window.ceo.proposeAgendaFromHandoff) return;
+  const proposal = await window.ceo.proposeAgendaFromHandoff({ domain: currentDomain });
+  if (!proposal || !proposal.ok) {
+    setVoiceStatus(`Triage failed: ${proposal ? proposal.reason : "unknown"}`);
+    return;
+  }
+  let created = 0;
+  for (const item of proposal.proposals || []) {
+    const r = await window.ceo.createAgendaItem({ domain: currentDomain, item });
+    if (r && r.ok) created++;
+  }
+  setVoiceStatus(`Agenda Agent proposed ${created} item${created === 1 ? "" : "s"}.`);
+  await renderStudioBoard(currentDomain);
+}
+
+async function startDomainDogfoodMeeting() {
+  if (!currentProject || !currentDomain || currentDomain === "All" || !window.ceo.meetingStart) return;
+  const agenda = "Plan the first complete Domain Creation workflow implementation.";
+  const criteria = "Produce a concrete implementation plan, risks, required artifacts, and next Agenda Items for the selected domain.";
+  const members = "domain-architect,agenda-agent,docs-steward,self-repair-engineer";
+  const info = {
+    room: `domain-creation-${slugifyName(currentDomain)}-${Date.now()}`,
+    agenda,
+    criteria,
+    members,
+    allowPaid: false,
+  };
+  const r = await window.ceo.meetingStart(info);
+  if (!r || !r.ok) {
+    if (window.ceo.createAgendaItem) {
+      await window.ceo.createAgendaItem({
+        domain: currentDomain,
+        item: {
+          type: "bug/system repair",
+          title: "Repair Domain Lifecycle dogfood meeting provider/registry support",
+          priority: "high",
+          source: "domain-cockpit meeting start",
+          body: `Meeting start failed: ${r ? r.reason : "unknown"}. Provider/registry support must be fixed or explicitly documented before this capability is considered complete.`,
+        },
+      });
+    }
+    setVoiceStatus(`Meeting failed; captured repair Agenda Item.`);
+    await renderStudioBoard(currentDomain);
+    return;
+  }
+  navMeetingRoom = r.room;
+  navMeetingMeta = { domain: currentDomain, agenda, participants: members, expectedOutcome: criteria, saved: false };
+  setVoiceStatus(`Meeting started: ${r.room}`);
+  await openView("meetings");
+  const roomLabel = $("#nav-mtg-room"); if (roomLabel) roomLabel.textContent = r.room;
+  pollNavMeeting();
+  stopNavMeetingPoll();
+  navMeetingTimer = setInterval(pollNavMeeting, 2500);
 }
 
 async function openProject(id) {
@@ -472,6 +969,7 @@ async function openProject(id) {
   appendStream("sys", `Opened "${res.project.name}". Brain initialized & docs indexed.`);
   renderMeter(await window.ceo.costStatus());
   setAgentState("idle");
+  window.CEOConvai?.syncContext?.(`opened project ${res.project.name}`);
 }
 
 /** One text turn: prompt -> agent -> reply in the stream. */
@@ -514,6 +1012,178 @@ async function send() {
 function closeCreateMenu() {
   const menu = $("#create-menu");
   if (menu) menu.classList.add("hidden");
+}
+
+function collectDomainWizardDraft() {
+  return {
+    name: $("#domain-name")?.value.trim() || "",
+    purpose: $("#domain-purpose")?.value.trim() || "",
+    overarchingGoal: $("#domain-goal")?.value.trim() || "",
+    boundaries: splitLines($("#domain-responsibilities")?.value || ""),
+    features: splitLines($("#domain-features")?.value || ""),
+    relationships: splitLines($("#domain-relationships")?.value || ""),
+    coreAgents: [...document.querySelectorAll('input[name="domain-agent"]:checked')].map((x) => x.value).filter(Boolean),
+    kanbanBoard: $("#domain-board")?.value || "",
+    relativePath: $("#domain-path")?.value.trim() || "",
+  };
+}
+
+function applyDomainArchitectDraftToForm(session) {
+  const draft = session?.draft || {};
+  const set = (id, value) => { const el = $(`#${id}`); if (el) el.value = value || ""; };
+  set("domain-name", draft.name);
+  set("domain-purpose", draft.purpose);
+  set("domain-goal", draft.overarchingGoal);
+  set("domain-responsibilities", (draft.boundaries || draft.responsibilities || []).join("\n"));
+  set("domain-features", (draft.features || draft.activeEpics || []).join("\n"));
+  set("domain-relationships", (draft.relationships || draft.interfaces || []).join("\n"));
+  set("domain-path", draft.relativePath || (draft.name ? `domains/${slugifyName(draft.name)}` : ""));
+  const board = $("#domain-board");
+  if (board && draft.kanbanBoard) board.value = draft.kanbanBoard;
+  for (const input of document.querySelectorAll('input[name="domain-agent"]')) {
+    input.checked = (draft.coreAgents || []).includes(input.value);
+  }
+}
+
+function renderDomainArchitectPanel(session = domainArchitectSession) {
+  const host = $("#domain-architect-panel");
+  if (!host) return;
+  if (!session) {
+    host.innerHTML = `<div class="rounded-2xl border border-cyan-500/20 bg-cyan-950/10 p-4">
+      <div class="text-[10px] uppercase tracking-wider text-cyan-300/80">Domain Architect</div>
+      <div class="mt-2 text-sm font-medium text-neutral-100">Guided creation interview</div>
+      <p class="mt-2 text-xs leading-5 text-neutral-500">Start an interview session. The agent tracks missing essentials and only creates the domain after explicit confirmation.</p>
+      <button id="domain-architect-start" class="mt-3 w-full rounded-lg bg-cyan-600 px-3 py-2 text-sm font-medium text-white hover:bg-cyan-500">Start interview</button>
+    </div>`;
+    return;
+  }
+  const outline = session.outline || [];
+  const current = session.currentQuestion || "Review the definition.";
+  const active = outline.find((item) => item.focused);
+  const transcript = session.transcript || [];
+  const deepDives = session.deepDives || [];
+  host.innerHTML = `<div class="rounded-2xl border border-cyan-500/20 bg-cyan-950/10 p-4">
+    <div class="flex items-center gap-2">
+      <div class="text-[10px] uppercase tracking-wider text-cyan-300/80">Domain Architect</div>
+      <span class="ml-auto rounded border border-neutral-700 bg-neutral-950/60 px-1.5 py-0.5 text-[10px] text-neutral-400">${session.readyToConfirm ? "ready" : "interviewing"}</span>
+    </div>
+    <div class="mt-3 rounded-xl border border-neutral-800 bg-neutral-950/50 p-3">
+      ${active ? `<div class="mb-2 rounded-lg border border-cyan-500/30 bg-cyan-950/20 px-2 py-1 text-[11px] text-cyan-100">Focused: ${esc(active.label)}</div>` : ""}
+      <div class="text-xs font-medium text-neutral-200">${esc(current)}</div>
+      <textarea id="domain-architect-answer" rows="4" class="mt-2 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" placeholder="Answer this question, then record it..."></textarea>
+      <button id="domain-architect-answer-save" ${session.readyToConfirm && !active ? "disabled" : ""} class="mt-2 rounded-md border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800 disabled:opacity-40">Record answer</button>
+    </div>
+    <div class="mt-3 space-y-1.5">
+      ${outline.map((item) => `<button class="domain-architect-outline w-full text-left flex items-center gap-2 rounded-lg border ${item.focused ? "border-cyan-500/60 bg-cyan-950/25" : "border-neutral-800 bg-neutral-950/45"} px-2 py-1.5 hover:border-cyan-500/40" data-field="${esc(item.key)}">
+        <span class="h-2 w-2 rounded-full ${item.complete ? "bg-emerald-500" : "bg-amber-500"}"></span>
+        <span class="min-w-0 flex-1">
+          <span class="block truncate text-xs text-neutral-300">${esc(item.label)}</span>
+          <span class="block truncate text-[10px] text-neutral-600">${esc(Array.isArray(item.value) ? item.value.join(", ") : item.value)}</span>
+        </span>
+        <span class="text-[10px] text-neutral-600">${item.complete ? "captured" : "missing"}</span>
+      </button>`).join("")}
+    </div>
+    <div class="mt-3 flex flex-wrap gap-2">
+      <button id="domain-architect-apply" class="rounded-md border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800">Apply draft</button>
+      <button id="domain-architect-ask" class="rounded-md border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800">Ask Hermes</button>
+      <button id="domain-architect-deep-dive" ${active ? "" : "disabled"} class="rounded-md border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800 disabled:opacity-40">Deep dive</button>
+      <button id="domain-architect-confirm" ${session.readyToConfirm ? "" : "disabled"} class="rounded-md bg-cyan-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-cyan-500 disabled:opacity-40">Confirm & create</button>
+    </div>
+    <div class="mt-3 grid grid-cols-2 gap-2 text-[10px] text-neutral-500">
+      <div class="rounded-lg border border-neutral-800 bg-neutral-950/35 px-2 py-1">Transcript turns: ${transcript.length}</div>
+      <div class="rounded-lg border border-neutral-800 bg-neutral-950/35 px-2 py-1">Deep dives: ${deepDives.length}</div>
+    </div>
+    <div id="domain-architect-msg" class="mt-2 min-h-4 text-[10px] text-neutral-500">${session.missing?.length ? `Missing: ${session.missing.join(", ")}` : "Ready for confirmation."}</div>
+  </div>`;
+}
+
+async function startDomainArchitectInterview() {
+  if (!window.ceo.domainArchitectStart) return;
+  const r = await window.ceo.domainArchitectStart(collectDomainWizardDraft());
+  if (!r || !r.ok) {
+    setVoiceStatus(`Domain Architect failed: ${r ? r.reason : "unknown"}`);
+    return;
+  }
+  domainArchitectSession = r.session;
+  renderDomainArchitectPanel();
+  setVoiceStatus("Domain Architect interview started.");
+}
+
+async function focusDomainArchitectSection(field) {
+  if (!domainArchitectSession || !field || !window.ceo.domainArchitectFocus) return;
+  const r = await window.ceo.domainArchitectFocus({ id: domainArchitectSession.id, field });
+  if (!r || !r.ok) {
+    setVoiceStatus(`Domain Architect focus failed: ${r ? r.reason : "unknown"}`);
+    return;
+  }
+  domainArchitectSession = r.session;
+  renderDomainArchitectPanel();
+}
+
+async function saveDomainArchitectAnswer() {
+  const answer = $("#domain-architect-answer")?.value.trim();
+  const msg = $("#domain-architect-msg");
+  if (!domainArchitectSession || !answer) {
+    if (msg) msg.textContent = "Answer required.";
+    return;
+  }
+  if (msg) msg.textContent = "Recording...";
+  const r = await window.ceo.domainArchitectAnswer({ id: domainArchitectSession.id, answer });
+  if (!r || !r.ok) {
+    if (msg) msg.textContent = `failed: ${r ? r.reason : "unknown"}`;
+    return;
+  }
+  domainArchitectSession = r.session;
+  applyDomainArchitectDraftToForm(domainArchitectSession);
+  renderDomainArchitectPanel();
+}
+
+async function captureDomainArchitectDeepDive() {
+  const msg = $("#domain-architect-msg");
+  const note = $("#domain-architect-answer")?.value.trim() || "";
+  if (!domainArchitectSession || !window.ceo.domainArchitectDeepDive) return;
+  if (!domainArchitectSession.activeFocus) {
+    if (msg) msg.textContent = "Select an outline section first.";
+    return;
+  }
+  const r = await window.ceo.domainArchitectDeepDive({
+    id: domainArchitectSession.id,
+    field: domainArchitectSession.activeFocus,
+    note,
+  });
+  if (!r || !r.ok) {
+    if (msg) msg.textContent = `deep dive failed: ${r ? r.reason : "unknown"}`;
+    return;
+  }
+  domainArchitectSession = r.session;
+  renderDomainArchitectPanel();
+  setVoiceStatus("Deep dive captured as an Agenda Item proposal.");
+}
+
+async function askHermesDomainArchitect() {
+  const draft = collectDomainWizardDraft();
+  const prompt = [
+    "Act as the Domain Architect for a domain creation interview.",
+    "Review the current draft below. Ask only the next missing essential question, or say it is ready for confirmation.",
+    "Do not create the domain. Do not create Kanban work.",
+    "",
+    JSON.stringify(draft, null, 2),
+  ].join("\n");
+  await runTurn(prompt);
+}
+
+async function confirmDomainArchitectSession() {
+  if (!domainArchitectSession || !window.ceo.domainArchitectConfirm) return;
+  const msg = $("#domain-architect-msg");
+  if (msg) msg.textContent = "Creating confirmed domain...";
+  const r = await window.ceo.domainArchitectConfirm(domainArchitectSession.id);
+  if (!r || !r.ok) {
+    if (msg) msg.textContent = `create failed: ${r ? r.reason : "unknown"}`;
+    return;
+  }
+  await refreshDomains(currentProject, r.definition.name);
+  await window.ceoUI.setDomainUI(r.definition.name);
+  setVoiceStatus(`Domain Architect created: ${r.definition.name}`);
 }
 
 async function createProject() {
@@ -567,6 +1237,7 @@ async function openDomainWizard(seed = {}) {
         </label>`;
       }).join("")
     : `<div class="rounded-xl border border-neutral-800 bg-neutral-950/45 p-3 text-sm text-neutral-500">No agents found in the registry yet.</div>`;
+  domainArchitectSession = null;
 
   panelContent().innerHTML = `<div class="space-y-5">
     <div class="rounded-3xl border border-cyan-500/25 bg-[radial-gradient(circle_at_top_left,rgba(6,182,212,0.18),transparent_34%),linear-gradient(135deg,rgba(23,23,23,0.9),rgba(8,8,8,0.96))] p-5">
@@ -590,12 +1261,21 @@ async function openDomainWizard(seed = {}) {
           <textarea id="domain-goal" rows="3" placeholder="What is the long-running outcome this domain is trying to make true?" class="mt-2 w-full rounded-xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-neutral-100 outline-none focus:border-cyan-500">${esc(seed.overarchingGoal || "")}</textarea>
         </label>
         <label class="block">
-          <span class="text-[10px] uppercase tracking-wider text-neutral-600">Responsibilities</span>
+          <span class="text-[10px] uppercase tracking-wider text-neutral-600">Boundaries / ownership</span>
           <textarea id="domain-responsibilities" rows="4" placeholder="One per line: planning, intake, UX research, launch readiness..." class="mt-2 w-full rounded-xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-neutral-100 outline-none focus:border-cyan-500">${esc((seed.responsibilities || []).join("\n"))}</textarea>
+        </label>
+        <label class="block">
+          <span class="text-[10px] uppercase tracking-wider text-neutral-600">Initial features / capabilities</span>
+          <textarea id="domain-features" rows="4" placeholder="One per line: handoff workflow, meeting artifact flow, scheduling integration..." class="mt-2 w-full rounded-xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-neutral-100 outline-none focus:border-cyan-500">${esc((seed.features || seed.initialFeatures || []).join("\n"))}</textarea>
+        </label>
+        <label class="block">
+          <span class="text-[10px] uppercase tracking-wider text-neutral-600">Relationships / dependencies</span>
+          <textarea id="domain-relationships" rows="3" placeholder="One per line: domains, boards, agents, systems, or teams this connects to..." class="mt-2 w-full rounded-xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-neutral-100 outline-none focus:border-cyan-500">${esc((seed.relationships || seed.interfaces || []).join("\n"))}</textarea>
         </label>
       </section>
 
       <aside class="space-y-3">
+        <div id="domain-architect-panel"></div>
         <div class="rounded-2xl border border-neutral-800 bg-neutral-950/45 p-4">
           <div class="text-[10px] uppercase tracking-wider text-neutral-600">Board and files</div>
           <label class="mt-3 block text-xs text-neutral-500">Kanban board</label>
@@ -616,11 +1296,12 @@ async function openDomainWizard(seed = {}) {
 
     <div class="flex flex-wrap items-center gap-2">
       <button id="domain-create-save" class="rounded-xl bg-cyan-600 px-4 py-2 text-sm font-semibold text-white hover:bg-cyan-500">Create domain</button>
-      <button id="domain-draft-ceo" class="rounded-xl border border-neutral-700 bg-neutral-900 px-4 py-2 text-sm text-neutral-200 hover:bg-neutral-800">Ask CEO to help define</button>
+      <button id="domain-draft-ceo" class="rounded-xl border border-neutral-700 bg-neutral-900 px-4 py-2 text-sm text-neutral-200 hover:bg-neutral-800">Ask Hermes</button>
       <button id="domain-create-cancel" class="rounded-xl border border-neutral-800 px-4 py-2 text-sm text-neutral-400 hover:bg-neutral-900">Cancel</button>
       <span id="domain-create-msg" class="text-xs text-neutral-500"></span>
     </div>
   </div>`;
+  renderDomainArchitectPanel();
 }
 
 async function saveDomainFromWizard() {
@@ -630,6 +1311,8 @@ async function saveDomainFromWizard() {
   const purpose = $("#domain-purpose")?.value.trim() || "";
   const overarchingGoal = $("#domain-goal")?.value.trim() || "";
   const responsibilities = splitLines($("#domain-responsibilities")?.value || "");
+  const features = splitLines($("#domain-features")?.value || "");
+  const relationships = splitLines($("#domain-relationships")?.value || "");
   const coreAgents = [...document.querySelectorAll('input[name="domain-agent"]:checked')].map((x) => x.value).filter(Boolean);
   const kanbanBoard = $("#domain-board")?.value || null;
   const relativePath = $("#domain-path")?.value.trim() || `domains/${slugifyName(name)}`;
@@ -641,7 +1324,10 @@ async function saveDomainFromWizard() {
     overarchingGoal,
     currentState: overarchingGoal,
     priorities: overarchingGoal ? [overarchingGoal] : [],
-    activeEpics: overarchingGoal ? [overarchingGoal] : [],
+    activeEpics: features,
+    features,
+    relationships,
+    boundaries: responsibilities,
     responsibilities,
     coreAgents,
     kanbanBoard,
@@ -735,6 +1421,7 @@ async function openTaskWizard(boardOverride = null, seed = {}) {
           <label class="mt-3 block text-xs text-neutral-500">Lane</label>
           <select id="task-new-status" class="mt-1 w-full rounded-xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-neutral-100">
             <option value="triage" ${!seed.status || seed.status === "triage" ? "selected" : ""}>Triage / planning</option>
+            <option value="bug" ${seed.status === "bug" ? "selected" : ""}>Bug</option>
             <option value="todo" ${seed.status === "todo" ? "selected" : ""}>Todo</option>
             <option value="ready" ${seed.status === "ready" ? "selected" : ""}>Ready</option>
           </select>
@@ -793,6 +1480,1648 @@ async function createTask(boardOverride = null) {
 
 // Expose thin UI helpers so the live-voice module (convai.js, an ES module)
 // can render transcripts + drive the presence circle without duplicating code.
+// --- Studio nav rail: the left rail opens workspace panels --------------
+// Each nav item renders a view into the main content panel (#panel-content-body).
+// Views: domain (existing planning board), board (Kanban), tasks (flat list),
+// agents (registry roster), teams (registry teams), channels (rooms/DMs),
+// meetings (working session).
+let studioView = "domain";
+let navMeetingOpts = null;     // cached {agents, teams, personas} for the meetings view
+let navMeetingRoom = null;
+let navMeetingTimer = null;
+let navMeetingMeta = null;
+let navMeetingCreateOpen = false;
+let navMeetingPastRooms = [];
+let navMeetingScheduled = [];
+const NAV_COL_ORDER = ["planning", "triage", "bug", "todo", "ready", "running", "blocked", "scheduled", "review", "done"];
+
+function setActiveNav(view) {
+  document.querySelectorAll("#studio-nav .nav-item").forEach((b) => {
+    const active = b.dataset.view === view;
+    b.classList.toggle("bg-neutral-800", active);
+    b.classList.toggle("text-neutral-100", active);
+    b.classList.toggle("text-neutral-300", !active);
+  });
+}
+
+function navEmpty(msg) {
+  return `<div class="rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-sm text-neutral-500">${esc(msg)}</div>`;
+}
+
+async function currentBoardSlug() {
+  if (!window.ceo.ceoBoardsForDomain) return null;
+  let res = {};
+  try { res = await window.ceo.ceoBoardsForDomain(currentDomain); } catch { res = {}; }
+  const boards = (res && res.boards) || [];
+  return (boards[0] && boards[0].slug) || (res && res.current)
+    || (currentProject && currentProject.slug) || null;
+}
+
+async function renderBoardView() {
+  setPanelTitle("Board");
+  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading board…</div>';
+  const slug = await currentBoardSlug();
+  if (!slug) { panelContent().innerHTML = navEmpty("No Kanban board for this domain yet."); return; }
+  let data = {};
+  try { data = await window.ceo.ceoBoard(slug); } catch { data = {}; }
+  const cols = (data && data.columns) || {};
+  const present = Object.keys(cols);
+  const ordered = NAV_COL_ORDER.concat(present.filter((c) => !NAV_COL_ORDER.includes(c)));
+  if (!ordered.length) { panelContent().innerHTML = navEmpty(`Board "${slug}" is empty.`); return; }
+  const lanes = ordered.map((status) => {
+    const tasks = cols[status] || [];
+    const cards = tasks.map((t) => `
+      <div class="studio-task-card cursor-pointer rounded-lg border border-neutral-800 bg-neutral-900/70 p-2.5 hover:border-neutral-700 transition"
+           data-board="${esc(slug)}" data-task-id="${esc(t.id)}" data-task-title="${esc(t.title)}" data-task-status="${esc(status)}">
+        <div class="text-[13px] text-neutral-100 leading-snug">${esc(t.title)}</div>
+        ${t.assignee ? `<div class="mt-1 text-[10px] text-neutral-500">${esc(t.assignee)}</div>` : ""}
+      </div>`).join("") || '<div class="px-2 py-3 text-xs text-neutral-700">empty</div>';
+    return `<section class="w-[240px] shrink-0 rounded-xl border border-neutral-800 bg-neutral-950/40">
+      <div class="flex items-center gap-2 border-b border-neutral-800/70 px-3 py-2">
+        <span class="text-[11px] font-semibold uppercase tracking-wider text-neutral-300">${esc(status)}</span>
+        <span class="ml-auto text-[11px] text-neutral-600">${tasks.length}</span>
+      </div>
+      <div class="space-y-2 p-2">${cards}</div>
+    </section>`;
+  }).join("");
+  panelContent().innerHTML = `<div class="flex gap-3 overflow-x-auto pb-2">${lanes}</div>`;
+}
+
+async function renderTasksView() {
+  setPanelTitle("Tasks");
+  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading tasks…</div>';
+  const slug = await currentBoardSlug();
+  if (!slug) { panelContent().innerHTML = navEmpty("No board for this domain yet."); return; }
+  let data = {};
+  try { data = await window.ceo.ceoBoard(slug); } catch { data = {}; }
+  const cols = (data && data.columns) || {};
+  const rows = [];
+  for (const status of Object.keys(cols)) {
+    for (const t of cols[status] || []) rows.push({ ...t, status });
+  }
+  if (!rows.length) { panelContent().innerHTML = navEmpty(`No tasks on "${slug}".`); return; }
+  panelContent().innerHTML = `<div class="space-y-1.5">${rows.map((t) => `
+    <div class="studio-task-card cursor-pointer flex items-center gap-3 rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-2 hover:border-neutral-700 transition"
+         data-board="${esc(slug)}" data-task-id="${esc(t.id)}" data-task-title="${esc(t.title)}" data-task-status="${esc(t.status)}">
+      <span class="text-[10px] uppercase tracking-wider text-neutral-500 w-20 shrink-0">${esc(t.status)}</span>
+      <span class="flex-1 min-w-0 truncate text-sm text-neutral-100">${esc(t.title)}</span>
+      <span class="text-[10px] text-neutral-600 shrink-0">${esc(t.assignee || "—")}</span>
+    </div>`).join("")}</div>`;
+}
+
+// --- Registry (agents + teams) — single source of truth for Agents/Teams.
+let registryState = { agents: [], teams: [], personas: [], providers: [], models: {} };
+let meetingRoomsState = [];
+
+async function loadRegistry() {
+  const [reg, per, prov, mods] = await Promise.all([
+    window.ceo.registryList ? window.ceo.registryList() : { agents: [], teams: [] },
+    window.ceo.registryPersonas ? window.ceo.registryPersonas() : { personas: [] },
+    window.ceo.registryProviders ? window.ceo.registryProviders() : { providers: ["vertex"] },
+    window.ceo.registryModels ? window.ceo.registryModels() : { providers: {} },
+  ]);
+  registryState = {
+    agents: (reg && reg.agents) || [],
+    teams: (reg && reg.teams) || [],
+    personas: (per && per.personas) || [],
+    providers: (prov && prov.providers) || ["vertex"],
+    models: (mods && mods.providers) || {},   // providerName -> [{id,label,...}]
+  };
+  return registryState;
+}
+
+function agentSubtitle(a) {
+  const persona = a.persona ? esc(a.persona) : "no persona";
+  const brain = esc(a.provider || "vertex") + (a.model ? ` · ${esc(a.model)}` : "");
+  return `${persona} · ${brain}`;
+}
+
+async function renderAgentsView() {
+  setPanelTitle("Agents");
+  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading agents...</div>';
+  await loadRegistry();
+  renderAgentsPanel();
+}
+
+async function renderTeamsView() {
+  setPanelTitle("Teams");
+  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading teams...</div>';
+  await loadRegistry();
+  renderTeamsPanel();
+}
+
+function renderAgentsPanel() {
+  const { agents } = registryState;
+  const roster = agents.length ? agents.map((a) => `
+    <button class="team-agent-card text-left rounded-xl border border-neutral-800 bg-neutral-900/60 p-3 hover:border-cyan-500/40 transition" data-agent="${esc(a.id)}">
+      <div class="flex items-center gap-2">
+        <span class="w-2 h-2 rounded-full ${a.tmux_session ? "bg-emerald-500" : "bg-neutral-600"}"></span>
+        <span class="text-sm font-medium text-neutral-100 truncate">${esc(a.name || a.id)}</span>
+        <span class="ml-auto text-[10px] uppercase tracking-wider text-neutral-500">${esc(a.provider || "vertex")}</span>
+      </div>
+      <div class="mt-1.5 text-[11px] text-neutral-500 truncate">${agentSubtitle(a)}</div>
+      ${(a.capabilities || []).length ? `<div class="mt-2 flex flex-wrap gap-1">${a.capabilities.slice(0, 3).map((c) => `<span class="text-[9px] bg-neutral-800 text-neutral-400 px-1.5 py-0.5 rounded">${esc(c)}</span>`).join("")}</div>` : ""}
+    </button>`).join("") : navEmpty("No agents yet. Click “New agent” to hire one.");
+
+  panelContent().innerHTML = `
+    <div class="space-y-4">
+      <div class="flex items-center gap-2">
+        <span class="text-sm font-semibold text-neutral-100">Agents</span>
+        <span class="text-[11px] text-neutral-500">${agents.length} agent${agents.length === 1 ? "" : "s"}</span>
+        <button id="agent-new" class="ml-auto text-xs bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-3 py-1 font-medium transition">+ New agent</button>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">${roster}</div>
+    </div>`;
+}
+
+function renderTeamsPanel() {
+  const { agents, teams } = registryState;
+  const agentById = new Map(agents.map((a) => [a.id, a]));
+  const teamCards = teams.length ? teams.map((t) => {
+    const members = (t.members || []).map((id) => {
+      const a = agentById.get(id);
+      return `<div class="flex items-center gap-2 rounded-md border border-neutral-800 bg-neutral-950/40 px-2.5 py-1.5">
+        <span class="w-1.5 h-1.5 rounded-full bg-cyan-500/70"></span>
+        <span class="text-sm text-neutral-200">${esc(a ? (a.name || a.id) : id)}</span>
+        <span class="ml-auto text-[10px] text-neutral-500">${a ? agentSubtitle(a) : "not in registry"}</span>
+        <button class="team-remove text-neutral-600 hover:text-red-400 text-xs ml-1" data-team="${esc(t.name)}" data-agent="${esc(id)}" title="Remove from team">✕</button>
+      </div>`;
+    }).join("") || '<div class="text-xs text-neutral-600">No members yet.</div>';
+    const candidates = agents.filter((a) => !(t.members || []).includes(a.id));
+    const addSel = candidates.length ? `
+      <select class="team-add mt-2 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-xs text-neutral-100" data-team="${esc(t.name)}">
+        <option value="">+ add member…</option>
+        ${candidates.map((a) => `<option value="${esc(a.id)}">${esc(a.name || a.id)}</option>`).join("")}
+      </select>` : "";
+    return `<section class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+      <div class="mb-2 flex items-center gap-2">
+        <span class="text-sm font-medium text-neutral-100">${esc(t.name)}</span>
+        <span class="ml-auto text-[11px] text-neutral-500">${(t.members || []).length} members</span>
+        <button class="team-delete text-neutral-600 hover:text-red-400 text-xs ml-1" data-team="${esc(t.name)}" title="Delete team">Delete</button>
+      </div>
+      <div class="space-y-1.5">${members}</div>
+      ${addSel}
+    </section>`;
+  }).join("") : navEmpty("No teams yet. Click “New team” to assemble one from your roster.");
+
+  panelContent().innerHTML = `
+    <div class="space-y-4">
+      <div class="flex items-center gap-2">
+        <span class="text-sm font-semibold text-neutral-100">Teams</span>
+        <span class="text-[11px] text-neutral-500">${teams.length} team${teams.length === 1 ? "" : "s"}</span>
+        <span class="text-[11px] text-neutral-600">${agents.length} available agents</span>
+        <button id="team-new" class="ml-auto text-xs bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 rounded-md px-3 py-1 font-medium transition">+ New team</button>
+      </div>
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">${teamCards}</div>
+    </div>`;
+}
+
+function renderRegistryPanel() {
+  if (studioView === "agents") return renderAgentsPanel();
+  if (studioView === "teams") return renderTeamsPanel();
+  return renderAgentsPanel();
+}
+
+// --- Personas library view (file-backed markdown, project + domain scoped) --
+// Personas are written under runtime/harness/personas/{domains/<domain>,general}.
+// registry.listPersonas() reads the same tree, so anything created here is
+// immediately assignable to agents in the New/Edit agent modal. Generation
+// uses the Gemma utility model (Cloudflare AI Gateway), NOT the CEO (Hermes).
+let personaListCache = [];
+
+function personaScopeLabel() {
+  return currentDomain && currentDomain !== "All"
+    ? `${currentDomain} + shared` : "project-wide";
+}
+
+async function renderPersonasView() {
+  setPanelTitle("Personas");
+  if (!currentProject) { panelContent().innerHTML = navEmpty("Open a project to manage personas."); return; }
+  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading personas…</div>';
+  let res = {};
+  try { res = await window.ceo.personaFiles(); } catch { res = {}; }
+  if (!res || !res.ok) { panelContent().innerHTML = navEmpty((res && res.reason) || "Could not load personas."); return; }
+  personaListCache = res.personas || [];
+  const cards = personaListCache.length ? personaListCache.map((p) => `
+    <button class="persona-card text-left rounded-xl border border-neutral-800 bg-neutral-900/60 p-3 hover:border-cyan-500/40 transition" data-id="${esc(p.id)}">
+      <div class="flex items-center gap-2">
+        <span class="text-sm font-medium text-neutral-100 truncate">${esc(p.name || p.id)}</span>
+        <span class="ml-auto text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded ${p.scope === "domain" ? "bg-cyan-500/15 text-cyan-300" : "bg-neutral-800 text-neutral-400"}">${esc(p.scope)}</span>
+      </div>
+      <div class="mt-1 text-[11px] text-neutral-500 truncate">${esc(p.summary || "—")}</div>
+    </button>`).join("")
+    : navEmpty("No personas yet. Generate one with Gemma or create a blank one.");
+  panelContent().innerHTML = `
+    <div class="space-y-4">
+      <div class="flex items-center gap-2">
+        <span class="text-sm font-semibold text-neutral-100">Personas</span>
+        <span class="text-[11px] text-neutral-500">${personaListCache.length} · ${esc(personaScopeLabel())}</span>
+        <button id="persona-generate" class="ml-auto text-xs bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-3 py-1 font-medium transition">✦ Generate with Gemma</button>
+        <button id="persona-new" class="text-xs bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 rounded-md px-3 py-1 font-medium transition">+ Blank</button>
+      </div>
+      <div class="text-[11px] text-neutral-600">Personas saved here are assignable to agents in Agents -> New/Edit agent.</div>
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">${cards}</div>
+    </div>`;
+}
+
+async function openPersonaEditor(id, opts = {}) {
+  setPanelTitle(id ? `Persona · ${id}` : "New persona");
+  let content = opts.content || "";
+  let name = opts.name || id || "";
+  if (id && !opts.content) {
+    let r = {};
+    try { r = await window.ceo.personaRead(id); } catch { r = {}; }
+    if (r && r.ok) { content = r.content; name = r.name || id; }
+    else { panelContent().innerHTML = navEmpty((r && r.reason) || "Could not read persona."); return; }
+  }
+  panelContent().innerHTML = `
+    <div class="space-y-3 max-w-3xl">
+      <button id="persona-back" class="text-xs text-neutral-400 hover:text-neutral-200">← Back to personas</button>
+      <input type="hidden" id="pe-id" value="${esc(id || "")}" />
+      <div class="flex items-center gap-2">
+        <input id="pe-name" class="flex-1 bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 ${id ? "opacity-70" : ""}" value="${esc(name)}" placeholder="Persona name (e.g. Release Manager)" ${id ? "readonly" : ""} />
+        <button id="pe-save" class="text-sm bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-4 py-1.5 font-medium transition">Save</button>
+        ${id ? `<button id="pe-delete" class="text-sm bg-red-900/40 hover:bg-red-900/70 border border-red-900/60 text-red-300 rounded-md px-3 py-1.5 transition">Delete</button>` : ""}
+      </div>
+      <textarea id="pe-content" rows="22" class="w-full bg-neutral-950/60 border border-neutral-800 rounded-lg px-3 py-2 text-[13px] font-mono text-neutral-100 leading-relaxed focus:outline-none focus:ring-1 focus:ring-cyan-500/50" placeholder="# Role&#10;&#10;## Core Responsibility&#10;…">${esc(content)}</textarea>
+      <span id="pe-msg" class="text-xs text-neutral-500"></span>
+    </div>`;
+  const ta = document.getElementById("pe-content");
+  if (ta && !id) ta.focus();
+}
+
+function openPersonaGenerateModal() {
+  const existing = document.getElementById("persona-gen-modal");
+  if (existing) existing.remove();
+  const wrap = document.createElement("div");
+  wrap.id = "persona-gen-modal";
+  wrap.className = "fixed inset-0 z-[80] bg-neutral-950/80 backdrop-blur-sm flex items-start justify-center p-6 pt-16 overflow-auto";
+  wrap.innerHTML = `
+    <div class="w-[460px] max-w-[92vw] rounded-2xl border border-neutral-800 bg-neutral-900 shadow-2xl p-5 space-y-4">
+      <div class="flex items-center">
+        <span class="text-base font-semibold text-neutral-100">Generate persona with Gemma</span>
+        <div class="flex-1"></div>
+        <button id="pg-close" class="text-sm text-neutral-400 hover:text-neutral-100">✕</button>
+      </div>
+      <div class="text-[11px] text-neutral-500">Scope: ${esc(personaScopeLabel())}</div>
+      <label class="block text-xs text-neutral-400">Role name
+        <input id="pg-name" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100" placeholder="e.g. Release Manager" />
+      </label>
+      <label class="block text-xs text-neutral-400">Brief — what they own / how they behave
+        <textarea id="pg-brief" rows="4" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100" placeholder="Owns cutting releases, changelogs, and rollback plans for the app."></textarea>
+      </label>
+      <div class="flex items-center gap-2">
+        <button id="pg-go" class="text-sm bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-4 py-1.5 font-medium transition">Generate draft</button>
+        <span id="pg-msg" class="text-xs text-neutral-500"></span>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener("click", (e) => { if (e.target === wrap) wrap.remove(); });
+  document.getElementById("pg-close").addEventListener("click", () => wrap.remove());
+  document.getElementById("pg-go").addEventListener("click", async () => {
+    const name = (document.getElementById("pg-name").value || "").trim();
+    const brief = (document.getElementById("pg-brief").value || "").trim();
+    const msg = document.getElementById("pg-msg");
+    if (!name) { if (msg) msg.textContent = "name required"; return; }
+    if (msg) msg.textContent = "generating with Gemma…";
+    let r = {};
+    try { r = await window.ceo.personaGenerate(name, brief, false); } catch (e) { r = { ok: false, reason: e.message }; }
+    if (!r || !r.ok) { if (msg) msg.textContent = "failed: " + ((r && r.reason) || "unknown"); return; }
+    wrap.remove();
+    // Open the draft in the editor so the user can review/edit before saving.
+    openPersonaEditor(null, { content: r.content, name });
+  });
+}
+
+async function savePersonaFromEditor() {
+  const idField = document.getElementById("pe-id");
+  const nameEl = document.getElementById("pe-name");
+  const contentEl = document.getElementById("pe-content");
+  const msg = document.getElementById("pe-msg");
+  if (!nameEl || !contentEl) return;
+  const id = (idField && idField.value) || nameEl.value.trim();
+  const content = contentEl.value;
+  if (!id) { if (msg) msg.textContent = "name required"; return; }
+  if (!content.trim()) { if (msg) msg.textContent = "content is empty"; return; }
+  if (msg) msg.textContent = "saving…";
+  let r = {};
+  try { r = await window.ceo.personaSave(id, content); } catch (e) { r = { ok: false, reason: e.message }; }
+  if (!r || !r.ok) { if (msg) msg.textContent = "failed: " + ((r && r.reason) || "unknown"); return; }
+  await renderPersonasView();
+}
+
+async function deletePersonaFromEditor() {
+  const idField = document.getElementById("pe-id");
+  const id = idField && idField.value;
+  if (!id) return;
+  if (!confirm(`Delete persona "${id}"? This removes the markdown file.`)) return;
+  let r = {};
+  try { r = await window.ceo.personaDelete(id); } catch (e) { r = { ok: false, reason: e.message }; }
+  if (r && r.ok) await renderPersonasView();
+}
+
+// --- Agent create/edit modal (appended to <body> so panel re-renders don't wipe it).
+function closeAgentModal() {
+  const m = document.getElementById("agent-modal");
+  if (m) m.remove();
+}
+
+// Build <option>s for the model dropdown from the captured catalog
+// (registryState.models[provider]). Marks `current` selected; if `current` is
+// set but not in the catalog, the "Custom…" option is selected instead.
+function _modelSelectOptions(provider, current) {
+  const list = (registryState.models && registryState.models[provider]) || [];
+  const opts = [`<option value="">— default —</option>`];
+  let matched = false;
+  for (const m of list) {
+    const sel = current && current === m.id ? "selected" : "";
+    if (sel) matched = true;
+    const ctx = m.context ? ` · ${esc(String(m.context))}` : "";
+    opts.push(`<option value="${esc(m.id)}" ${sel}>${esc(m.label || m.id)}${ctx}</option>`);
+  }
+  const customSel = current && !matched ? "selected" : "";
+  opts.push(`<option value="__custom__" ${customSel}>Custom…</option>`);
+  return opts.join("");
+}
+
+function openAgentModal(agentId) {
+  closeAgentModal();
+  const editing = agentId ? registryState.agents.find((a) => a.id === agentId) : null;
+  const personas = registryState.personas || [];
+  const providers = registryState.providers || ["vertex"];
+  const personaOpts = `<option value="">— none —</option>` +
+    personas.map((p) => `<option value="${esc(p.id)}" ${editing && editing.persona === p.id ? "selected" : ""}>${esc(p.name || p.id)}</option>`).join("");
+  const providerOpts = providers.map((p) => `<option value="${esc(p)}" ${editing && editing.provider === p ? "selected" : ""}>${esc(p)}</option>`).join("");
+  const initialProvider = (editing && editing.provider) || providers[0] || "vertex";
+  const modelOpts = _modelSelectOptions(initialProvider, editing && editing.model);
+  const wrap = document.createElement("div");
+  wrap.id = "agent-modal";
+  wrap.className = "fixed inset-0 z-[80] bg-neutral-950/80 backdrop-blur-sm flex items-start justify-center p-6 pt-16 overflow-auto";
+  wrap.innerHTML = `
+    <div class="w-[460px] max-w-[92vw] rounded-2xl border border-neutral-800 bg-neutral-900 shadow-2xl p-5 space-y-4">
+      <div class="flex items-center">
+        <span class="text-base font-semibold text-neutral-100">${editing ? "Edit agent" : "New agent"}</span>
+        <div class="flex-1"></div>
+        <button id="agent-modal-close" class="text-sm text-neutral-400 hover:text-neutral-100">✕</button>
+      </div>
+      <label class="block text-xs text-neutral-400">Name
+        <input id="am-name" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100" value="${editing ? esc(editing.name || editing.id) : ""}" placeholder="e.g. Ada — Architect" />
+      </label>
+      <div class="flex gap-2">
+        <label class="flex-1 text-xs text-neutral-400">Brain / provider
+          <select id="am-provider" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100">${providerOpts}</select>
+        </label>
+        <label class="flex-1 text-xs text-neutral-400">Model
+          <select id="am-model-select" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100">${modelOpts}</select>
+          <input id="am-model" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 font-mono" style="display:none" value="${editing && editing.model ? esc(editing.model) : ""}" placeholder="custom model id" />
+        </label>
+      </div>
+      <label id="am-command-row" class="block text-xs text-neutral-400" style="display:none">Command template
+        <input id="am-command" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 font-mono" value="${editing && editing.command ? esc(editing.command) : ""}" placeholder="claude -p --output-format text {prompt}" />
+        <span class="text-[10px] text-neutral-600">Any CLI. Placeholders: {prompt} {model} {workdir} {agent} {session_id}.</span>
+      </label>
+      <label class="block text-xs text-neutral-400">Persona / role
+        <select id="am-persona" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100">${personaOpts}</select>
+      </label>
+      <label class="block text-xs text-neutral-400">Capabilities (comma-separated)
+        <input id="am-caps" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100" value="${editing ? esc((editing.capabilities || []).join(", ")) : ""}" placeholder="adr, data-model" />
+      </label>
+      <label class="block text-xs text-neutral-400">Memory key
+        <input id="am-mem" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 font-mono" value="${editing && editing.memory_key ? esc(editing.memory_key) : ""}" placeholder="agent:${editing ? esc(editing.id) : "name"}" />
+        <span class="text-[10px] text-neutral-600">Private memory namespace. Shared project/domain knowledge still comes from gbrain.</span>
+      </label>
+      <label class="block text-xs text-neutral-400">Description (optional)
+        <textarea id="am-desc" rows="2" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100">${editing ? esc(editing.description || "") : ""}</textarea>
+      </label>
+      <div class="flex items-center gap-2 pt-1">
+        <button id="am-save" class="text-sm bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-4 py-1.5 font-medium transition">${editing ? "Save" : "Create"}</button>
+        ${editing ? `<button id="am-delete" class="text-sm bg-red-900/40 hover:bg-red-900/70 border border-red-900/60 text-red-300 rounded-md px-3 py-1.5 transition">Delete</button>` : ""}
+        <span id="am-msg" class="text-xs text-neutral-500"></span>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener("click", (e) => { if (e.target === wrap) closeAgentModal(); });
+  document.getElementById("agent-modal-close").addEventListener("click", closeAgentModal);
+  // Show the command template only for the generic "command" provider.
+  const provSel = document.getElementById("am-provider");
+  const cmdRow = document.getElementById("am-command-row");
+  const syncCmdRow = () => { cmdRow.style.display = provSel.value === "command" ? "block" : "none"; };
+  // Model dropdown: scoped to the chosen provider, with a "Custom…" free-text fallback.
+  // The hidden #am-model input is the source of truth saveAgentModal() reads.
+  const modelSel = document.getElementById("am-model-select");
+  const modelInput = document.getElementById("am-model");
+  const syncModelField = () => {
+    if (modelSel.value === "__custom__") {
+      modelInput.style.display = "";            // reveal free-text
+      if (!modelInput.value) modelInput.focus();
+    } else {
+      modelInput.style.display = "none";
+      modelInput.value = modelSel.value;        // mirror selection into the saved field
+    }
+  };
+  modelSel.addEventListener("change", syncModelField);
+  provSel.addEventListener("change", () => {
+    syncCmdRow();
+    modelSel.innerHTML = _modelSelectOptions(provSel.value, "");  // re-scope models to new provider
+    modelInput.value = "";
+    syncModelField();
+  });
+  syncCmdRow();
+  syncModelField();
+  document.getElementById("am-save").addEventListener("click", () => saveAgentModal(editing ? editing.id : null));
+  const del = document.getElementById("am-delete");
+  if (del) del.addEventListener("click", () => deleteAgentFromModal(editing.id));
+}
+
+async function saveAgentModal(existingId) {
+  const msg = document.getElementById("am-msg");
+  const val = (id) => (document.getElementById(id) && document.getElementById(id).value) || "";
+  const spec = {
+    name: val("am-name").trim(),
+    provider: val("am-provider") || "vertex",
+    model: val("am-model").trim() || null,
+    command: val("am-command").trim() || null,
+    persona: val("am-persona") || null,
+    capabilities: val("am-caps").split(",").map((s) => s.trim()).filter(Boolean),
+    memory_key: val("am-mem").trim() || null,
+    description: val("am-desc").trim(),
+  };
+  if (!spec.name) { if (msg) msg.textContent = "name required"; return; }
+  if (msg) msg.textContent = "saving…";
+  const r = existingId
+    ? await window.ceo.registryUpdateAgent(existingId, spec)
+    : await window.ceo.registryCreateAgent(spec);
+  if (!r || !r.ok) { if (msg) msg.textContent = "failed: " + (r ? r.reason : "unknown"); return; }
+  closeAgentModal();
+  await loadRegistry();
+  // Stay in the detail view if we were editing a selected agent; else the roster.
+  if (selectedAgentId && registryState.agents.some((a) => a.id === selectedAgentId)) {
+    const a = registryState.agents.find((x) => x.id === selectedAgentId);
+    await renderAgentDetail(a);
+  } else {
+    renderRegistryPanel();
+  }
+}
+
+async function deleteAgentFromModal(id) {
+  if (!confirm(`Delete agent "${id}"? This also removes it from any team.`)) return;
+  const r = await window.ceo.registryDeleteAgent(id);
+  if (r && r.ok) { closeAgentModal(); closeAgentSurface(); await loadRegistry(); renderRegistryPanel(); }
+}
+
+async function teamSetMembers(name, members) {
+  const r = await window.ceo.registrySaveTeam(name, members);
+  if (r && r.ok) { await loadRegistry(); renderRegistryPanel(); }
+  return r;
+}
+
+// --- Agent detail (left panel) + live terminal/logs surface (right panel) ---
+let selectedAgentId = null;
+let selectedAgentRoom = "discovery";
+let agentSurfaceTab = "terminal";
+let agentTermTimer = null;
+let agentInputMode = "room"; // "room" or "terminal"
+
+function detailRow(label, valueHtml) {
+  return `<div class="rounded-lg border border-neutral-800 bg-neutral-950/40 p-2">
+    <div class="text-[10px] uppercase tracking-wider text-neutral-600">${label}</div>
+    <div class="mt-0.5 text-neutral-300 break-all">${valueHtml}</div>
+  </div>`;
+}
+
+async function openAgentDetail(id) {
+  const a = registryState.agents.find((x) => x.id === id);
+  if (!a) return;
+  selectedAgentId = id;
+  await renderAgentDetail(a);
+  showAgentSurface(a);
+}
+
+async function renderAgentDetail(a) {
+  setPanelTitle(a.name || a.id);
+  let mounted = false;
+  if (a.tmux_session) {
+    try { const live = await window.ceo.registryAlive(a.id); mounted = !!(live && live.alive); } catch { mounted = false; }
+  }
+  const brain = esc(a.provider || "vertex") + (a.model ? " · " + esc(a.model) : "");
+  panelContent().innerHTML = `
+    <div class="space-y-4 max-w-2xl">
+      <button id="agent-back" class="text-xs text-neutral-400 hover:text-neutral-200">← Back to team</button>
+      <div class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4 space-y-3">
+        <div class="flex items-center gap-2">
+          <span class="w-2.5 h-2.5 rounded-full ${mounted ? "bg-emerald-500" : "bg-neutral-600"}"></span>
+          <span class="text-base font-semibold text-neutral-100">${esc(a.name || a.id)}</span>
+          <span class="ml-auto text-[10px] uppercase tracking-wider text-neutral-500">${esc(a.provider || "vertex")}</span>
+        </div>
+        <div class="grid grid-cols-2 gap-2 text-xs">
+          ${detailRow("Persona", esc(a.persona || "—"))}
+          ${detailRow("Brain", brain)}
+          ${detailRow("Memory key", esc(a.memory_key || "—"))}
+          ${detailRow("tmux", a.tmux_session ? esc(a.tmux_session) + (mounted ? " · live" : " · stopped") : "not mounted")}
+        </div>
+        ${(a.capabilities || []).length ? `<div class="flex flex-wrap gap-1">${a.capabilities.map((c) => `<span class="text-[10px] bg-neutral-800 text-neutral-400 px-1.5 py-0.5 rounded">${esc(c)}</span>`).join("")}</div>` : ""}
+        ${a.description ? `<p class="text-xs text-neutral-400">${esc(a.description)}</p>` : ""}
+        <div class="flex items-center gap-2 pt-1">
+          ${mounted
+            ? `<button id="agent-unmount" class="text-sm bg-red-900/40 hover:bg-red-900/70 border border-red-900/60 text-red-300 rounded-md px-3 py-1.5 transition">Unmount</button>`
+            : `<button id="agent-mount" class="text-sm bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-3 py-1.5 font-medium transition">Mount</button>`}
+          <button id="agent-edit" class="text-sm bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 rounded-md px-3 py-1.5 transition">Edit</button>
+          <span id="agent-detail-msg" class="text-xs text-neutral-500"></span>
+        </div>
+        <p class="text-[11px] text-neutral-600">Mounting starts the agent's CLI + a room watcher (its A2A presence). Watch it live in the right panel →</p>
+      </div>
+    </div>`;
+}
+
+function showAgentSurface(a) {
+  const surf = document.getElementById("agent-surface");
+  if (!surf) return;
+  // Inline style wins over Tailwind's class ordering so the toggle is deterministic.
+  surf.classList.remove("hidden");
+  surf.style.display = "flex";
+  const name = document.getElementById("as-name");
+  const sub = document.getElementById("as-sub");
+  if (name) name.textContent = a.name || a.id;
+  if (sub) sub.textContent = agentSubtitle(a);
+  setAgentSurfaceTab("terminal");
+}
+
+function closeAgentSurface() {
+  if (agentTermTimer) { clearInterval(agentTermTimer); agentTermTimer = null; }
+  selectedAgentId = null;
+  const surf = document.getElementById("agent-surface");
+  if (surf) { surf.classList.add("hidden"); surf.style.display = "none"; }
+}
+
+function setAgentSurfaceTab(tab) {
+  agentSurfaceTab = tab;
+  const tt = document.getElementById("as-tab-terminal");
+  const tl = document.getElementById("as-tab-logs");
+  const on = (b) => { b.classList.add("bg-neutral-700", "text-neutral-100"); b.classList.remove("text-neutral-400"); };
+  const off = (b) => { b.classList.remove("bg-neutral-700", "text-neutral-100"); b.classList.add("text-neutral-400"); };
+  if (tt && tl) { if (tab === "terminal") { on(tt); off(tl); } else { on(tl); off(tt); } }
+  // The input posts to the agent's room, so keep it available on both tabs
+  // (it pairs naturally with the Logs/room transcript view).
+  const inputRow = document.getElementById("as-input-row");
+  if (inputRow) inputRow.classList.remove("hidden");
+  pollAgentSurface();
+  if (agentTermTimer) clearInterval(agentTermTimer);
+  agentTermTimer = setInterval(pollAgentSurface, tab === "terminal" ? 1500 : 3000);
+}
+
+async function pollAgentSurface() {
+  if (!selectedAgentId) return;
+  const out = document.getElementById("as-output");
+  const dot = document.getElementById("as-dot");
+  if (!out) return;
+  if (agentSurfaceTab === "terminal") {
+    let r = {};
+    try { r = await window.ceo.registryTerminal(selectedAgentId); } catch { r = {}; }
+    if (r && r.ok) {
+      out.textContent = r.output || "(empty)";
+      if (dot) dot.className = "w-2 h-2 rounded-full bg-emerald-500";
+    } else {
+      out.textContent = `Terminal unavailable: ${r ? r.reason : "unknown"}\n\nMount the agent (left panel) to start its session.`;
+      if (dot) dot.className = "w-2 h-2 rounded-full bg-neutral-600";
+    }
+  } else {
+    if (!selectedAgentRoom) {
+      out.textContent = "Send a message below to talk to this agent — it posts into the agent's A2A room and the transcript appears here.\n\nNote: agents on the \"echo\" brain only show presence; convene a meeting to get a real response.";
+    } else {
+      let r = {};
+      try { r = await window.ceo.meetingRoom(selectedAgentRoom); } catch { r = {}; }
+      const feed = (r && r.feed) || [];
+      out.textContent = feed.length
+        ? feed.map((e) => `[${e.speaker}] ${e.body}`).join("\n\n")
+        : `No activity in room "${selectedAgentRoom}" yet.`;
+    }
+  }
+  out.scrollTop = out.scrollHeight;
+}
+
+async function mountSelectedAgent() {
+  const msg = document.getElementById("agent-detail-msg");
+  if (msg) msg.textContent = "mounting…";
+  let r = {};
+  try { r = await window.ceo.registryMount(selectedAgentId); } catch (e) { r = { ok: false, reason: String(e) }; }
+  if (r && r.room) selectedAgentRoom = r.room;
+  if (!r || !r.ok) { if (msg) msg.textContent = "mount failed: " + (r ? r.reason : "unknown"); return; }
+  await loadRegistry();
+  const a = registryState.agents.find((x) => x.id === selectedAgentId);
+  if (a) { await renderAgentDetail(a); pollAgentSurface(); }
+}
+
+async function unmountSelectedAgent() {
+  const msg = document.getElementById("agent-detail-msg");
+  if (msg) msg.textContent = "unmounting…";
+  try { await window.ceo.registryUnmount(selectedAgentId); } catch { /* ignore */ }
+  await loadRegistry();
+  const a = registryState.agents.find((x) => x.id === selectedAgentId);
+  if (a) { await renderAgentDetail(a); pollAgentSurface(); }
+}
+
+async function sendAgentKeys() {
+  const input = document.getElementById("as-input");
+  if (!selectedAgentId || !input) return;
+  const text = input.value;
+  if (!text.trim()) return;
+  input.value = "";
+  
+  if (agentInputMode === "terminal") {
+    // Send directly to tmux terminal
+    const a = registryState.agents.find((x) => x.id === selectedAgentId);
+    const tmuxWindow = (a && a.tmux_window) || "main";
+    const r = await window.ceo.registryTerminalSend(selectedAgentId, text, tmuxWindow);
+    if (r && r.ok) {
+      // Force a refresh of the terminal output
+      setTimeout(pollAgentSurface, 200);
+    }
+  } else {
+    // Talk to the agent by posting into its A2A room (the real channel), not by
+    // typing into a watcher pane. Then show the room transcript in Logs.
+    const r = await window.ceo.registryMessage(selectedAgentId, text, "CEO");
+    if (r && r.room) selectedAgentRoom = r.room;
+    setAgentSurfaceTab("logs");
+    setTimeout(pollAgentSurface, 400);
+  }
+}
+
+function setAgentInputMode(mode) {
+  agentInputMode = mode;
+  const roomBtn = document.getElementById("as-mode-room");
+  const termBtn = document.getElementById("as-mode-terminal");
+  const input = document.getElementById("as-input");
+  
+  if (mode === "room") {
+    roomBtn.classList.remove("bg-neutral-800", "text-neutral-400");
+    roomBtn.classList.add("bg-cyan-600/80", "text-white");
+    termBtn.classList.remove("bg-cyan-600/80", "text-white");
+    termBtn.classList.add("bg-neutral-800", "text-neutral-400");
+    if (input) input.placeholder = "Message this agent in its room (as CEO)…";
+  } else {
+    termBtn.classList.remove("bg-neutral-800", "text-neutral-400");
+    termBtn.classList.add("bg-cyan-600/80", "text-white");
+    roomBtn.classList.remove("bg-cyan-600/80", "text-white");
+    roomBtn.classList.add("bg-neutral-800", "text-neutral-400");
+    if (input) input.placeholder = "Type terminal command to send to agent…";
+  }
+}
+
+// Agent surface buttons live in panel2 (outside the left panelContent that the rest of
+// the UI delegates on). Delegate on document so they stay live regardless of re-renders
+// or attach timing — the ✕ must ALWAYS close the panel.
+function wireAgentSurface() {
+  document.addEventListener("click", (e) => {
+    if (e.target.closest("#as-close")) { closeAgentSurface(); renderRegistryPanel(); return; }
+    if (e.target.closest("#as-tab-terminal")) { setAgentSurfaceTab("terminal"); return; }
+    if (e.target.closest("#as-tab-logs")) { setAgentSurfaceTab("logs"); return; }
+    if (e.target.closest("#as-mode-room")) { setAgentInputMode("room"); return; }
+    if (e.target.closest("#as-mode-terminal")) { setAgentInputMode("terminal"); return; }
+    if (e.target.closest("#as-send")) { sendAgentKeys(); return; }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target && e.target.id === "as-input") { sendAgentKeys(); return; }
+    if (e.key === "Escape" && selectedAgentId) {
+      const surf = document.getElementById("agent-surface");
+      if (surf && !surf.classList.contains("hidden")) { closeAgentSurface(); renderRegistryPanel(); }
+    }
+  });
+}
+
+async function renderChannelsView() {
+  setPanelTitle("Channels");
+  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading channels…</div>';
+  await loadRegistry();
+  const teams = registryState.teams;
+  const agents = registryState.agents;
+  let meetingRooms = [];
+  try {
+    const opts = window.ceo.meetingOptions ? await window.ceo.meetingOptions() : null;
+    meetingRooms = (opts && opts.rooms) || [];
+  } catch { meetingRooms = []; }
+  meetingRoomsState = meetingRooms;
+  const activeKey = channelState ? channelState.key : "ceo";
+  const itemCls = (key) => `channel-item w-full text-left flex items-center gap-2 rounded-md px-3 py-2 text-sm transition ${key === activeKey ? "bg-neutral-800 text-neutral-100" : "text-neutral-300 hover:bg-neutral-800/70"}`;
+
+  // Board team-logs — each Kanban board is a channel whose feed is the team's
+  // shared work log (the autonomy runner posts milestones here) + chat.
+  let boards = [];
+  try { const r = await window.ceo.ceoBoards(); boards = (r && r.boards) || (Array.isArray(r) ? r : []); } catch { boards = []; }
+  const boardRooms = boards.map((b) => {
+    const slug = b.slug || b;
+    return `<button class="${itemCls(`board:${slug}`)}" data-channel="board:${esc(slug)}">
+      <span class="text-neutral-500">▤</span><span>${esc(b.name || slug)}</span>
+      <span class="ml-auto text-[10px] text-neutral-600">team log</span>
+    </button>`;
+  }).join("") || '<div class="px-3 py-2 text-xs text-neutral-600">No boards yet.</div>';
+
+  const ceoItem = `<button class="${itemCls("ceo")}" data-channel="ceo">
+      <span class="text-red-400">★</span><span>Project CEO</span>
+      <span class="ml-auto text-[10px] text-neutral-600">default</span>
+    </button>`;
+  const groupRooms = teams.map((t) => `
+    <button class="${itemCls(`team:${t.name}`)}" data-channel="team:${esc(t.name)}">
+      <span class="text-neutral-500">#</span><span>${esc(t.name)}</span>
+      <span class="ml-auto text-[10px] text-neutral-600">${(t.members || []).length} agents</span>
+    </button>`).join("") || '<div class="px-3 py-2 text-xs text-neutral-600">No team channels yet.</div>';
+  const adHocRooms = meetingRooms
+    .filter((r) => r && r.room && !r.channel)
+    .slice(0, 12)
+    .map((r) => {
+      const key = `meeting:${r.room}`;
+      return `<button class="${itemCls(key)}" data-channel="${esc(key)}">
+        <span class="text-neutral-500">⧉</span><span class="min-w-0 flex-1 truncate">${esc(r.room)}</span>
+        <span class="ml-auto shrink-0 text-[10px] ${r.done ? "text-emerald-500" : "text-amber-500"}">${r.done ? "done" : "running"}</span>
+      </button>`;
+    }).join("") || '<div class="px-3 py-2 text-xs text-neutral-600">No meeting rooms yet.</div>';
+  const dms = agents.map((a) => `
+    <button class="${itemCls(`dm:${a.id}`)}" data-channel="dm:${esc(a.id)}">
+      <span class="text-neutral-500">◌</span><span>${esc(a.name || a.id)}</span>
+      <span class="ml-auto text-[10px] text-neutral-600">${esc(a.provider || "vertex")}</span>
+    </button>`).join("") || '<div class="px-3 py-2 text-xs text-neutral-600">No agents in registry.</div>';
+  panelContent().innerHTML = `
+    <div class="space-y-4 max-w-2xl">
+      <div class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-1">${ceoItem}</div>
+      <div>
+        <div class="mb-1 px-1 text-[11px] uppercase tracking-wider text-neutral-500">Team logs (boards)</div>
+        <div class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-1">${boardRooms}</div>
+      </div>
+      <div>
+        <div class="mb-1 px-1 text-[11px] uppercase tracking-wider text-neutral-500">Group channels</div>
+        <div class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-1">${groupRooms}</div>
+      </div>
+      <div>
+        <div class="mb-1 px-1 text-[11px] uppercase tracking-wider text-neutral-500">Meeting rooms</div>
+        <div class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-1">${adHocRooms}</div>
+      </div>
+      <div>
+        <div class="mb-1 px-1 text-[11px] uppercase tracking-wider text-neutral-500">Direct messages</div>
+        <div class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-1">${dms}</div>
+      </div>
+      <div class="px-1 text-[11px] text-neutral-600">One panel, many channels. Pick the CEO, a board's team log, a team, or a DM — the right panel switches to that conversation. Boards show live work milestones as agents build.</div>
+    </div>`;
+}
+
+// --- Channel surface: a live team room in the right panel ---------------------
+// A "channel" is a team (group of agents) or a DM (one agent). Opening it shows
+// a room where the team discusses a brief (A2A meeting), the human/CEO can post
+// in, and you can add more agents to the channel.
+let channelState = null; // { key, kind, name, room, members:[ids], ceoInRoom }
+let channelTimer = null;
+
+function channelRoomName(key) {
+  return `chan-${String(key).replace(/[^a-zA-Z0-9._-]+/g, "-")}`.toLowerCase();
+}
+
+function channelMembers(kind, id) {
+  if (kind === "team") {
+    const team = (registryState.teams || []).find((t) => t.name === id);
+    return (team && team.members) || [];
+  }
+  if (kind === "board") return []; // resolved async (live swarm) in openChannel
+  return [id]; // DM
+}
+
+// For a board team-log channel, the chat participants are the agents actually
+// working that board (the live swarm); fall back to the registry if idle.
+async function boardChannelMembers(slug) {
+  try {
+    const r = await window.ceo.ceoSwarm(slug);
+    const workers = (r && (r.workers || r.swarm)) || [];
+    const ids = [...new Set(workers.map((w) => w.agentId || w.agent || w.id).filter(Boolean))];
+    if (ids.length) return ids;
+  } catch { /* ignore */ }
+  return (registryState.agents || []).map((a) => a.id).slice(0, 8);
+}
+
+// Switch the one right panel back to the default CEO conversation.
+function switchToCeoChannel() {
+  closeChannelSurface();
+  $("#chat-input")?.focus();
+  if ($("#panel-title")?.textContent === "Channels") renderChannelsView();
+}
+
+async function openChannel(key) {
+  if (!key) return;
+  await loadRegistry();
+  const [kind, ...rest] = key.split(":");
+  const id = rest.join(":");
+  const name = kind === "team" ? id
+    : kind === "board" ? id
+    : kind === "meeting" ? id
+    : (registryState.agents.find((a) => a.id === id)?.name || id);
+  const meetingRoom = kind === "meeting" ? (meetingRoomsState || []).find((r) => r.room === id) : null;
+  const meetingParticipants = meetingRoom
+    ? (meetingRoom.participants || []).filter((p) => registryState.agents.some((a) => a.id === p))
+    : [];
+  const members = kind === "meeting" ? meetingParticipants
+    : kind === "board" ? await boardChannelMembers(id)
+    : channelMembers(kind, id);
+  channelState = {
+    key, kind, id, name,
+    room: kind === "meeting" ? id : channelRoomName(key),
+    members,
+    ceoInRoom: false,
+    live: false,
+  };
+  document.getElementById("agent-surface")?.classList.add("hidden");
+  const surf = document.getElementById("channel-surface");
+  if (surf) surf.classList.remove("hidden");
+  const nameEl = document.getElementById("chan-name");
+  if (nameEl) nameEl.textContent = name + (kind === "dm" ? " (DM)" : kind === "board" ? " · team log" : kind === "meeting" ? " · meeting" : "");
+  renderChannelMembers();
+  renderChannelComposerSelects();
+  await pollChannel();
+  if (channelTimer) clearInterval(channelTimer);
+  channelTimer = setInterval(pollChannel, 2500);
+  // Make the channel live: start the persistent A2A room loop so agents reply
+  // to anything posted here (real providers only — never the echo placeholder).
+  await startChannelLoop();
+}
+
+// Start (or re-start) the live A2A room loop for the open channel.
+async function startChannelLoop() {
+  if (!channelState) return false;
+  if (!channelState.members.length) {
+    renderChannelSystemMessage("No agents are assigned to this channel yet.");
+    return false;
+  }
+  try {
+    const r = await window.ceo.roomLoopStart({
+      room: channelState.room,
+      members: channelState.members.join(","),
+      criteria: "Shared understanding: who owns what, risks, open questions surfaced and answered, agreed next steps.",
+      allowPaid: true, // real agents only — never the echo placeholder provider
+      maxFollowups: 1, // bounded agent-to-agent back-and-forth
+    });
+    if (!r || !r.ok) {
+      renderChannelSystemMessage(`Could not start live room loop: ${r ? r.reason : "unknown"}`);
+      const state = document.getElementById("chan-state");
+      if (state) state.textContent = "· loop failed";
+      return false;
+    }
+    channelState.live = true;
+    return true;
+  } catch (e) {
+    renderChannelSystemMessage(`Could not start live room loop: ${String(e && e.message ? e.message : e)}`);
+    const state = document.getElementById("chan-state");
+    if (state) state.textContent = "· loop failed";
+    return false;
+  }
+}
+
+function closeChannelSurface() {
+  if (channelTimer) { clearInterval(channelTimer); channelTimer = null; }
+  if (channelState) { try { window.ceo.roomLoopStop(channelState.room); } catch { /* ignore */ } }
+  channelState = null;
+  document.getElementById("channel-surface")?.classList.add("hidden");
+}
+
+function renderChannelMembers() {
+  const host = document.getElementById("chan-members");
+  if (!host || !channelState) return;
+  const chips = channelState.members.map((id) => {
+    const a = registryState.agents.find((x) => x.id === id);
+    const label = (a && (a.name || a.id)) || id;
+    const prov = (a && a.provider) || "?";
+    return `<span class="inline-flex items-center gap-1 rounded-full border border-neutral-700 bg-neutral-900 px-2 py-0.5 text-[11px] text-neutral-200">
+      <span class="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>${esc(label)}<span class="text-neutral-600">${esc(prov)}</span></span>`;
+  }).join("");
+  const ceoChip = channelState.ceoInRoom
+    ? `<span class="inline-flex items-center gap-1 rounded-full border border-red-700/60 bg-red-950/30 px-2 py-0.5 text-[11px] text-red-300"><span class="w-1.5 h-1.5 rounded-full bg-red-400"></span>CEO</span>`
+    : "";
+  const empty = channelState.kind === "meeting"
+    ? `<span class="text-[11px] text-neutral-600">Meeting transcript loaded from the harness room log.</span>`
+    : `<span class="text-[11px] text-neutral-600">No members yet — add an agent.</span>`;
+  host.innerHTML = (ceoChip + chips) || empty;
+}
+
+function renderChannelComposerSelects() {
+  if (!channelState) return;
+  const speaker = document.getElementById("chan-speaker");
+  const to = document.getElementById("chan-to");
+  if (speaker) {
+    const opts = ['<option value="You">You</option>'];
+    if (channelState.ceoInRoom) opts.push('<option value="CEO">CEO</option>');
+    speaker.innerHTML = opts.join("");
+  }
+  if (to) {
+    const opts = ['<option value="">→ whole team</option>'];
+    for (const id of channelState.members) {
+      const a = registryState.agents.find((x) => x.id === id);
+      opts.push(`<option value="${esc(id)}">→ ${esc((a && (a.name || a.id)) || id)}</option>`);
+    }
+    to.innerHTML = opts.join("");
+  }
+}
+
+function renderChannelFeed(feed) {
+  const host = document.getElementById("chan-feed");
+  if (!host) return;
+  const nearBottom = host.scrollHeight - host.scrollTop - host.clientHeight < 80;
+  const previousTop = host.scrollTop;
+  if (!feed || !feed.length) {
+    host.innerHTML = `<div class="text-neutral-600 text-xs">No messages yet. Paste a brief below and hit <span class="text-cyan-400">Discuss brief →</span> to get the team talking.</div>`;
+    return;
+  }
+  host.innerHTML = feed.map((e) => {
+    const body = e.body || "";
+    // Work-event milestones (posted by the autonomy runner / review gate) read as
+    // a compact LOG line, not a chat bubble — this channel is the team's log.
+    if (isWorkEvent(body)) {
+      const glyph = body.trim().charAt(0);
+      const tone = /^[✗⛔]/.test(body) ? "text-red-300" : /^[✅✓]/.test(body) ? "text-emerald-300" : "text-amber-300";
+      return `<div class="flex items-start gap-2 px-1 py-0.5 font-mono text-[11px] ${tone}">
+        <span>${esc(glyph)}</span>
+        <span class="text-neutral-500">${esc(e.speaker || "")}</span>
+        <span class="flex-1 text-neutral-300">${esc(body.trim().slice(1).trim())}</span>
+      </div>`;
+    }
+    const human = /^(you|ceo)$/i.test(e.speaker || "");
+    const tone = human ? "border-red-700/40 bg-red-950/20" : "border-neutral-800 bg-neutral-900/50";
+    return `<div class="rounded-lg border ${tone} px-3 py-2">
+      <div class="mb-0.5 text-[11px] font-medium ${human ? "text-red-300" : "text-cyan-300"}">${esc(e.speaker || "agent")}</div>
+      <div class="text-[13px] text-neutral-200 whitespace-pre-wrap leading-relaxed">${esc(body)}</div>
+    </div>`;
+  }).join("");
+  host.scrollTop = nearBottom ? host.scrollHeight : previousTop;
+}
+
+function renderChannelSystemMessage(message) {
+  renderChannelFeed([{ speaker: "system", body: message || "Channel error." }]);
+}
+
+// A team-log work milestone starts with a status glyph emitted by the runner.
+function isWorkEvent(body) {
+  return /^\s*[▶✓✗✅⛔]/.test(String(body || ""));
+}
+
+async function pollChannel() {
+  if (!channelState) return;
+  let r = {};
+  try {
+    r = await window.ceo.meetingRoom(channelState.room);
+  } catch (e) {
+    renderChannelSystemMessage(`Could not read room: ${String(e && e.message ? e.message : e)}`);
+    const state = document.getElementById("chan-state");
+    if (state) state.textContent = "· room error";
+    return;
+  }
+  renderChannelFeed((r && r.feed) || []);
+  const state = document.getElementById("chan-state");
+  if (state) state.textContent = channelState && channelState.live
+    ? "· live A2A"
+    : channelState && channelState.kind === "meeting"
+      ? (r && r.running ? "· meeting running" : "· meeting log")
+      : (r && r.started ? "· idle" : "");
+}
+
+async function startChannelDiscussion() {
+  if (!channelState) return;
+  const briefEl = document.getElementById("chan-brief");
+  const brief = briefEl && briefEl.value.trim();
+  if (!brief) { briefEl?.focus(); return; }
+  const btn = document.getElementById("chan-discuss");
+  if (btn) { btn.disabled = true; btn.textContent = "Posting…"; }
+  // Ensure the live A2A loop is running, then drop the brief in as a whole-team
+  // message. The loop fans it out to members (each replies only if it concerns
+  // their role) and writes their replies back into the room transcript.
+  const loopReady = await startChannelLoop();
+  const speaker = channelState.ceoInRoom ? "CEO" : "You";
+  let r = {};
+  try {
+    const body = await withChannelContext(`Team — let's discuss this brief:\n\n${brief}`);
+    r = await window.ceo.meetingPost(channelState.room, speaker, body);
+  } catch (e) { r = { ok: false, reason: String(e) }; }
+  if (btn) { btn.disabled = false; btn.textContent = "Discuss brief →"; }
+  if (!r || !r.ok) {
+    renderChannelFeed([{ speaker: "system", body: `Could not post brief: ${r ? r.reason : "unknown"}` }]);
+    return;
+  }
+  if (briefEl) briefEl.value = "";
+  if (!loopReady) renderChannelSystemMessage("Brief posted, but the live A2A room loop did not start. Restart the app if this says no handler is registered.");
+  setTimeout(pollChannel, 600);
+}
+
+// Build the same context the CEO chat injects — referenced artifacts/files
+// (the context tray) + a short project/domain header — so room agents share the
+// CEO's situational awareness of what the human is pointing at.
+async function referencedContextBlock() {
+  const parts = [];
+  if (currentProject) {
+    parts.push(`Project: ${currentProject.name}${currentDomain && currentDomain !== "All" ? ` · domain: ${currentDomain}` : ""}`);
+  }
+  if (ceoContextTray.length) {
+    const loaded = await Promise.all(ceoContextTray.slice(0, 4).map(readContextItem));
+    parts.push("The human is referencing these:");
+    for (const it of loaded) {
+      parts.push(`- ${it.title}${it.path ? ` (${it.path})` : ""}:\n${String(it.text || "").slice(0, 800)}`);
+    }
+  }
+  return parts.length ? parts.join("\n") : "";
+}
+
+// Prepend the shared context to a room message (capped, only when present).
+async function withChannelContext(text) {
+  const ctx = await referencedContextBlock();
+  return ctx ? `${text}\n\n----- context -----\n${ctx}` : text;
+}
+
+async function sendChannelMessage() {
+  if (!channelState) return;
+  const input = document.getElementById("chan-input");
+  const text = input && input.value.trim();
+  if (!text) return;
+  const send = document.getElementById("chan-send");
+  const speaker = document.getElementById("chan-speaker")?.value || "You";
+  const to = document.getElementById("chan-to")?.value || "";
+  const addressed = to ? `@${to} ${text}` : text;
+  if (send) { send.disabled = true; send.textContent = "Sending..."; }
+  let r = null;
+  try {
+    const body = await withChannelContext(addressed);
+    r = await window.ceo.meetingPost(channelState.room, speaker, body);
+  } catch (e) {
+    r = { ok: false, reason: String(e && e.message ? e.message : e) };
+  }
+  if (send) { send.disabled = false; send.textContent = "Send"; }
+  if (!r || !r.ok) {
+    if (input) input.value = text;
+    renderChannelSystemMessage(`Could not post message: ${r ? r.reason : "unknown"}`);
+    const state = document.getElementById("chan-state");
+    if (state) state.textContent = "· post failed";
+    return;
+  }
+  input.value = "";
+  setTimeout(pollChannel, 200);
+}
+
+function toggleCeoInRoom() {
+  if (!channelState) return;
+  channelState.ceoInRoom = !!document.getElementById("chan-ceo")?.checked;
+  renderChannelMembers();
+  renderChannelComposerSelects();
+}
+
+async function addAgentToChannel() {
+  if (!channelState) return;
+  await loadRegistry();
+  const candidates = (registryState.agents || []).filter((a) => !channelState.members.includes(a.id));
+  if (!candidates.length) { alert("All registry agents are already in this channel."); return; }
+  const pick = prompt(
+    `Add an agent to #${channelState.name}.\nAvailable:\n` + candidates.map((a) => `- ${a.id} (${a.provider})`).join("\n") + "\n\nEnter agent id:",
+    candidates[0].id,
+  );
+  if (!pick) return;
+  const id = pick.trim();
+  if (!candidates.some((a) => a.id === id)) { alert(`Unknown agent id: ${id}`); return; }
+  const next = [...channelState.members, id];
+  if (channelState.kind === "team") {
+    try {
+      const r = await window.ceo.registrySaveTeam(channelState.id, next);
+      if (!r || !r.ok) { alert("Failed to add agent: " + (r ? r.reason : "unknown")); return; }
+    } catch (e) { alert("Failed to add agent: " + String(e)); return; }
+  }
+  channelState.members = next;
+  renderChannelMembers();
+  renderChannelComposerSelects();
+  // Note the change as a non-human speaker so it doesn't trigger a routing round,
+  // then restart the live loop so the new member is included in the roster.
+  await window.ceo.meetingPost(channelState.room, "Facilitator", `Added @${id} to the channel.`).catch(() => {});
+  if (channelState.live) {
+    try { await window.ceo.roomLoopStop(channelState.room); } catch { /* ignore */ }
+    channelState.live = false;
+    await startChannelLoop();
+  }
+  setTimeout(pollChannel, 200);
+}
+
+// Channel surface controls live in panel2 (outside panelContent). Delegate on
+// document so they stay live across re-renders.
+document.addEventListener("click", (e) => {
+  if (e.target.closest("#chan-close")) { closeChannelSurface(); return; }
+  if (e.target.closest("#chan-discuss")) { startChannelDiscussion(); return; }
+  if (e.target.closest("#chan-send")) { sendChannelMessage(); return; }
+  if (e.target.closest("#chan-add")) { addAgentToChannel(); return; }
+});
+document.addEventListener("change", (e) => {
+  if (e.target && e.target.id === "chan-ceo") toggleCeoInRoom();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target && e.target.id === "chan-input") { sendChannelMessage(); return; }
+  if (e.key === "Escape" && channelState) {
+    const surf = document.getElementById("channel-surface");
+    if (surf && !surf.classList.contains("hidden")) closeChannelSurface();
+  }
+});
+
+function stopNavMeetingPoll() { if (navMeetingTimer) { clearInterval(navMeetingTimer); navMeetingTimer = null; } }
+
+const MEETING_TEMPLATES = {
+  kickoff: {
+    label: "Kickoff",
+    agenda: (domain) => `Kick off the ${domain} domain. Clarify ownership, initial capabilities, first artifacts, open risks, and the next Agenda Item proposals.`,
+    criteria: "A concise domain plan with decisions, unresolved questions, owner recommendations, and proposal-only next Agenda Items.",
+    team: "product-discovery",
+  },
+  handoff: {
+    label: "Handoff triage",
+    agenda: (domain) => `Triage the selected ${domain} handoff or domain context. Identify what is confirmed, what needs human attention, and which Agenda Items should be proposed.`,
+    criteria: "Proposal-only Agenda Items with provenance, priority, routing suggestions, and human-approval flags.",
+    team: "product-discovery",
+  },
+  requirements: {
+    label: "Requirements",
+    agenda: (domain) => `Turn the selected ${domain} context into implementation-ready requirements without creating Kanban work yet.`,
+    criteria: "A requirements artifact with scope, non-goals, acceptance criteria, dependencies, and traceable source context.",
+    team: "documentation-stewards",
+  },
+  planning: {
+    label: "Build plan",
+    agenda: (domain) => `Plan the next concrete implementation pass for the ${domain} domain. Sequence the work, identify files to change, tests to run, and risks to watch.`,
+    criteria: "A practical build plan that can be handed to a coding agent after human approval.",
+    team: "self-repair",
+  },
+  repair: {
+    label: "Repair review",
+    agenda: (domain) => `Review the selected ${domain} bug, gap, or failed workflow. Diagnose the likely cause and propose a repair path.`,
+    criteria: "A repair brief with reproduction notes, affected surface, likely files, owner, and verification gates.",
+    team: "self-repair",
+  },
+};
+
+function meetingDomainName() {
+  return currentDomain && currentDomain !== "All" ? currentDomain : (currentProject?.name || "Project");
+}
+
+function agentAvailability(agent) {
+  if (agent?.mounted || agent?.tmux_session) return "mounted";
+  return "available";
+}
+
+function mergeMeetingRoster(options = {}) {
+  const optionAgents = Array.isArray(options.agents) ? options.agents : [];
+  const mounted = new Set((options.mounted || []).concat(optionAgents.filter((a) => a.mounted).map((a) => a.id)));
+  const registryAgents = registryState.agents || [];
+  const sourceAgents = registryAgents.length ? registryAgents : optionAgents;
+  const optionById = new Map(optionAgents.map((agent) => [agent.id, agent]));
+  const agents = sourceAgents.map((agent) => ({
+    ...optionById.get(agent.id),
+    ...agent,
+    mounted: mounted.has(agent.id) || !!agent.tmux_session || !!agent.mounted,
+  }));
+  return {
+    agents,
+    teams: (registryState.teams && registryState.teams.length) ? registryState.teams : (options.teams || []),
+    personas: options.personas || registryState.personas || [],
+    mounted: [...mounted],
+  };
+}
+
+function renderMeetingTemplates() {
+  return Object.entries(MEETING_TEMPLATES).map(([key, tmpl]) => `
+    <button class="nav-mtg-template rounded-md border border-neutral-700 bg-neutral-900 px-2.5 py-1.5 text-xs text-neutral-200 hover:border-cyan-500/50 hover:bg-cyan-950/20"
+      data-template="${esc(key)}">${esc(tmpl.label)}</button>
+  `).join("");
+}
+
+function renderMeetingTeamCards(teams, agentsById) {
+  if (!teams.length) return `<div class="rounded-xl border border-neutral-800 bg-neutral-950/45 p-3 text-xs text-neutral-600">No teams in the registry.</div>`;
+  return teams.map((team) => {
+    const members = team.members || [];
+    const mountedCount = members.filter((id) => {
+      const agent = agentsById.get(id);
+      return agent && (agent.mounted || agent.tmux_session);
+    }).length;
+    const sample = members.slice(0, 4).map((id) => agentsById.get(id)?.name || id).join(", ") || "No members";
+    return `<button class="nav-mtg-team-card text-left rounded-xl border border-neutral-800 bg-neutral-950/45 p-3 hover:border-cyan-500/45 hover:bg-cyan-950/15"
+      data-mtg-team="${esc(team.name)}">
+      <div class="flex items-center gap-2">
+        <span class="min-w-0 flex-1 truncate text-sm font-medium text-neutral-100">${esc(team.name)}</span>
+        <span class="rounded border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400">${members.length} agents</span>
+      </div>
+      <div class="mt-1 truncate text-[11px] text-neutral-500">${esc(sample)}</div>
+      <div class="mt-2 text-[10px] uppercase tracking-wider text-neutral-600">${mountedCount} mounted now</div>
+    </button>`;
+  }).join("");
+}
+
+function renderMeetingAgentChecks(agents) {
+  if (!agents.length) return '<div class="text-[11px] text-neutral-600">No agents in registry.</div>';
+  return agents.map((a) => {
+    const status = agentAvailability(a);
+    const statusClass = status === "mounted" ? "bg-emerald-500" : "bg-neutral-600";
+    const caps = (a.capabilities || []).slice(0, 3).join(", ");
+    return `<label class="flex items-start gap-2 rounded-lg border border-neutral-800 bg-neutral-950/35 px-2 py-2 text-xs text-neutral-300">
+      <input type="checkbox" class="nav-mtg-member mt-0.5 accent-cyan-500" value="${esc(a.id)}" />
+      <span class="mt-1 h-2 w-2 shrink-0 rounded-full ${statusClass}"></span>
+      <span class="min-w-0 flex-1">
+        <span class="block truncate text-neutral-200">${esc(a.name || a.id)}</span>
+        <span class="block truncate text-[10px] text-neutral-500">${esc([a.provider || "vertex", a.persona, caps].filter(Boolean).join(" / "))}</span>
+      </span>
+      <span class="shrink-0 text-[10px] text-neutral-600">${esc(status)}</span>
+    </label>`;
+  }).join("");
+}
+
+function selectMeetingTeam(teamName) {
+  const select = $("#nav-mtg-team");
+  if (select) select.value = teamName || "";
+  const t = ((navMeetingOpts && navMeetingOpts.teams) || []).find((x) => x.name === teamName);
+  const ids = new Set((t && t.members) || []);
+  document.querySelectorAll(".nav-mtg-member").forEach((c) => { c.checked = ids.has(c.value); });
+  document.querySelectorAll(".nav-mtg-team-card").forEach((card) => {
+    const active = card.dataset.mtgTeam === teamName;
+    card.classList.toggle("border-cyan-500", active);
+    card.classList.toggle("bg-cyan-950/20", active);
+  });
+}
+
+function applyMeetingTemplate(templateKey) {
+  const tmpl = MEETING_TEMPLATES[templateKey];
+  if (!tmpl) return;
+  const domain = meetingDomainName();
+  const agenda = $("#nav-mtg-agenda");
+  const criteria = $("#nav-mtg-criteria");
+  if (agenda) agenda.value = tmpl.agenda(domain);
+  if (criteria) criteria.value = tmpl.criteria;
+  if (tmpl.team && (navMeetingOpts?.teams || []).some((team) => team.name === tmpl.team)) selectMeetingTeam(tmpl.team);
+  const msg = $("#nav-mtg-msg");
+  if (msg) msg.textContent = `${tmpl.label} brief loaded`;
+}
+
+async function selectedMeetingContext() {
+  if (!ceoContextTray.length) return [];
+  const include = $("#nav-mtg-include-context");
+  if (include && !include.checked) return [];
+  const loaded = await Promise.all(ceoContextTray.slice(0, 6).map(readContextItem));
+  return loaded.map((item) => ({
+    kind: item.kind || "artifact",
+    title: item.title || item.path || "Selected context",
+    path: item.path || "",
+    text: String(item.text || "").slice(0, 5000),
+  }));
+}
+
+function meetingContextAgendaBlock(items) {
+  if (!items.length) return "";
+  return [
+    "Selected domain context:",
+    ...items.map((item, idx) => [
+      `Context ${idx + 1}: ${item.title}`,
+      `Kind: ${item.kind}`,
+      `Path: ${item.path || "inline"}`,
+      item.text || "(no content)",
+    ].join("\n")),
+  ].join("\n\n");
+}
+
+function fmtMeetingTime(value) {
+  if (!value) return "unscheduled";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function meetingDateTimeLocal(value) {
+  const d = value ? new Date(value) : new Date(Date.now() + 5 * 60 * 1000);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function renderUpcomingMeetings(meetings = []) {
+  const rows = meetings.filter((m) => m.status !== "started" && m.status !== "cancelled");
+  if (!rows.length) return `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 p-3 text-xs text-neutral-600">No upcoming meetings scheduled.</div>`;
+  return rows.map((m) => `
+    <div class="rounded-lg border border-neutral-800 bg-neutral-950/45 p-3">
+      <div class="flex items-start gap-3">
+        <div class="min-w-0 flex-1">
+          <div class="truncate text-sm font-medium text-neutral-100">${esc(m.title || "Untitled meeting")}</div>
+          <div class="mt-1 text-[11px] text-neutral-500">${esc(fmtMeetingTime(m.scheduledFor))} · ${esc(m.domain || "All")} · ${esc(m.recurrence || "none")}</div>
+          <div class="mt-2 line-clamp-2 text-xs text-neutral-400">${esc(m.agenda || "")}</div>
+        </div>
+        <div class="flex shrink-0 gap-1">
+          <button class="nav-mtg-run-scheduled rounded-md bg-cyan-600 px-2 py-1 text-[11px] text-white hover:bg-cyan-500" data-mtg-id="${esc(m.id)}">Start</button>
+          <button class="nav-mtg-delete-scheduled rounded-md border border-neutral-700 px-2 py-1 text-[11px] text-neutral-300 hover:bg-neutral-800" data-mtg-id="${esc(m.id)}">Delete</button>
+        </div>
+      </div>
+    </div>`).join("");
+}
+
+function renderPastMeetings(rooms = []) {
+  const rows = rooms.filter((r) => r && r.room && !r.channel).slice(0, 12);
+  if (!rows.length) return `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 p-3 text-xs text-neutral-600">No past meeting rooms yet.</div>`;
+  return rows.map((r) => `
+    <button class="nav-mtg-open-room block w-full rounded-lg border border-neutral-800 bg-neutral-950/45 p-3 text-left hover:border-cyan-500/40 hover:bg-cyan-950/10"
+      data-room="${esc(r.room)}">
+      <div class="flex items-center gap-2">
+        <span class="min-w-0 flex-1 truncate text-sm font-medium text-neutral-100">${esc(r.room)}</span>
+        <span class="rounded border border-neutral-700 px-1.5 py-0.5 text-[10px] ${r.done ? "text-emerald-400" : "text-amber-300"}">${r.done ? "done" : "running"}</span>
+      </div>
+      <div class="mt-1 text-[11px] text-neutral-500">${esc(fmtMeetingTime(r.updatedAt))} · ${Number(r.messages || 0)} messages</div>
+      <div class="mt-2 truncate text-xs text-neutral-500">${esc((r.participants || r.speakers || []).slice(0, 5).join(", ") || "room transcript")}</div>
+    </button>`).join("");
+}
+
+async function renderMeetingsView() {
+  setPanelTitle("Meetings");
+  stopNavMeetingPoll();
+  panelContent().innerHTML = '<div class="text-neutral-500 text-sm">Loading session setup…</div>';
+  const [meetingOptions] = await Promise.all([
+    window.ceo.meetingOptions ? safeIpc(() => window.ceo.meetingOptions(), {}) : {},
+    loadRegistry(),
+  ]);
+  navMeetingOpts = mergeMeetingRoster(meetingOptions || {});
+  navMeetingScheduled = (meetingOptions && meetingOptions.scheduled) || [];
+  navMeetingPastRooms = (meetingOptions && meetingOptions.rooms) || [];
+  const teams = navMeetingOpts.teams;
+  const agents = navMeetingOpts.agents;
+  const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
+  const domainName = meetingDomainName();
+  const teamOpts = `<option value="">— pick a team —</option>` +
+    teams.map((t) => `<option value="${esc(t.name)}">${esc(t.name)} (${(t.members || []).length})</option>`).join("");
+  const contextRows = ceoContextTray.length
+    ? ceoContextTray.map((item) => `<div class="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2">
+        <span class="rounded border border-cyan-500/20 bg-cyan-950/20 px-1.5 py-0.5 text-[10px] text-cyan-300">${esc(item.kind || "artifact")}</span>
+        <span class="min-w-0 flex-1 truncate text-xs text-neutral-300">${esc(item.title || item.path)}</span>
+      </div>`).join("")
+    : `<div class="rounded-lg border border-neutral-800 bg-neutral-950/45 px-3 py-2 text-xs text-neutral-600">No selected domain context.</div>`;
+  const createOpenCls = navMeetingCreateOpen ? "" : "hidden";
+  const defaultWhen = meetingDateTimeLocal();
+  panelContent().innerHTML = `
+    <div class="space-y-4">
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="min-w-0 flex-1">
+          <div class="text-lg font-semibold text-neutral-100">Meetings</div>
+          <div class="mt-1 text-xs text-neutral-500">Schedule working rooms, launch agent discussions, and reopen past transcripts.</div>
+        </div>
+        <button id="nav-mtg-toggle-create" class="rounded-md bg-cyan-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-cyan-500">${navMeetingCreateOpen ? "Close Create" : "Create Meeting"}</button>
+      </div>
+      <div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
+        <section class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+          <div class="mb-3 flex items-center gap-2">
+            <div class="text-sm font-semibold text-neutral-100">Upcoming Meetings</div>
+            <span class="rounded border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">${navMeetingScheduled.filter((m) => m.status !== "started" && m.status !== "cancelled").length}</span>
+          </div>
+          <div class="space-y-2">${renderUpcomingMeetings(navMeetingScheduled)}</div>
+        </section>
+        <section class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+          <div class="mb-3 flex items-center gap-2">
+            <div class="text-sm font-semibold text-neutral-100">Past Meetings</div>
+            <span class="rounded border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">${navMeetingPastRooms.filter((r) => r && r.room && !r.channel).length}</span>
+          </div>
+          <div class="space-y-2">${renderPastMeetings(navMeetingPastRooms)}</div>
+        </section>
+      </div>
+      <div id="nav-mtg-create-panel" class="${createOpenCls} grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(340px,0.95fr)]">
+        <section class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+          <div class="mb-3 flex flex-wrap items-center gap-2">
+            <div class="min-w-0 flex-1">
+              <div class="text-sm font-semibold text-neutral-100">Meeting Brief</div>
+              <div class="mt-1 text-[11px] uppercase tracking-wider text-neutral-600">${esc(domainName)} domain workspace</div>
+            </div>
+            <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] text-neutral-500">${agents.length} agents</span>
+            <span class="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-0.5 text-[10px] text-neutral-500">${teams.length} teams</span>
+          </div>
+          <div class="mb-3 flex flex-wrap gap-2">${renderMeetingTemplates()}</div>
+          <label class="block text-xs text-neutral-400">Agenda
+            <textarea id="nav-mtg-agenda" rows="5" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-800/70 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" placeholder="What should this room decide, synthesize, or plan?"></textarea>
+          </label>
+          <label class="mt-3 block text-xs text-neutral-400">Expected outcome
+            <input id="nav-mtg-criteria" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-800/70 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" placeholder="Artifact, decision, proposal, or repair brief expected from this session" />
+          </label>
+          <div class="mt-3 grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_140px]">
+            <label class="block text-xs text-neutral-400">Title
+              <input id="nav-mtg-title" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-800/70 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" placeholder="Planning room, test review, domain audit..." />
+            </label>
+            <label class="block text-xs text-neutral-400">Recurrence
+              <select id="nav-mtg-recurrence" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-800/70 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500">
+                <option value="none">none</option>
+                <option value="daily">daily</option>
+                <option value="weekly">weekly</option>
+                <option value="monthly">monthly</option>
+              </select>
+            </label>
+          </div>
+          <label class="mt-3 block text-xs text-neutral-400">Scheduled for
+            <input id="nav-mtg-when" type="datetime-local" value="${esc(defaultWhen)}" class="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-800/70 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-cyan-500" />
+          </label>
+          <div class="mt-3 rounded-xl border border-cyan-500/20 bg-cyan-950/10 p-3">
+            <div class="mb-2 flex items-center gap-2">
+              <div class="text-xs font-medium text-cyan-100">Selected Context</div>
+              <span class="rounded border border-cyan-500/20 px-1.5 py-0.5 text-[10px] text-cyan-300">${ceoContextTray.length} items</span>
+              <label class="ml-auto flex items-center gap-2 text-[11px] text-neutral-300">
+                <input id="nav-mtg-include-context" type="checkbox" class="accent-cyan-500" ${ceoContextTray.length ? "checked" : "disabled"} />
+                Include
+              </label>
+            </div>
+            <div class="space-y-2">${contextRows}</div>
+          </div>
+          <label class="mt-3 flex items-center gap-2 text-xs text-amber-300/90">
+            <input id="nav-mtg-paid" type="checkbox" class="accent-amber-500" /> Allow paid providers for this session
+          </label>
+          <div class="mt-4 flex flex-wrap items-center gap-2">
+            <button id="nav-mtg-start" class="rounded-md bg-cyan-600 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-cyan-500">Start Now</button>
+            <button id="nav-mtg-schedule" class="rounded-md border border-cyan-600/70 px-4 py-1.5 text-sm font-medium text-cyan-200 transition hover:bg-cyan-950/30">Schedule</button>
+            <span id="nav-mtg-msg" class="text-xs text-neutral-500"></span>
+          </div>
+        </section>
+        <section class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+          <div class="mb-3 flex items-center gap-2">
+            <div>
+              <div class="text-sm font-semibold text-neutral-100">Room Roster</div>
+              <div class="mt-1 text-[11px] uppercase tracking-wider text-neutral-600">${navMeetingOpts.mounted.length} mounted agents now</div>
+            </div>
+            <select id="nav-mtg-team" class="ml-auto max-w-[220px] rounded-md border border-neutral-700 bg-neutral-800/70 px-2 py-1.5 text-xs text-neutral-100 outline-none focus:border-cyan-500">${teamOpts}</select>
+          </div>
+          <div class="grid grid-cols-1 gap-2 md:grid-cols-2">${renderMeetingTeamCards(teams, agentsById)}</div>
+          <div class="mt-4 text-xs text-neutral-400">Participants
+            <div class="mt-2 max-h-[260px] space-y-2 overflow-auto rounded-xl border border-neutral-800 bg-neutral-950/35 p-2">${renderMeetingAgentChecks(agents)}</div>
+          </div>
+        </section>
+      </div>
+      <section class="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+        <div class="flex items-center gap-2 text-[11px] uppercase tracking-wider text-neutral-500">
+          <span>Live Room</span><span id="nav-mtg-room" class="font-mono text-neutral-400 normal-case">${esc(navMeetingRoom || "")}</span><span id="nav-mtg-state" class="ml-auto normal-case"></span>
+        </div>
+        <div id="nav-mtg-transcript" class="mt-3 max-h-[520px] overflow-auto space-y-2 pr-1 text-sm"><div class="rounded-lg border border-neutral-800 bg-neutral-950/45 p-3 text-neutral-600">No meeting started.</div></div>
+        <div id="nav-mtg-req" class="hidden mt-4 border-t border-neutral-800/60 pt-3">
+          <div class="mb-1 flex items-center gap-2">
+            <div class="text-[11px] uppercase tracking-wider text-emerald-400/80">Saved Result</div>
+            <span id="nav-mtg-saved-path" class="font-mono text-[10px] text-neutral-600"></span>
+          </div>
+          <div id="nav-mtg-req-body" class="prose prose-invert prose-sm max-w-none text-neutral-200"></div>
+        </div>
+      </section>
+    </div>`;
+  if (navMeetingRoom) {
+    pollNavMeeting();
+    stopNavMeetingPoll();
+    navMeetingTimer = setInterval(pollNavMeeting, 2500);
+  }
+}
+
+async function startNavMeeting() {
+  const msg = $("#nav-mtg-msg");
+  const draft = await collectMeetingDraft();
+  if (!draft.ok) { if (msg) msg.textContent = draft.reason; return; }
+  if (msg) msg.textContent = "starting...";
+  let r = {};
+  try { r = await window.ceo.meetingStart(draft.info); } catch (e) { r = { ok: false, reason: String(e) }; }
+  if (!r || !r.ok) { if (msg) msg.textContent = `failed: ${r ? r.reason : "unknown"}`; return; }
+  if (msg) msg.textContent = "running - watch below";
+  navMeetingRoom = r.room;
+  navMeetingMeta = {
+    domain: currentDomain,
+    agenda: draft.agenda,
+    participants: draft.team || draft.members,
+    expectedOutcome: draft.criteria,
+    sourceContext: draft.sourceContext,
+    saved: false,
+    artifactPath: "",
+  };
+  const lbl = $("#nav-mtg-room"); if (lbl) lbl.textContent = r.room;
+  pollNavMeeting();
+  stopNavMeetingPoll();
+  navMeetingTimer = setInterval(pollNavMeeting, 2500);
+}
+
+async function collectMeetingDraft() {
+  const agenda = ($("#nav-mtg-agenda") && $("#nav-mtg-agenda").value || "").trim();
+  const criteria = ($("#nav-mtg-criteria") && $("#nav-mtg-criteria").value || "").trim();
+  const title = ($("#nav-mtg-title") && $("#nav-mtg-title").value || "").trim() || agenda.split(/\n/)[0].slice(0, 80) || "Working meeting";
+  const scheduledLocal = ($("#nav-mtg-when") && $("#nav-mtg-when").value || "").trim();
+  const scheduledFor = scheduledLocal ? new Date(scheduledLocal).toISOString() : new Date().toISOString();
+  const recurrence = ($("#nav-mtg-recurrence") && $("#nav-mtg-recurrence").value) || "none";
+  const team = ($("#nav-mtg-team") && $("#nav-mtg-team").value) || "";
+  const members = Array.from(document.querySelectorAll(".nav-mtg-member:checked")).map((c) => c.value).join(",");
+  const allowPaid = !!($("#nav-mtg-paid") && $("#nav-mtg-paid").checked);
+  if (!agenda) return { ok: false, reason: "agenda required" };
+  if (!team && !members) return { ok: false, reason: "pick a team or members" };
+  const sourceContext = await selectedMeetingContext();
+  const contextBlock = meetingContextAgendaBlock(sourceContext);
+  const meetingAgenda = contextBlock ? `${agenda}\n\n${contextBlock}` : agenda;
+  const info = { room: `session-${Date.now()}`, agenda: meetingAgenda, criteria, allowPaid };
+  if (team) info.team = team; else info.members = members;
+  return { ok: true, title, scheduledFor, recurrence, agenda, meetingAgenda, criteria, team, members, allowPaid, sourceContext, info };
+}
+
+async function scheduleNavMeeting() {
+  const msg = $("#nav-mtg-msg");
+  const draft = await collectMeetingDraft();
+  if (!draft.ok) { if (msg) msg.textContent = draft.reason; return; }
+  const meeting = {
+    title: draft.title,
+    domain: currentDomain || "All",
+    scheduledFor: draft.scheduledFor,
+    recurrence: draft.recurrence,
+    agenda: draft.meetingAgenda,
+    criteria: draft.criteria,
+    team: draft.team,
+    members: draft.members,
+    allowPaid: draft.allowPaid,
+    sourceContext: draft.sourceContext,
+  };
+  let r = {};
+  try { r = await window.ceo.meetingSchedule(meeting); } catch (e) { r = { ok: false, reason: String(e) }; }
+  if (!r || !r.ok) { if (msg) msg.textContent = `schedule failed: ${r ? r.reason : "unknown"}`; return; }
+  navMeetingCreateOpen = false;
+  await renderMeetingsView();
+}
+
+async function startScheduledMeeting(id) {
+  if (!id) return;
+  let r = {};
+  try { r = await window.ceo.meetingScheduleStart(id); } catch (e) { r = { ok: false, reason: String(e) }; }
+  if (!r || !r.ok) { alert(`Could not start scheduled meeting: ${r ? r.reason : "unknown"}`); return; }
+  navMeetingRoom = r.room;
+  navMeetingMeta = null;
+  await renderMeetingsView();
+  pollNavMeeting();
+  stopNavMeetingPoll();
+  navMeetingTimer = setInterval(pollNavMeeting, 2500);
+}
+
+async function deleteScheduledMeeting(id) {
+  if (!id) return;
+  try { await window.ceo.meetingScheduleDelete(id); } catch { /* ignore */ }
+  await renderMeetingsView();
+}
+
+async function openPastMeetingRoom(room) {
+  if (!room) return;
+  navMeetingRoom = room;
+  navMeetingMeta = null;
+  await renderMeetingsView();
+  pollNavMeeting();
+  stopNavMeetingPoll();
+  navMeetingTimer = setInterval(pollNavMeeting, 2500);
+}
+
+async function pollNavMeeting() {
+  if (!navMeetingRoom || !window.ceo.meetingRoom) return;
+  let r = {};
+  try { r = await window.ceo.meetingRoom(navMeetingRoom); } catch { return; }
+  if (!r || !r.ok) return;
+  const host = $("#nav-mtg-transcript");
+  if (host) {
+    const feed = r.feed || [];
+    const nearBottom = host.scrollHeight - host.scrollTop - host.clientHeight < 80;
+    const previousTop = host.scrollTop;
+    host.innerHTML = feed.length ? feed.map((it) => {
+      const isFac = /facilitator|orchestrator/i.test(it.speaker);
+      return `<div class="rounded-lg border ${isFac ? "border-cyan-500/30 bg-cyan-950/10" : "border-neutral-800 bg-neutral-900/50"} p-2.5">
+        <div class="text-[11px] font-medium ${isFac ? "text-cyan-300" : "text-neutral-300"}">${esc(it.speaker)}</div>
+        <div class="mt-1 whitespace-pre-wrap text-[12px] text-neutral-300">${esc(it.body)}</div>
+      </div>`;
+    }).join("") : `<div class="text-neutral-600">Waiting for the session to begin…</div>`;
+    host.scrollTop = nearBottom ? host.scrollHeight : previousTop;
+  }
+  const state = $("#nav-mtg-state");
+  if (state) state.innerHTML = r.running ? `<span class="text-amber-300">● running</span>` : `<span class="text-emerald-400">✓ complete</span>`;
+  const reqWrap = $("#nav-mtg-req"), reqBody = $("#nav-mtg-req-body");
+  if (reqWrap && reqBody) {
+    if (r.requirements) { reqWrap.classList.remove("hidden"); reqBody.innerHTML = window.marked ? window.marked.parse(r.requirements) : esc(r.requirements); }
+    else reqWrap.classList.add("hidden");
+  }
+  if (r.requirements && navMeetingMeta && !navMeetingMeta.saved && window.ceo.saveMeetingArtifact) {
+    navMeetingMeta.saved = true;
+    const saved = await window.ceo.saveMeetingArtifact({
+      domain: navMeetingMeta.domain,
+      room: navMeetingRoom,
+      agenda: navMeetingMeta.agenda,
+      participants: navMeetingMeta.participants,
+      expectedOutcome: navMeetingMeta.expectedOutcome,
+      requirements: r.requirements,
+      sourceContext: navMeetingMeta.sourceContext || [],
+    });
+    if (saved && saved.ok && saved.artifact) navMeetingMeta.artifactPath = saved.artifact.path || "";
+    const savedPath = $("#nav-mtg-saved-path");
+    if (savedPath && navMeetingMeta.artifactPath) savedPath.textContent = navMeetingMeta.artifactPath;
+    if (studioView === "domain") await renderStudioBoard(currentDomain);
+  }
+  if (!r.running) stopNavMeetingPoll();
+}
+
+async function openView(view) {
+  studioView = view || "domain";
+  setActiveNav(studioView);
+  if (studioView !== "meetings") stopNavMeetingPoll();
+  closeAgentSurface();
+  switch (studioView) {
+    case "board": return renderBoardView();
+    case "tasks": return renderTasksView();
+    case "agents": return renderAgentsView();
+    case "teams": return renderTeamsView();
+    case "personas": return renderPersonasView();
+    case "channels": return renderChannelsView();
+    case "meetings": return renderMeetingsView();
+    case "domain":
+    default: return renderStudioBoard(currentDomain);
+  }
+}
+
 window.ceoUI = {
   appendStream, setAgentState, setVoiceStatus, renderMeter,
   hasProject: () => !!currentProject,
@@ -800,6 +3129,12 @@ window.ceoUI = {
     project: currentProject ? { id: currentProject.id, name: currentProject.name, slug: currentProject.slug } : null,
     domain: currentDomain,
     selectedFile: selectedFile ? { path: selectedFile.path, preview: selectedFile.text.slice(0, 4000) } : null,
+    focusedTask: focusedTask ? { ...focusedTask } : null,
+    panel: {
+      title: $("#panel-title") ? $("#panel-title").textContent : "",
+      mode: $("#studio-mode-pill") ? $("#studio-mode-pill").textContent : "",
+      focusTitle: $("#studio-focus-title") ? $("#studio-focus-title").textContent : "",
+    },
   }),
   // Render arbitrary markdown into Panel 1 (used by the voice agent's tools).
   showPanel(title, markdown) {
@@ -848,7 +3183,30 @@ window.ceoUI = {
     await window.ceo.setDomain(currentDomain);
     await refreshFileTree(currentDomain);
     await renderStudioBoard(currentDomain);
+    window.CEOConvai?.syncContext?.(`domain → ${currentDomain}`);
   },
+  // Voice agent render control: drive the left nav and the agent/team panels.
+  openView: (view) => openView(view),
+  async openChannel(key) {
+    await openView("channels");
+    await openChannel(key);
+    return true;
+  },
+  async openMeetingRoom(room) {
+    await openView("channels");
+    await openChannel(`meeting:${room}`);
+    return true;
+  },
+  async openAgentDetail(idOrName) {
+    await loadRegistry();
+    const a = registryState.agents.find((x) => x.id === idOrName || x.name === idOrName);
+    if (!a) return false;
+    studioView = "agents";
+    setActiveNav("agents");
+    await openAgentDetail(a.id);
+    return true;
+  },
+  refreshTeam() { if (studioView === "agents" || studioView === "teams") renderRegistryPanel(); },
 };
 
 // --- wiring ---
@@ -868,6 +3226,7 @@ $("#domain-switcher").addEventListener("change", async (e) => {
   await window.ceo.setDomain(currentDomain);
   await refreshFileTree(currentDomain);
   await renderStudioBoard(currentDomain);
+  window.CEOConvai?.syncContext?.(`domain → ${currentDomain}`);
 });
 $("#file-tree-refresh").addEventListener("click", () => refreshFileTree(currentDomain));
 $("#file-pane-toggle").addEventListener("click", () => setFilePaneOpen(!filePaneOpen));
@@ -878,6 +3237,13 @@ $("#file-tree").addEventListener("click", (e) => {
   if (node) showFile(node.dataset.path);
 });
 panelContent().addEventListener("click", async (e) => {
+  const channel = e.target.closest(".channel-item");
+  if (channel) {
+    const key = channel.dataset.channel;
+    if (key === "ceo") switchToCeoChannel();
+    else await openChannel(key);
+    return;
+  }
   const task = e.target.closest(".studio-task-card");
   if (task) {
     await openTaskInStudio({
@@ -909,9 +3275,74 @@ panelContent().addEventListener("click", async (e) => {
     const context = [
       "Help me define a new project domain.",
       name ? `Domain name: ${name}` : "I have not named it yet.",
-      "Ask me only for missing essentials, then call define_domain with purpose, overarchingGoal, responsibilities, kanbanBoard, relativePath, and coreAgents.",
+      "Ask me only for missing essentials, then call define_domain with purpose, overarchingGoal, boundaries, features, kanbanBoard, relativePath, and coreAgents.",
     ].join("\n");
     await runTurn(context);
+    return;
+  }
+  if (e.target.closest("#domain-architect-start")) {
+    await startDomainArchitectInterview();
+    return;
+  }
+  if (e.target.closest("#domain-architect-answer-save")) {
+    await saveDomainArchitectAnswer();
+    return;
+  }
+  const outlineNode = e.target.closest(".domain-architect-outline");
+  if (outlineNode) {
+    await focusDomainArchitectSection(outlineNode.dataset.field);
+    return;
+  }
+  if (e.target.closest("#domain-architect-apply")) {
+    applyDomainArchitectDraftToForm(domainArchitectSession);
+    return;
+  }
+  if (e.target.closest("#domain-architect-ask")) {
+    await askHermesDomainArchitect();
+    return;
+  }
+  if (e.target.closest("#domain-architect-deep-dive")) {
+    await captureDomainArchitectDeepDive();
+    return;
+  }
+  if (e.target.closest("#domain-architect-confirm")) {
+    await confirmDomainArchitectSession();
+    return;
+  }
+  const domainHandoff = e.target.closest("#domain-create-handoff");
+  if (domainHandoff) {
+    await createDomainHandoffFromView();
+    return;
+  }
+  const domainAgenda = e.target.closest("#domain-propose-agenda");
+  if (domainAgenda) {
+    await triageDomainHandoffFromView();
+    return;
+  }
+  const domainMeeting = e.target.closest("#domain-first-meeting");
+  if (domainMeeting) {
+    await startDomainDogfoodMeeting();
+    return;
+  }
+  const contextAdd = e.target.closest(".domain-context-add");
+  if (contextAdd) {
+    await addDomainContextFromButton(contextAdd);
+    return;
+  }
+  const contextRemove = e.target.closest(".domain-context-remove");
+  if (contextRemove) {
+    await removeDomainContext(contextRemove.dataset.contextKey || "");
+    return;
+  }
+  const contextClear = e.target.closest("#domain-context-clear");
+  if (contextClear) {
+    ceoContextTray = [];
+    await renderStudioBoard(currentDomain);
+    return;
+  }
+  const contextAsk = e.target.closest("#domain-context-ask");
+  if (contextAsk) {
+    await askCeoAboutContext();
     return;
   }
   const taskSave = e.target.closest("#task-new-save");
@@ -975,6 +3406,78 @@ panelContent().addEventListener("click", async (e) => {
     }
   }
 });
+// Studio nav rail: each item opens its workspace panel.
+document.querySelectorAll("#studio-nav .nav-item").forEach((b) => {
+  b.addEventListener("click", () => openView(b.dataset.view));
+});
+// Meetings + Agents/Teams panel controls (delegated, since panels re-render on open).
+panelContent().addEventListener("click", async (e) => {
+  if (e.target.closest("#nav-mtg-toggle-create")) {
+    navMeetingCreateOpen = !navMeetingCreateOpen;
+    await renderMeetingsView();
+    return;
+  }
+  if (e.target.closest("#nav-mtg-start")) { startNavMeeting(); return; }
+  if (e.target.closest("#nav-mtg-schedule")) { scheduleNavMeeting(); return; }
+  const scheduledStart = e.target.closest(".nav-mtg-run-scheduled");
+  if (scheduledStart) { startScheduledMeeting(scheduledStart.dataset.mtgId); return; }
+  const scheduledDelete = e.target.closest(".nav-mtg-delete-scheduled");
+  if (scheduledDelete) { deleteScheduledMeeting(scheduledDelete.dataset.mtgId); return; }
+  const pastRoom = e.target.closest(".nav-mtg-open-room");
+  if (pastRoom) { openPastMeetingRoom(pastRoom.dataset.room); return; }
+  const tmpl = e.target.closest(".nav-mtg-template");
+  if (tmpl) { applyMeetingTemplate(tmpl.dataset.template); return; }
+  const teamCard = e.target.closest(".nav-mtg-team-card");
+  if (teamCard) { selectMeetingTeam(teamCard.dataset.mtgTeam || ""); return; }
+  // Personas view: library + editor
+  if (e.target.closest("#persona-generate")) { openPersonaGenerateModal(); return; }
+  if (e.target.closest("#persona-new")) { openPersonaEditor(null, { content: "" }); return; }
+  if (e.target.closest("#persona-back")) { renderPersonasView(); return; }
+  if (e.target.closest("#pe-save")) { savePersonaFromEditor(); return; }
+  if (e.target.closest("#pe-delete")) { deletePersonaFromEditor(); return; }
+  const personaCard = e.target.closest(".persona-card");
+  if (personaCard) { openPersonaEditor(personaCard.dataset.id); return; }
+  // Agents/Teams panels: roster + team management
+  if (e.target.closest("#agent-new")) { openAgentModal(null); return; }
+  const card = e.target.closest(".team-agent-card");
+  if (card) { openAgentDetail(card.dataset.agent); return; }
+  // Agent detail view buttons
+  if (e.target.closest("#agent-back")) { closeAgentSurface(); renderRegistryPanel(); return; }
+  if (e.target.closest("#agent-edit")) { openAgentModal(selectedAgentId); return; }
+  if (e.target.closest("#agent-mount")) { mountSelectedAgent(); return; }
+  if (e.target.closest("#agent-unmount")) { unmountSelectedAgent(); return; }
+  const remove = e.target.closest(".team-remove");
+  if (remove) {
+    const team = registryState.teams.find((x) => x.name === remove.dataset.team);
+    const members = (team ? team.members : []).filter((m) => m !== remove.dataset.agent);
+    await teamSetMembers(remove.dataset.team, members);
+    return;
+  }
+  const delTeam = e.target.closest(".team-delete");
+  if (delTeam) {
+    if (!confirm(`Delete team "${delTeam.dataset.team}"?`)) return;
+    const r = await window.ceo.registryDeleteTeam(delTeam.dataset.team);
+    if (r && r.ok) { await loadRegistry(); renderRegistryPanel(); }
+    return;
+  }
+  if (e.target.closest("#team-new")) {
+    const name = prompt("New team name:");
+    if (name && name.trim()) await teamSetMembers(name.trim(), []);
+    return;
+  }
+});
+panelContent().addEventListener("change", async (e) => {
+  if (e.target && e.target.id === "nav-mtg-team") {
+    selectMeetingTeam(e.target.value);
+    return;
+  }
+  if (e.target && e.target.classList && e.target.classList.contains("team-add") && e.target.value) {
+    const team = registryState.teams.find((x) => x.name === e.target.dataset.team);
+    const members = [...(team ? team.members : []), e.target.value];
+    await teamSetMembers(e.target.dataset.team, members);
+  }
+});
+
 $("#send").addEventListener("click", send);
 $("#chat-input").addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
 document.addEventListener("keydown", (e) => {
@@ -1095,5 +3598,8 @@ setInterval(async () => {
 
 (async function init() {
   setAgentState("idle");
+  setActiveNav(studioView);
+  wireAgentSurface();
+  renderArchitectureOverview();
   await refreshProjects();
 })();

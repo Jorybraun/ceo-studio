@@ -4,6 +4,61 @@
 
 This folder defines the future thin adapter between the CEO Harness and GBrain (or an equivalent persistent organizational brain).
 
+## CEO Studio Wiring — Current, Live Setup (stock gbrain)
+
+This is how the project actually connects to the brain today. **gbrain itself is
+100% stock and untouched** (`~/Code/AGENT/gbrain`, upstream `garrytan/gbrain`,
+clean tree). Everything below is integration glue in CEO Studio + gbrain's own
+config set via gbrain's own CLI.
+
+### Engine: Postgres + pgvector (not embedded PGLite)
+- **Why**: "every provider connects to the brain" is concurrent, but stock
+  PGLite is **single-writer** (one process holds the data-dir lock). gbrain's
+  stock **Postgres engine** allows true concurrent connections — many agents +
+  the cockpit at once. This is gbrain's own documented path for multi-client use.
+- **DB**: a stock `pgvector/pgvector:pg17` Docker container (`ceo-gbrain-pg`,
+  `localhost:5432`, db/user/pass `gbrain`). Both the cockpit and Devin agents run
+  natively on the host, so a port-mapped Postgres is all they need.
+- **Selected via**: stock `gbrain init --url postgres://gbrain:***@localhost:5432/gbrain`,
+  which writes `engine: postgres` + `database_url` into `~/.gbrain/config.json`.
+  The previous PGLite config is backed up at `~/.gbrain/config.json.pglite.bak`.
+- Note: stock PGLite currently aborts on macOS 26.x (Bun WASM, upstream issue
+  #223) **only when reopening a corrupted data dir** — fresh PGLite dirs work.
+  The Postgres engine sidesteps this entirely and adds concurrency.
+
+### How every provider/agent connects
+- **Launcher**: `runtime/harness/bin/gbrain-mcp` — a committed, secret-free
+  wrapper that mirrors `~/.gbrain/serve-mcp.sh` (puts Bun on PATH, keeps a stray
+  `DATABASE_URL` from overriding the engine, resolves the Google embedding key
+  at runtime) and then `exec gbrain serve` (stock stdio MCP). The engine
+  (Postgres) comes from `~/.gbrain/config.json`.
+- **Devin agents**: `.devin/config.json` (committed, project scope) registers
+  `gbrain` as a stdio MCP server pointing at the launcher. Devin reads
+  `mcpServers` from project config, so **every Devin agent working in this repo
+  auto-connects to the shared brain** — no per-agent setup, no OAuth. Because the
+  engine is Postgres, each agent's own `gbrain serve` connects concurrently.
+- **Cockpit + room loop**: unchanged — they use the gbrain CLI bridge
+  (`main/core/gbrain.js`) / `agents/gbrain_memory.py`, which now hit Postgres via
+  the same `~/.gbrain/config.json`.
+
+### Provisioning when a project opens
+`main/core/gbrain.js` exposes `ensureProjectWiring(projectPath)`, called from
+`openProjectSession` in `main/index.js`. On open it (idempotently,
+non-destructively) ensures `.devin/config.json` has the `gbrain` MCP entry when
+the project ships the launcher, then fire-and-forget probes `gbrain.status()` and
+logs whether the brain is reachable. It does **not** manage the Docker container
+(DB bring-up stays explicit). The gbrain entry is committed, so the wiring is
+"part of the project" and present the moment the repo is opened.
+
+### One-time DB setup (fresh machine)
+```bash
+docker run -d --name ceo-gbrain-pg -e POSTGRES_USER=gbrain -e POSTGRES_PASSWORD=gbrain \
+  -e POSTGRES_DB=gbrain -p 5432:5432 -v ceo_gbrain_pgdata:/var/lib/postgresql/data \
+  --restart unless-stopped pgvector/pgvector:pg17
+docker exec ceo-gbrain-pg psql -U gbrain -d gbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
+gbrain init --url "postgres://gbrain:gbrain@localhost:5432/gbrain"   # stock; writes ~/.gbrain/config.json
+```
+
 ## Current Architecture Decision
 
 1. `harness/brain/` is the v0 memory source layer (active now).
@@ -60,6 +115,31 @@ propose_kanban_items(domain, tasks)
 - Strategic or high-impact writebacks (long-term goals, major roadmap changes, document rewrites) must be reviewable through Kanban or explicit BA approval.
 - GBrain is the **CEO Orchestrator / BA’s long-term memory and synthesis engine**, not a generic vector store or chat memory.
 - The local `harness/brain/` folder + early dream cycles must deliver real value on their own before we invest heavily in the GBrain adapter.
+
+## First Concrete Adapter: Live Room Memory
+
+The first real (narrow) slice of this contract is implemented for live rooms:
+
+- `agents/gbrain_memory.py` — a thin CLI bridge (`GBrainMemory`) that mirrors the
+  cockpit's Node bridge (`main/core/gbrain.js`) and exposes `capture()` (ingest a
+  room message, fire-and-forget) and `recall()` (semantic query, short-timeout).
+- `agents/room_loop.py` uses it to **capture every turn** (human + agent) and
+  **recall relevant context per turn**, injecting it ahead of the agent's prompt.
+- This AUGMENTS, never replaces: the raw `brain/rooms/<room>/chat.log` stays the
+  first-class record (gbrain is never the only copy), and provider sessions still
+  carry tight in-conversation continuity. gbrain adds durable, shared,
+  cross-room/long-term recall.
+- Safety: if the `gbrain` CLI is missing or unhealthy, `available()` is False and
+  all calls become silent no-ops — the room runs exactly as before. Disable
+  explicitly with `bin/agent room --no-gbrain`.
+- Context ceiling: recalled context is bounded twice — `--gbrain-limit` caps the
+  number of results, and `--gbrain-ceiling` (default 4000 chars, 0 = no cap) is a
+  hard character budget on the recalled block injected per turn. The cap trims on
+  a line boundary and appends a truncation marker, so the shared brain can never
+  balloon an agent's context window.
+
+This stays within the rule that gbrain is "the long-term memory and synthesis
+engine": room turns are durable conversational artifacts, not transient scratch.
 
 ## Current State (as of this document)
 

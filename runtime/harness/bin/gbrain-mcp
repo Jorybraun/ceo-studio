@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# gbrain MCP launcher for CEO Studio agents (project-committed, no secrets).
+#
+# Why this exists: every provider/agent that works in this repo should be able
+# to reach the shared project brain. Devin agents pick up MCP servers from
+# `.devin/config.json`, which points at this script. It mirrors the stock
+# ~/.gbrain/serve-mcp.sh: put bun on PATH, keep a stray DATABASE_URL from
+# clobbering gbrain's configured engine, resolve the Google embedding key
+# (needed for vector `query`) from the environment, then exec the STOCK
+# `gbrain serve` (stdio MCP). The engine itself (PGLite vs Postgres) is chosen
+# by gbrain's own ~/.gbrain/config.json — CEO Studio standardizes on the
+# Postgres engine so many agents can connect concurrently (PGLite is
+# single-writer).
+set -uo pipefail
+
+export PATH="$HOME/.bun/bin:$PATH"
+
+# gbrain reads its database_url from config.json. Don't let a project .env's
+# DATABASE_URL (e.g. a sqlite `file:` url) override the configured engine.
+unset DATABASE_URL || true
+
+# Embedding/expansion key for vector search. Best-effort: gbrain still serves
+# keyword search / get / put without it. Override the source file via
+# CEO_GBRAIN_ENV. (No secret is committed — the key is read at runtime.)
+if [ -z "${GOOGLE_GENERATIVE_AI_API_KEY:-}" ]; then
+  for f in "${CEO_GBRAIN_ENV:-}" "$HOME/Code/PIPE/PIPE-OS/.env" "$HOME/.gbrain/.env"; do
+    [ -n "$f" ] && [ -f "$f" ] || continue
+    v=$(grep -E '^(GOOGLE_GENERATIVE_AI_API_KEY|VERTEX_API_KEY)=' "$f" 2>/dev/null | head -1 | cut -d= -f2- | tr -d "\"' " || true)
+    if [ -n "$v" ]; then export GOOGLE_GENERATIVE_AI_API_KEY="$v"; break; fi
+  done
+fi
+
+exec gbrain serve

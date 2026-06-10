@@ -24,10 +24,10 @@
   let selectedAgentId = null;
 
   // Preferred left-to-right column order; unknown statuses are appended.
-  const COL_ORDER = ["planning", "triage", "todo", "ready", "running", "blocked", "scheduled", "review", "done"];
+  const COL_ORDER = ["planning", "triage", "bug", "todo", "ready", "running", "blocked", "scheduled", "review", "done"];
   const COL_ACCENT = {
     running: "border-emerald-500/40", ready: "border-sky-500/40",
-    blocked: "border-red-500/40", todo: "border-neutral-600",
+    blocked: "border-red-500/40", bug: "border-rose-500/40", todo: "border-neutral-600",
     done: "border-neutral-700", review: "border-amber-500/40",
     scheduled: "border-violet-500/40", triage: "border-pink-500/40",
     planning: "border-cyan-500/40",
@@ -35,7 +35,7 @@
   const DOT = {
     running: "bg-emerald-500", ready: "bg-sky-500", blocked: "bg-red-500",
     done: "bg-neutral-500", review: "bg-amber-500", scheduled: "bg-violet-500",
-    todo: "bg-neutral-500", triage: "bg-pink-500", planning: "bg-cyan-500",
+    todo: "bg-neutral-500", triage: "bg-pink-500", bug: "bg-rose-500", planning: "bg-cyan-500",
   };
 
   function esc(s) {
@@ -74,13 +74,13 @@
     
     // Get current domain from the global app state if available
     const domainSwitcher = document.getElementById("domain-switcher");
-    const currentDomain = domainSwitcher ? domainSwitcher.value : "All";
+    const currentDomain = "ceo-studio"; // fixed to the application only // fixed to CEO Studio only
     
     let res = {};
     try { res = await ceo.ceoBoardsForDomain(currentDomain); } catch { res = {}; }
     const boards = (res && res.boards) || [];
     if (!board || !boards.some((b) => b.slug === board)) {
-      board = (boards[0] && boards[0].slug) || (res && res.current) || null;
+      board = "ceo-studio";
     }
     const sel = $("dash-board");
     if (sel) {
@@ -167,7 +167,8 @@
         </div>
         <span class="rounded-full border border-neutral-700 bg-neutral-900/80 px-2 py-0.5 text-[10px] uppercase tracking-wider text-neutral-400">${esc(agent.type)}</span>
         <span class="rounded-full border ${terminal.alive ? "border-emerald-500/40 text-emerald-300" : "border-amber-500/30 text-amber-300"} bg-neutral-950/70 px-2 py-0.5 text-[10px] uppercase tracking-wider">${alive}</span>
-        <button id="agent-terminal-refresh" class="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-800">Refresh terminal</button>
+        ${terminal.available && !terminal.alive ? `<button id="agent-terminal-mount" class="rounded-md border border-cyan-700/60 bg-cyan-950/30 px-2 py-1 text-xs text-cyan-200 hover:bg-cyan-900/40">Mount</button>` : ""}
+        <button id="agent-terminal-refresh" class="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-800">Refresh</button>
       </div>
       <div class="grid grid-cols-1 gap-3 p-4 lg:grid-cols-[260px_minmax(0,1fr)]">
         <div class="space-y-2 text-xs">
@@ -202,8 +203,17 @@
   async function refreshSelectedAgentTerminal() {
     const output = $("agent-terminal-output");
     if (!output || !selectedAgentId || !ceo.agentTerminalSnapshot) return;
-    const r = await ceo.agentTerminalSnapshot(selectedAgentId);
-    output.textContent = r && r.ok ? (r.output || "(empty)") : `Terminal unavailable: ${r ? r.reason : "unknown"}`;
+    output.textContent = "Loading terminal...";
+    try {
+      const r = await ceo.agentTerminalSnapshot(selectedAgentId);
+      if (r && r.ok) {
+        output.textContent = r.output || "(empty)";
+      } else {
+        output.textContent = `Terminal unavailable: ${r ? r.reason : "unknown"}\n\nThis agent may not have a tmux session mounted yet.`;
+      }
+    } catch (e) {
+      output.textContent = `Error loading terminal: ${String(e)}`;
+    }
     output.scrollTop = output.scrollHeight;
   }
 
@@ -381,10 +391,10 @@
     }
     
     // Show/hide sections
-    $("section-kanban").classList.add("hidden");
-    $("section-agents").classList.add("hidden");
-    $("section-config").classList.add("hidden");
-    $(`section-${tabName}`).classList.remove("hidden");
+    ["section-kanban", "section-agents", "section-config", "section-meetings"].forEach((s) => {
+      const el = $(s); if (el) el.classList.add("hidden");
+    });
+    const sec = $(`section-${tabName}`); if (sec) sec.classList.remove("hidden");
     
     // Show/hide control bars
     $("kanban-controls").classList.add("hidden");
@@ -394,6 +404,108 @@
     
     // Load data for the tab
     if (tabName === "agents") loadAgents();
+    if (tabName === "meetings") loadMeetings(); else stopMeetingPoll();
+  }
+
+  // --- Meetings tab ---
+  let meetingOpts = null;       // {agents, teams, personas}
+  let meetingPollTimer = null;
+  let activeMeetingRoom = null;
+
+  function stopMeetingPoll() {
+    if (meetingPollTimer) { clearInterval(meetingPollTimer); meetingPollTimer = null; }
+  }
+
+  async function loadMeetings() {
+    if (!ceo.meetingOptions) return;
+    if (!meetingOpts) {
+      try { meetingOpts = await ceo.meetingOptions(); } catch { meetingOpts = { agents: [], teams: [] }; }
+    }
+    const teamSel = $("mtg-team");
+    if (teamSel) {
+      teamSel.innerHTML = `<option value="">— none (pick members) —</option>` +
+        (meetingOpts.teams || []).map((t) => `<option value="${esc(t.name)}">${esc(t.name)} (${(t.members || []).length})</option>`).join("");
+    }
+    renderMeetingMembers();
+  }
+
+  function renderMeetingMembers(selectedIds) {
+    const host = $("mtg-members");
+    if (!host) return;
+    const agents = (meetingOpts && meetingOpts.agents) || [];
+    if (!agents.length) {
+      host.innerHTML = `<div class="text-[11px] text-neutral-600">No agents in registry (agents.json).</div>`;
+      return;
+    }
+    const sel = new Set(selectedIds || []);
+    host.innerHTML = agents.map((a) => `
+      <label class="flex items-center gap-2 text-xs text-neutral-300">
+        <input type="checkbox" class="mtg-member accent-cyan-500" value="${esc(a.id)}" ${sel.has(a.id) ? "checked" : ""} />
+        <span class="font-medium text-neutral-200">${esc(a.id)}</span>
+        <span class="text-[10px] text-neutral-500">${esc(a.provider || "vertex")}${a.persona ? " · " + esc(a.persona) : ""}</span>
+      </label>`).join("");
+  }
+
+  function selectedMemberIds() {
+    return Array.from(document.querySelectorAll(".mtg-member:checked")).map((c) => c.value);
+  }
+
+  async function startMeeting() {
+    const msg = $("mtg-msg");
+    const room = ($("mtg-room") && $("mtg-room").value || "").trim();
+    const agenda = ($("mtg-agenda") && $("mtg-agenda").value || "").trim();
+    const criteria = ($("mtg-criteria") && $("mtg-criteria").value || "").trim();
+    const team = ($("mtg-team") && $("mtg-team").value) || "";
+    const members = selectedMemberIds().join(",");
+    const allowPaid = !!($("mtg-paid") && $("mtg-paid").checked);
+    if (!agenda) { if (msg) msg.textContent = "agenda required"; return; }
+    if (!team && !members) { if (msg) msg.textContent = "pick a team or members"; return; }
+    if (msg) msg.textContent = "starting…";
+    const info = { room: room || `meeting-${Date.now()}`, agenda, criteria, allowPaid };
+    if (team) info.team = team; else info.members = members;
+    let r = {};
+    try { r = await ceo.meetingStart(info); } catch (e) { r = { ok: false, reason: String(e) }; }
+    if (!r || !r.ok) { if (msg) msg.textContent = `failed: ${r ? r.reason : "unknown"}`; return; }
+    if (msg) msg.textContent = "running — watch the transcript →";
+    activeMeetingRoom = r.room;
+    const lbl = $("mtg-room-label"); if (lbl) lbl.textContent = r.room;
+    pollMeetingRoom();
+    stopMeetingPoll();
+    meetingPollTimer = setInterval(pollMeetingRoom, 2500);
+  }
+
+  async function pollMeetingRoom() {
+    if (!activeMeetingRoom || !ceo.meetingRoom) return;
+    let r = {};
+    try { r = await ceo.meetingRoom(activeMeetingRoom); } catch { return; }
+    if (!r || !r.ok) return;
+    const host = $("mtg-transcript");
+    if (host) {
+      const feed = r.feed || [];
+      host.innerHTML = feed.length ? feed.map((e) => {
+        const isFac = /facilitator|orchestrator/i.test(e.speaker);
+        return `<div class="rounded-lg border ${isFac ? "border-cyan-500/30 bg-cyan-950/10" : "border-neutral-800 bg-neutral-900/50"} p-2.5">
+          <div class="text-[11px] font-medium ${isFac ? "text-cyan-300" : "text-neutral-300"}">${esc(e.speaker)}</div>
+          <div class="mt-1 whitespace-pre-wrap text-[12px] text-neutral-300">${esc(e.body)}</div>
+        </div>`;
+      }).join("") : `<div class="text-neutral-600">Waiting for the meeting to begin…</div>`;
+    }
+    const state = $("mtg-state");
+    if (state) {
+      state.innerHTML = r.running
+        ? `<span class="text-amber-300">● running</span>`
+        : `<span class="text-emerald-400">✓ complete</span>`;
+    }
+    const reqWrap = $("mtg-requirements"), reqBody = $("mtg-requirements-body");
+    if (reqWrap && reqBody) {
+      if (r.requirements) {
+        reqWrap.classList.remove("hidden");
+        reqBody.innerHTML = window.marked ? window.marked.parse(r.requirements) : esc(r.requirements);
+      } else {
+        reqWrap.classList.add("hidden");
+      }
+    }
+    if (!r.running) stopMeetingPoll();
   }
 
   // --- Renderers ---
@@ -403,7 +515,7 @@
     if (!data || !data.ok) { host.innerHTML = `<div class="text-neutral-600 text-sm p-4">No board data.</div>`; return; }
     const cols = data.columns || {};
     const present = Object.keys(cols);
-    const ordered = COL_ORDER.filter((c) => present.includes(c)).concat(present.filter((c) => !COL_ORDER.includes(c)));
+    const ordered = COL_ORDER.concat(present.filter((c) => !COL_ORDER.includes(c)));
     if (!ordered.length) { host.innerHTML = `<div class="text-neutral-600 text-sm p-4">Board is empty.</div>`; return; }
     host.innerHTML = ordered.map((status) => {
       const tasks = cols[status] || [];
@@ -746,11 +858,22 @@
     const tabKanban = $("tab-kanban");
     const tabAgents = $("tab-agents");
     const tabConfig = $("tab-config");
+    const tabMeetings = $("tab-meetings");
     if (tabKanban) tabKanban.addEventListener("click", () => switchTab("kanban"));
     if (tabAgents) tabAgents.addEventListener("click", () => switchTab("agents"));
+    if (tabMeetings) tabMeetings.addEventListener("click", () => switchTab("meetings"));
     if (tabConfig) tabConfig.addEventListener("click", () => {
       switchTab("config");
       openConfig();
+    });
+
+    // Meetings wiring
+    const mtgStart = $("mtg-start");
+    if (mtgStart) mtgStart.addEventListener("click", startMeeting);
+    const mtgTeam = $("mtg-team");
+    if (mtgTeam) mtgTeam.addEventListener("change", (e) => {
+      const t = (meetingOpts && meetingOpts.teams || []).find((x) => x.name === e.target.value);
+      renderMeetingMembers(t ? t.members : []);
     });
     
     // Agent filter
@@ -779,7 +902,7 @@
     statusTimer = setInterval(refreshStatus, 10000);
 
     // Task click handler - select it for planning in the right rail.
-    document.addEventListener("click", (e) => {
+    document.addEventListener("click", async (e) => {
       const taskCard = e.target.closest(".task-card");
       if (taskCard) {
         selectTask({
@@ -816,9 +939,36 @@
         }
       }
 
+      const agentInspect = e.target.closest(".agent-inspect");
+      if (agentInspect) {
+        selectAgent(agentInspect.dataset.agentId);
+        return;
+      }
+
       const agentCard = e.target.closest(".agent-card");
       if (agentCard) {
         selectAgent(agentCard.dataset.agentId);
+      }
+
+      const terminalMount = e.target.closest("#agent-terminal-mount");
+      if (terminalMount) {
+        // Try to mount the agent's tmux session
+        if (window.ceo.registryMount && selectedAgentId) {
+          const msg = document.getElementById("agent-persona-msg");
+          if (msg) msg.textContent = "mounting...";
+          try {
+            const r = await window.ceo.registryMount(selectedAgentId);
+            if (r && r.ok) {
+              if (msg) msg.textContent = "mounted";
+              await loadAgents();
+            } else {
+              if (msg) msg.textContent = `mount failed: ${r ? r.reason : "unknown"}`;
+            }
+          } catch (e) {
+            if (msg) msg.textContent = `mount error: ${String(e)}`;
+          }
+        }
+        return;
       }
 
       const terminalRefresh = e.target.closest("#agent-terminal-refresh");

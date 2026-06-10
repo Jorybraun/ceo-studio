@@ -241,7 +241,6 @@ now self-manages it:
 | Command                | Purpose |
 |------------------------|---------|
 | `launch-agent`         | Lower-level way to start a persona agent into a herder session |
-| `persona-responder`    | Give a running agent a brain so it can actually reply using its persona |
 | `harem-orchestrator`   | Dedicated long-running process for the orchestrator |
 
 #### Utilities
@@ -250,6 +249,89 @@ now self-manages it:
 |-------------------|---------|
 | `list-personas`   | See everything available in your `personas/` folder |
 | `list-teams`      | See defined teams (used with `--team` / `--stage` delegation) |
+
+#### A2A Agents & Meetings (`bin/agent`)
+
+`bin/agent` is the generic, provider-backed adapter. Beyond `dispatch` / `tell` /
+`sessions` / `providers`, it speaks the real **Agent2Agent (A2A) protocol** so any
+CLI agent can be wrapped and orchestrated uniformly:
+
+| Subcommand        | Purpose |
+|-------------------|---------|
+| `serve`           | Run a real A2A HTTP server that wraps ONE agent (any provider) with a discoverable Agent Card. The agent's "brain" is just its provider CLI behind the standard protocol. |
+| `meeting`         | Stand up invited members as A2A servers and run an **agenda-driven, relevance-gated** meeting. Members contribute or reply `PASS`; the facilitator synthesizes requirements into the room + `requirements.md`. One-shot: ask once, synthesize, exit. |
+| `room`            | Run a **persistent live room loop**: watch the room's `chat.log` for new human messages and route them to members so they reply in real time, until stopped. `@<agent>` addresses one; a whole-team message is relevance-gated (reply or `PASS`); an agent reply that `@<teammate>` mentions triggers bounded agent-to-agent follow-up. **Memory:** each turn is captured into **gbrain** and relevant prior context is recalled per turn (augmenting provider-session continuity); gbrain auto-skips if unhealthy (`--no-gbrain` to disable). Recall is bounded by `--gbrain-limit` (result count) and a `--gbrain-ceiling` context cap (max chars injected per turn, default 4000). This is the ongoing complement to one-shot `meeting`. |
+
+```bash
+# Serve one agent as an A2A endpoint (foreground)
+./bin/agent serve --agent architect --provider devin --persona architect --room discovery
+
+# Run a requirements meeting (free dry run with echo; real brains with devin/grok)
+./bin/agent meeting --room discovery \
+  --members "ba:echo:ba,arch:echo:architect,pm:echo:pm" \
+  --agenda "Define requirements for X" \
+  --criteria "What a good outcome looks like"
+
+# ...or pull members from the declarative registry (agents.json) by id or team:
+./bin/agent meeting --room discovery --members "ba,architect,pm" --agenda "..."
+./bin/agent meeting --room discovery --team discovery-planning --agenda "..."
+
+# Run a PERSISTENT live room (agents reply to whatever is posted, until killed).
+# Post into it from another shell with `domain-room post`, or from the cockpit.
+./bin/agent room --room discovery --team discovery-planning
+./bin/agent room --room discovery --members "ba,architect,pm" --max-followups 1
+```
+
+#### Agent Roster Dogfood
+
+Use the roster dogfood runner whenever agent registry, provider, model, room, or
+meeting behavior changes. It exercises each configured agent through the same
+`agent_adapter` path rooms and meetings use, then runs a resume turn so provider
+session bugs are visible.
+
+```bash
+# Spend-safe: tests non-paid providers and reports paid agents as skipped.
+npm run qa:agents
+
+# Full live-provider pass. This spends provider turns and raises the hourly cap
+# for this explicit test process so the whole roster can be checked.
+npm run qa:agents -- --allow-paid
+
+# Target a single failing agent while iterating.
+npm run qa:agents -- --agent codex-factory-strategist
+```
+
+Reports are written to `dogfood-output/agent-roster/` with immutable timestamped
+files plus `report.md` as the latest pointer. The room transcript is written
+under `runtime/harness/brain/rooms/<room>/chat.log`.
+
+**Declarative agent registry (`agents/agents.json`).** Adding an agent is config,
+not code: declare `{id, provider, persona, model, capabilities}` and it's usable as
+a meeting member by bare id (inline `id:provider:persona` overrides). Named `teams`
+expand via `--team`. Projects override the shipped defaults via `$CEO_AGENTS_CONFIG`
+or a `<workspace>/agents.json` (env file wins). Providers can be mixed freely
+(echo/devin/grok).
+
+Notes:
+- Every A2A exchange is still mirrored into the human-visible **domain room** (the
+  `chat.log` bus) via the existing `agent_adapter`, and paid providers stay behind
+  the cost guardrail (`CEO_ALLOW_PAID=1` to allow non-interactive paid turns).
+- Personas resolve per-project via `agents/personas.py` (see `$CEO_PERSONAS_DIR`,
+  `<workspace>/personas`, then the shipped `personas/`).
+- **Dependency:** `serve`/`meeting` need `a2a-sdk` in `runtime/harness/.venv`
+  (`python3 -m venv .venv && .venv/bin/pip install 'a2a-sdk[http-server]' uvicorn httpx`).
+  `bin/agent` auto-re-execs into that venv when needed. `room` drives members
+  through the same `agent_adapter` substrate the A2A executor wraps, so it runs
+  without the a2a-sdk (no HTTP server to stand up).
+- **Cockpit integration:** opening a team/DM/board channel in CEO Studio starts a
+  `room` loop for that channel (`meetings.startRoomLoop` → IPC
+  `meetings:room_loop_start`), so typing in the channel composer is a real A2A
+  conversation; closing it (or quitting the app) stops the loop. The cockpit is a
+  Slack-like switcher: the **CEO** is the default channel, and each Kanban board
+  has a **team-log channel** (`meetings.boardRoom(slug)`) where the autonomy
+  runner posts work milestones (▶ started / ✓ finished / ✅ done / ⛔ blocked)
+  next to the chat — so a channel is the team's shared work log. Messages to a
+  room also carry the same referenced context the CEO chat injects.
 
 ### Tool Discipline
 
@@ -286,6 +368,5 @@ Run `./bin/list-personas` to see everything you currently have.
 - `domain-room` family — raw room operations
 - `herder-steer` — direct injection into agent panes
 - `launch-agent` — explicit agent session creation
-- `persona-responder` — give an agent a running brain
 
 See the individual script `--help` for details.

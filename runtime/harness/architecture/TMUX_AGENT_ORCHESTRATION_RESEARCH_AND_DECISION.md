@@ -293,6 +293,14 @@ A herder-native orchestration loop is done only when this can be demonstrated fr
 12. Restart or re-run the manager and prove it does not duplicate the activation.
 13. Record command output, event-log slice, room-log slice, and browser/dashboard validation evidence in the Kanban task or evidence artifact.
 
+## Implementation notes (CEO Studio)
+
+These keep the decision above true as the cockpit evolved:
+
+- **Registry is canonical; tmux is the adapter.** `bin/launch-agent` resolves every launch from the registry (`agents/registry.py`, which merges built-in `AGENTS` with declarative `agents/agents.json`). Mounting is idempotent (existing sessions are reused). The cockpit's `main/core/mount.js` always re-resolves the plan from the registry rather than trusting tmux.
+- **Persona-aware interactive sessions.** A mounted agent's interactive "main" window (the one a human types into) is seeded with its persona brief as an always-on context file (`AGENTS.md`/`CLAUDE.md`) written into the agent's per-(room,agent) workdir, and the external CLI is launched in that workdir. So the interactive session is in-character from message one, not only the watcher sidecar. Helpers: `agents/personas.py` `seed_agent_context()`; used by `bin/launch-agent`. This is a TTY-adapter detail and does not change the source of truth (registry + room + Kanban).
+- **The conversational CEO is a registry agent.** The CEO is the `ceo` entry in `agents.json` (`provider: hermes`, `launch_mode: hermes_profile`, empty `profile` = default Hermes/OAuth, `tmux_session: pipe-ceo`, `room: discovery`). It is mountable + viewable like any other agent. The durable substrate is the persisted Hermes session id in `<workspace>/brain/rooms/discovery/agents/ceo.json`, shared by the cockpit chat relay (`main/core/hermes.js` `askCeo()`) and the harness `agent_adapter`. tmux remains only the human-viewable terminal for that session, consistent with this decision.
+
 ## Related harness docs
 
 - `HERDER_MIGRATION_PLAN.md`

@@ -84,6 +84,35 @@
 
   <!-- Two agent-controlled panels -->
   <main class="flex-1 flex min-h-0 px-3 pb-3 gap-3">
+    <!-- Studio nav rail: opens the workspace panels (Domain, Board, Tasks, Agents, Teams, Channels, Meetings) -->
+    <nav id="studio-nav" class="w-[176px] shrink-0 overflow-auto rounded-xl border border-neutral-800 bg-neutral-900/40 p-2 flex flex-col gap-1">
+      <div class="px-2 pt-1 pb-1 text-[11px] uppercase tracking-wider text-neutral-500">Workspace</div>
+      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="domain">
+        <span class="text-neutral-500">◆</span><span>Domain</span>
+      </button>
+      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="board">
+        <span class="text-neutral-500">▤</span><span>Board</span>
+      </button>
+      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="tasks">
+        <span class="text-neutral-500">☑</span><span>Tasks</span>
+      </button>
+      <div class="mt-2 px-2 pt-1 pb-1 text-[11px] uppercase tracking-wider text-neutral-500">Team</div>
+      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="agents">
+        <span class="text-neutral-500">⦿</span><span>Agents</span>
+      </button>
+      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="teams">
+        <span class="text-neutral-500">▦</span><span>Teams</span>
+      </button>
+      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="personas">
+        <span class="text-neutral-500">✦</span><span>Personas</span>
+      </button>
+      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="channels">
+        <span class="text-neutral-500">#</span><span>Channels</span>
+      </button>
+      <button class="nav-item w-full text-left rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800/70 transition flex items-center gap-2" data-view="meetings">
+        <span class="text-neutral-500">⧉</span><span>Meetings</span>
+      </button>
+    </nav>
     <section id="panel1"
              class="flex-1 min-w-0 overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900/40 flex prose-invert">
       <aside id="file-pane" class="hidden w-[280px] shrink-0 border-r border-neutral-800 bg-neutral-950/30 flex flex-col min-h-0">
@@ -112,7 +141,7 @@
       </div>
     </section>
     <section id="panel2"
-             class="flex-1 overflow-auto p-4 rounded-xl border border-neutral-800 bg-neutral-900/40 flex flex-col">
+             class="relative flex-1 overflow-auto p-4 rounded-xl border border-neutral-800 bg-neutral-900/40 flex flex-col">
       <div id="panel2-stream" class="flex-1 overflow-auto text-sm whitespace-pre-wrap leading-relaxed"></div>
       <div class="mt-3 flex gap-2 items-center">
         <input id="chat-input"
@@ -122,6 +151,73 @@
                 class="bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 rounded-lg px-3 py-2 text-sm transition disabled:opacity-40 disabled:cursor-not-allowed">🎤</button>
         <button id="send"
                 class="bg-red-600 hover:bg-red-500 text-white rounded-lg px-4 py-2 text-sm font-medium transition">Send</button>
+      </div>
+
+      <!-- Agent live surface: shown when an agent is selected from the Agents panel.
+           Terminal tab = live tmux capture-pane; Logs tab = the agent's room transcript. -->
+      <div id="agent-surface" class="hidden absolute inset-0 z-20 rounded-xl bg-neutral-950/97 backdrop-blur flex flex-col">
+        <div class="flex items-center gap-2 px-3 py-2 border-b border-neutral-800">
+          <span id="as-dot" class="w-2 h-2 rounded-full bg-neutral-600"></span>
+          <span id="as-name" class="text-sm font-medium text-neutral-100 truncate">Agent</span>
+          <span id="as-sub" class="text-[11px] text-neutral-500 truncate"></span>
+          <div class="ml-auto flex items-center gap-1 bg-neutral-800/50 rounded-md p-0.5">
+            <button id="as-tab-terminal" class="as-tab px-2.5 py-1 text-xs font-medium rounded bg-neutral-700 text-neutral-100">Terminal</button>
+            <button id="as-tab-logs" class="as-tab px-2.5 py-1 text-xs font-medium rounded text-neutral-400 hover:text-neutral-200">Logs</button>
+          </div>
+          <button id="as-close" title="Back to CEO chat" class="ml-1 text-xs bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 rounded px-2 py-1 transition">✕</button>
+        </div>
+        <pre id="as-output" class="flex-1 overflow-auto p-3 m-0 font-mono text-[11px] leading-relaxed text-emerald-100/85 whitespace-pre-wrap"></pre>
+        <div id="as-input-row" class="p-2 border-t border-neutral-800 flex gap-2">
+          <div class="flex items-center gap-2">
+            <button id="as-mode-room" class="text-[10px] bg-cyan-600/80 text-white rounded px-2 py-1">Room</button>
+            <button id="as-mode-terminal" class="text-[10px] bg-neutral-800 text-neutral-400 rounded px-2 py-1 hover:text-neutral-200">Terminal</button>
+          </div>
+          <input id="as-input"
+                 class="flex-1 bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-xs text-neutral-100 placeholder-neutral-600 focus:outline-none focus:ring-1 focus:ring-cyan-500/60"
+                 placeholder="Message this agent in its room (as CEO)…" />
+          <button id="as-send" class="bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg px-3 py-2 text-xs font-medium transition">Send</button>
+        </div>
+      </div>
+
+      <!-- Channel surface: a live TEAM ROOM. Open a channel from the Channels panel
+           to discuss a brief here — the team posts updates, asks each other
+           questions, and the CEO can drop in to direct them. -->
+      <div id="channel-surface" class="hidden absolute inset-0 z-20 rounded-xl bg-neutral-950/97 backdrop-blur flex flex-col">
+        <div class="flex items-center gap-2 px-3 py-2 border-b border-neutral-800">
+          <span class="text-neutral-500">#</span>
+          <span id="chan-name" class="text-sm font-medium text-neutral-100 truncate">channel</span>
+          <span id="chan-state" class="text-[10px] text-neutral-500"></span>
+          <button id="chan-add" title="Add agents to this channel"
+                  class="ml-auto text-[11px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 rounded px-2 py-1 transition">+ Agent</button>
+          <button id="chan-close" title="Back to CEO chat"
+                  class="text-xs bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 rounded px-2 py-1 transition">✕</button>
+        </div>
+        <div id="chan-members" class="flex flex-wrap items-center gap-1.5 px-3 py-2 border-b border-neutral-800/70 bg-neutral-950/40"></div>
+        <div id="chan-feed" class="flex-1 overflow-auto p-3 space-y-3 text-sm"></div>
+
+        <!-- Brief working session: kick off an A2A discussion about a brief -->
+        <div class="px-3 py-2 border-t border-neutral-800 bg-neutral-950/40">
+          <textarea id="chan-brief" rows="2"
+                    class="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-xs text-neutral-100 placeholder-neutral-600 focus:outline-none focus:ring-1 focus:ring-cyan-500/60"
+                    placeholder="Paste or describe a brief for the team to discuss…"></textarea>
+          <div class="mt-2 flex items-center gap-2">
+            <label class="flex items-center gap-1.5 text-[11px] text-neutral-400 select-none">
+              <input id="chan-ceo" type="checkbox" class="accent-red-500" /> CEO in room
+            </label>
+            <span class="text-[10px] text-neutral-600">Real agents (live models)</span>
+            <button id="chan-discuss" class="ml-auto bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg px-3 py-1.5 text-xs font-medium transition">Discuss brief →</button>
+          </div>
+        </div>
+
+        <!-- Human / CEO composer: post directly into the live room -->
+        <div class="p-2 border-t border-neutral-800 flex gap-2 items-center">
+          <select id="chan-speaker" title="Speak as" class="bg-neutral-900 border border-neutral-700 rounded-lg px-2 py-2 text-[11px] text-neutral-200 focus:outline-none focus:ring-1 focus:ring-cyan-500/60"></select>
+          <select id="chan-to" title="Address" class="bg-neutral-900 border border-neutral-700 rounded-lg px-2 py-2 text-[11px] text-neutral-200 focus:outline-none focus:ring-1 focus:ring-cyan-500/60"></select>
+          <input id="chan-input"
+                 class="flex-1 bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-xs text-neutral-100 placeholder-neutral-600 focus:outline-none focus:ring-1 focus:ring-cyan-500/60"
+                 placeholder="Message the room…" />
+          <button id="chan-send" class="bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg px-3 py-2 text-xs font-medium transition">Send</button>
+        </div>
       </div>
     </section>
   </main>
@@ -135,6 +231,7 @@
       <div class="flex items-center gap-1 bg-neutral-800/50 rounded-md p-0.5">
         <button id="tab-kanban" class="tab-btn px-3 py-1 text-xs font-medium rounded-md transition bg-neutral-700 text-neutral-100">Kanban</button>
         <button id="tab-agents" class="tab-btn px-3 py-1 text-xs font-medium rounded-md transition text-neutral-400 hover:text-neutral-200">Agents</button>
+        <button id="tab-meetings" class="tab-btn px-3 py-1 text-xs font-medium rounded-md transition text-neutral-400 hover:text-neutral-200">Meetings</button>
         <button id="tab-config" class="tab-btn px-3 py-1 text-xs font-medium rounded-md transition text-neutral-400 hover:text-neutral-200">Config</button>
       </div>
       
@@ -245,6 +342,53 @@
         <div class="px-3 py-1.5 text-[11px] uppercase tracking-wider text-neutral-500 border-b border-neutral-800/60">Configuration</div>
         <div class="flex-1 flex items-center justify-center">
           <div class="text-neutral-600 text-sm">Config panel moved to overlay (click Config in header)</div>
+        </div>
+      </div>
+
+      <!-- Meetings section: run an agenda-driven A2A meeting of agent members -->
+      <div id="section-meetings" class="hidden flex-1 min-w-0 flex">
+        <!-- Left: setup form -->
+        <div class="w-[360px] shrink-0 border-r border-neutral-800/60 flex flex-col overflow-auto p-4 space-y-3">
+          <div class="text-[11px] uppercase tracking-wider text-neutral-500">New meeting</div>
+          <label class="block text-xs text-neutral-400">Room name
+            <input id="mtg-room" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-cyan-500/50" placeholder="requirements-sync" />
+          </label>
+          <label class="block text-xs text-neutral-400">Agenda
+            <textarea id="mtg-agenda" rows="3" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-cyan-500/50" placeholder="What should the team work out?"></textarea>
+          </label>
+          <label class="block text-xs text-neutral-400">Good outcome (criteria)
+            <textarea id="mtg-criteria" rows="2" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-cyan-500/50" placeholder="What a good result looks like (optional)"></textarea>
+          </label>
+          <label class="block text-xs text-neutral-400">Team (optional)
+            <select id="mtg-team" class="mt-1 w-full bg-neutral-800/70 border border-neutral-700 rounded-md px-2 py-1.5 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-cyan-500/50"></select>
+          </label>
+          <div class="text-xs text-neutral-400">Members
+            <div id="mtg-members" class="mt-1 space-y-1 max-h-[220px] overflow-auto rounded-md border border-neutral-800 bg-neutral-950/40 p-2"></div>
+            <div class="mt-1 text-[10px] text-neutral-600">Pick a team to auto-select, or check members individually.</div>
+          </div>
+          <label class="flex items-center gap-2 text-xs text-amber-300/90">
+            <input id="mtg-paid" type="checkbox" class="accent-amber-500" />
+            Use real agents (devin/grok) — costs credits
+          </label>
+          <div class="flex items-center gap-2">
+            <button id="mtg-start" class="text-sm bg-cyan-600 hover:bg-cyan-500 text-white rounded-md px-4 py-1.5 font-medium transition">Start meeting</button>
+            <span id="mtg-msg" class="text-xs text-neutral-500"></span>
+          </div>
+        </div>
+        <!-- Right: live transcript + requirements -->
+        <div class="flex-1 min-w-0 flex flex-col">
+          <div class="px-3 py-1.5 flex items-center gap-2 text-[11px] uppercase tracking-wider text-neutral-500 border-b border-neutral-800/60">
+            <span>Meeting Room</span>
+            <span id="mtg-room-label" class="font-mono text-neutral-400 normal-case"></span>
+            <span id="mtg-state" class="ml-auto normal-case"></span>
+          </div>
+          <div id="mtg-transcript" class="flex-1 overflow-auto p-4 space-y-2 text-sm">
+            <div class="text-neutral-600">No meeting yet. Set an agenda and members, then Start.</div>
+          </div>
+          <div id="mtg-requirements" class="hidden border-t border-neutral-800/60 max-h-[40%] overflow-auto p-4">
+            <div class="text-[11px] uppercase tracking-wider text-emerald-400/80 mb-2">Synthesized requirements</div>
+            <div id="mtg-requirements-body" class="prose prose-invert prose-sm max-w-none text-neutral-200"></div>
+          </div>
         </div>
       </div>
     </div>

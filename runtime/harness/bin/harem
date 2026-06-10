@@ -79,7 +79,7 @@ def launch_agent(agent_spec, persona, tag, domain, room, headless, open_chat):
     subprocess.run(cmd)
 
     if not headless:
-        resp_cmd = [str(HARNESS_ROOT / "bin" / "persona-responder"), name, "--room", room]
+        # persona-responder domain removed (self-trigger loop fixed + cleanup)
         subprocess.Popen(resp_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print(f"[Harem] Responder started for {name}")
 
