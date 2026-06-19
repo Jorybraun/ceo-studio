@@ -534,13 +534,13 @@
         host.innerHTML = `<div class="text-red-400/80 text-sm">Could not load swarm status: ${r ? r.reason : "unknown"}</div>`;
         return;
       }
-      renderSwarm(r.swarm);
+      renderAutonomySwarm(r.swarm);
     } catch (e) {
       host.innerHTML = `<div class="text-red-400/80 text-sm">Error loading swarm: ${esc(e.message)}</div>`;
     }
   }
 
-  function renderSwarm(swarm) {
+  function renderAutonomySwarm(swarm) {
     const host = $("dash-autonomy");
     if (!host) return;
     const workers = (swarm && swarm.workers) || [];
