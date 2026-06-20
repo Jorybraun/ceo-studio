@@ -519,9 +519,12 @@
     if (!ceo.autonomySwarm) return;
     const host = $("dash-autonomy");
     if (!host) return;
+    stopSwarmPoll();
     host.innerHTML = '<div class="text-neutral-600 text-sm">Loading swarm status...</div>';
     await refreshSwarm();
-    swarmPollTimer = setInterval(refreshSwarm, 5000);
+    if (currentTab === "autonomy") {
+      swarmPollTimer = setInterval(refreshSwarm, 5000);
+    }
   }
 
   async function refreshSwarm() {
@@ -726,6 +729,11 @@
     refreshStatus();
     clearInterval(refreshTimer);
     refreshTimer = setInterval(refresh, 4000);
+    switchTab(currentTab);
+    if (activeMeetingRoom && currentTab === "meetings") {
+      stopMeetingPoll();
+      meetingPollTimer = setInterval(pollMeetingRoom, 2500);
+    }
   }
   function hide() {
     open = false;
